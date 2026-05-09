@@ -17,6 +17,7 @@ class FakeDatabase:
         self.user_devices: Dict[str, List[str]] = {}  # user_id -> list of device_ids
         self.roms: Dict[str, list] = {}  # device_id -> list of roms
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
+        self.device_actions: Dict[str, list] = {}  # internal device_id -> queued actions
     
     # User operations
     def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None) -> str:
@@ -117,6 +118,7 @@ class FakeDatabase:
         self.user_devices[user_id].append(internal_id)
         self.roms[internal_id] = []
         self.gamelogs[internal_id] = []
+        self.device_actions[internal_id] = []
         return internal_id
     
     def get_device(self, internal_id: str) -> Optional[dict]:
@@ -158,11 +160,64 @@ class FakeDatabase:
         self.devices.pop(internal_id, None)
         self.roms.pop(internal_id, None)
         self.gamelogs.pop(internal_id, None)
+        self.device_actions.pop(internal_id, None)
         self.user_devices[user_id] = [
             did for did in self.user_devices.get(user_id, [])
             if did != internal_id
         ]
         return True
+
+    def create_device_action(self, user_id: str, device_id: str, action_type: str) -> Optional[dict]:
+        """Queue an action for a user's device."""
+        device = self.get_device_by_device_id(device_id)
+        if not device or device["user_id"] != user_id:
+            return None
+
+        internal_id = device["id"]
+        action = {
+            "id": str(uuid.uuid4()),
+            "device_id": device_id,
+            "action": action_type,
+            "status": "pending",
+            "created_at": datetime.utcnow(),
+            "claimed_at": None,
+            "completed_at": None,
+            "message": None,
+        }
+        self.device_actions.setdefault(internal_id, []).append(action)
+        return action
+
+    def get_device_actions(self, user_id: str, device_id: str) -> Optional[List[dict]]:
+        """Get actions for a user's device."""
+        device = self.get_device_by_device_id(device_id)
+        if not device or device["user_id"] != user_id:
+            return None
+        return list(reversed(self.device_actions.get(device["id"], [])))
+
+    def claim_next_device_action(self, device_id: str) -> Optional[dict]:
+        """Claim the oldest pending action for a device."""
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        for action in self.device_actions.get(device["id"], []):
+            if action.get("status") == "pending":
+                action["status"] = "in_progress"
+                action["claimed_at"] = datetime.utcnow()
+                return action
+        return None
+
+    def complete_device_action(self, device_id: str, action_id: str, status: str, message: Optional[str] = None) -> Optional[dict]:
+        """Mark an action completed or failed."""
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        for action in self.device_actions.get(device["id"], []):
+            if action.get("id") == action_id:
+                action["status"] = status
+                action["completed_at"] = datetime.utcnow()
+                action["message"] = message
+                return action
+        return None
     
     def device_exists(self, user_id: str, device_id: str) -> bool:
         """Check if device exists for user."""

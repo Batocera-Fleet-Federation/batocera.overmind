@@ -20,6 +20,7 @@ def client():
     db.user_devices.clear()
     db.roms.clear()
     db.gamelogs.clear()
+    db.device_actions.clear()
     return TestClient(app)
 
 
@@ -238,6 +239,43 @@ def test_delete_device_removes_device_and_related_data(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert detail_response.status_code == 404
+
+
+def test_device_action_lifecycle(client):
+    db.populate_fake_data()
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    )
+    token = login_response.json()["access_token"]
+
+    create_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "restart"},
+    )
+    assert create_response.status_code == 200
+    action_id = create_response.json()["action"]["id"]
+
+    claim_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions/claim",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    )
+    assert claim_response.status_code == 200
+    assert claim_response.json()["action"]["id"] == action_id
+    assert claim_response.json()["action"]["status"] == "in_progress"
+
+    complete_response = client.post(
+        f"/api/devices/arcade-cabinet-001/actions/{action_id}/complete",
+        json={
+            "email": "demo@example.com",
+            "password": "DemoPass123",
+            "status": "completed",
+            "message": "Restart scheduled",
+        },
+    )
+    assert complete_response.status_code == 200
+    assert complete_response.json()["action"]["status"] == "completed"
 
 
 def test_profile_and_settings_update(client):

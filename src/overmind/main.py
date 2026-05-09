@@ -274,6 +274,72 @@ async def delete_device(device_id: str, authorization: Optional[str] = Header(de
     return {"message": "Device deleted successfully", "device_id": device_id}
 
 
+@app.get("/api/devices/{device_id}/actions")
+async def list_device_actions(device_id: str, authorization: Optional[str] = Header(default=None)):
+    """List actions for a device."""
+    user = get_current_user(authorization)
+    actions = db.get_device_actions(user["id"], device_id)
+    if actions is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"actions": actions}
+
+
+@app.post("/api/devices/{device_id}/actions")
+async def create_device_action(
+    device_id: str,
+    payload: dict,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Queue a remote action for a device."""
+    user = get_current_user(authorization)
+    action_type = str(payload.get("action") or "").strip().lower()
+    if action_type == "reboot":
+        action_type = "restart"
+    if action_type not in {"shutdown", "restart", "update"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported action")
+    action = db.create_device_action(user["id"], device_id, action_type)
+    if not action:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"action": action}
+
+
+def verify_device_credentials(payload: dict) -> dict:
+    """Verify drone-supplied Overmind credentials."""
+    email = str(payload.get("email") or "").strip()
+    password = str(payload.get("password") or "")
+    user = db.get_user_by_email(email)
+    if not user or not auth.verify_password(password, user["password"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    return user
+
+
+@app.post("/api/devices/{device_id}/actions/claim")
+async def claim_device_action(device_id: str, payload: dict):
+    """Claim the next pending action for a polling drone."""
+    user = verify_device_credentials(payload)
+    device = db.get_device_by_device_id(device_id)
+    if not device or device["user_id"] != user["id"]:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    action = db.claim_next_device_action(device_id)
+    return {"action": action}
+
+
+@app.post("/api/devices/{device_id}/actions/{action_id}/complete")
+async def complete_device_action(device_id: str, action_id: str, payload: dict):
+    """Mark a claimed device action completed or failed."""
+    user = verify_device_credentials(payload)
+    device = db.get_device_by_device_id(device_id)
+    if not device or device["user_id"] != user["id"]:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    result_status = str(payload.get("status") or "").strip().lower()
+    if result_status not in {"completed", "failed"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="status must be completed or failed")
+    action = db.complete_device_action(device_id, action_id, result_status, payload.get("message"))
+    if not action:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found")
+    return {"action": action}
+
+
 @app.get("/api/profile")
 async def get_profile(authorization: Optional[str] = Header(default=None)):
     """Get profile and user settings."""
@@ -1192,17 +1258,11 @@ def get_ui_html() -> str:
                         <div class="menu-label mb-2">Navigation</div>
                         <div class="d-grid gap-1 nav-actions">
                             <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); switchTab('devices', this)"><i class="bi bi-hdd-network me-2"></i>Devices</a>
-                            <a href="#/profile" role="button" class="btn nav-btn requires-auth profile-nav-btn" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)">
-                                <span class="profile-chip me-2" aria-hidden="true">
-                                    <img id="avatar-top-right" class="avatar-top-right" alt="" />
-                                    <span id="avatar-fallback" class="avatar-fallback"><i class="bi bi-person"></i></span>
-                                </span>
-                                <span>Profile</span>
-                            </a>
                             <a href="#/fleet" role="button" class="btn nav-btn requires-auth" data-tab="fleet" onclick="event.preventDefault(); switchTab('fleet', this)"><i class="bi bi-sliders me-2"></i>Fleet Settings</a>
                             <a href="#/notifications" role="button" class="btn nav-btn requires-auth" data-tab="notifications" onclick="event.preventDefault(); switchTab('notifications', this)"><i class="bi bi-bell me-2"></i>Notifications</a>
                             <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-github me-2"></i>GitHub</a>
                             <a href="/docs" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-braces me-2"></i>API Docs</a>
+                            <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i>Profile</a>
                             <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
                         </div>
                     </div>
@@ -1292,14 +1352,30 @@ def get_ui_html() -> str:
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="gamelogs" onclick="switchDeviceView('gamelogs', this)">
                                                 <i class="bi bi-clock-history me-1"></i>Game Logs
                                             </button>
+                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="actions" onclick="switchDeviceView('actions', this)">
+                                                <i class="bi bi-lightning-charge me-1"></i>Actions
+                                            </button>
                                         </div>
                                     </div>
                                 </div>
                                 <div id="device-systems-panel" class="device-subpanel">
+                                    <div class="mb-3">
+                                        <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
+                                        <input id="device-rom-search" class="form-control" type="search" placeholder="Type to filter systems and ROMs" oninput="handleDeviceRomSearch(event)">
+                                    </div>
                                     <div id="systems-list"></div>
                                 </div>
                                 <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">
                                     <div id="gamelogs-list"></div>
+                                </div>
+                                <div id="device-actions-panel" class="device-subpanel" style="display:none;">
+                                    <div class="d-flex flex-wrap gap-2 mb-3">
+                                        <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('shutdown')"><i class="bi bi-power me-1"></i>Shutdown</button>
+                                        <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Restart</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('update')"><i class="bi bi-download me-1"></i>Update</button>
+                                        <button class="btn btn-outline-secondary btn-sm" onclick="loadDeviceActions()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                                    </div>
+                                    <div id="actions-list"></div>
                                 </div>
                             </div>
                         </div>
@@ -1356,7 +1432,8 @@ def get_ui_html() -> str:
                                 </label>
                                 <div class="form-group">
                                     <label>Email Address</label>
-                                    <input type="email" id="notify-email-address" placeholder="name@example.com">
+                                    <input type="email" id="notify-email-address" placeholder="name@example.com" disabled readonly>
+                                    <div class="small text-muted mt-1">Uses the logged-in account email.</div>
                                 </div>
 
                                 <div class="form-group">
@@ -1392,6 +1469,10 @@ def get_ui_html() -> str:
             let selectedDeviceId = null;
             let currentTab = 'devices';
             let currentDeviceView = 'systems';
+            let currentDeviceSystems = {};
+            let deviceRomSearchQuery = '';
+            let systemPageState = {};
+            const ROMS_PER_PAGE = 20;
             const pageMeta = {
                 auth: ['Login', 'Access your fleet'],
                 devices: ['Devices', 'Systems and ROMs'],
@@ -1563,16 +1644,6 @@ def get_ui_html() -> str:
             function renderProfileUI() {
                 if (!currentProfile) return;
                 document.getElementById('profile-name-input').value = currentProfile.full_name || '';
-                const avatar = document.getElementById('avatar-top-right');
-                const fallback = document.getElementById('avatar-fallback');
-                if (currentProfile.avatar_data_url) {
-                    avatar.src = currentProfile.avatar_data_url;
-                    avatar.style.display = 'block';
-                    fallback.style.display = 'none';
-                } else {
-                    avatar.style.display = 'none';
-                    fallback.style.display = 'inline-flex';
-                }
 
                 document.getElementById('fleet-auto-sync-roms').checked = !!(currentProfile.fleet_settings || {}).auto_sync_roms;
                 const ns = currentProfile.notification_settings || {};
@@ -1581,7 +1652,7 @@ def get_ui_html() -> str:
                 document.getElementById('notify-email').checked = !!ns.notify_email;
                 document.getElementById('notify-slack-webhook').value = ns.slack_webhook || '';
                 document.getElementById('notify-discord-webhook').value = ns.discord_webhook || '';
-                document.getElementById('notify-email-address').value = ns.email_address || currentProfile.email || '';
+                document.getElementById('notify-email-address').value = currentProfile.email || '';
                 const types = ns.types || {};
                 document.getElementById('notify-type-gamelist-update').checked = !!types.gamelist_update;
                 document.getElementById('notify-type-device-offline').checked = !!types.device_offline;
@@ -1595,7 +1666,7 @@ def get_ui_html() -> str:
                 const emailEnabled = document.getElementById('notify-email').checked;
                 document.getElementById('notify-slack-webhook').disabled = !slackEnabled;
                 document.getElementById('notify-discord-webhook').disabled = !discordEnabled;
-                document.getElementById('notify-email-address').disabled = !emailEnabled;
+                document.getElementById('notify-email-address').disabled = true;
             }
 
             async function handleAvatarSelected(event) {
@@ -1648,7 +1719,7 @@ def get_ui_html() -> str:
                             notify_email: document.getElementById('notify-email').checked,
                             slack_webhook: document.getElementById('notify-slack-webhook').value.trim(),
                             discord_webhook: document.getElementById('notify-discord-webhook').value.trim(),
-                            email_address: document.getElementById('notify-email-address').value.trim(),
+                            email_address: currentProfile.email || '',
                             types: {
                                 gamelist_update: document.getElementById('notify-type-gamelist-update').checked,
                                 device_offline: document.getElementById('notify-type-device-offline').checked,
@@ -1721,6 +1792,9 @@ def get_ui_html() -> str:
             function selectDevice(deviceId) {
                 selectedDeviceId = deviceId;
                 currentDeviceView = 'systems';
+                currentDeviceSystems = {};
+                systemPageState = {};
+                deviceRomSearchQuery = '';
                 displayDevices();
                 updateSelectedDeviceSummary();
                 updateSelectedDeviceWorkspace();
@@ -1771,17 +1845,41 @@ def get_ui_html() -> str:
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/roms`);
                     if (!response.ok) throw new Error('Failed to load device systems');
                     const data = await response.json();
-                    displaySystemsTree(data.systems || {});
+                    currentDeviceSystems = data.systems || {};
+                    displaySystemsTree();
                 } catch (error) {
                     console.error('Error loading systems:', error);
                 }
             }
 
-            function displaySystemsTree(systems) {
+            function handleDeviceRomSearch(event) {
+                deviceRomSearchQuery = (event.target.value || '').trim().toLowerCase();
+                systemPageState = {};
+                displaySystemsTree();
+            }
+
+            function setSystemPage(systemName, page) {
+                systemPageState[systemName] = Math.max(1, page);
+                displaySystemsTree();
+            }
+
+            function filteredSystemEntries() {
+                const query = deviceRomSearchQuery;
+                return Object.entries(currentDeviceSystems).reduce((entries, [systemName, roms]) => {
+                    const systemMatches = systemName.toLowerCase().includes(query);
+                    const filteredRoms = !query || systemMatches
+                        ? roms
+                        : roms.filter(rom => String(rom.rom_name || '').toLowerCase().includes(query));
+                    if (!query || systemMatches || filteredRoms.length) entries.push([systemName, filteredRoms]);
+                    return entries;
+                }, []);
+            }
+
+            function displaySystemsTree() {
                 const container = document.getElementById('systems-list');
-                const entries = Object.entries(systems);
+                const entries = filteredSystemEntries();
                 if (!entries.length) {
-                    container.innerHTML = '<div class="empty-state">No systems found yet.</div>';
+                    container.innerHTML = '<div class="empty-state">No systems or ROMs matched your search.</div>';
                     return;
                 }
                 entries.sort((a, b) => a[0].localeCompare(b[0]));
@@ -1790,12 +1888,24 @@ def get_ui_html() -> str:
                         ${entries.map(([systemName, roms]) => {
                             const totalBytes = roms.reduce((sum, rom) => sum + Number(rom.file_size || 0), 0);
                             const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
+                            const totalPages = Math.max(1, Math.ceil(roms.length / ROMS_PER_PAGE));
+                            const currentPage = Math.min(systemPageState[systemName] || 1, totalPages);
+                            const start = (currentPage - 1) * ROMS_PER_PAGE;
+                            const pageRoms = roms.slice(start, start + ROMS_PER_PAGE);
                             return `
                                 <details>
                                     <summary>${systemName} (${roms.length} ROMs, ${totalMb} MB)</summary>
                                     <ul class="list-unstyled ms-3 mt-2">
-                                        ${roms.map(rom => `<li class="py-1 border-bottom small">${rom.rom_name}${rom.file_size ? ` <span class="text-muted">(${(rom.file_size / 1024 / 1024).toFixed(2)} MB)</span>` : ''}</li>`).join('')}
+                                        ${pageRoms.map(rom => `<li class="py-1 border-bottom small">${rom.rom_name}${rom.file_size ? ` <span class="text-muted">(${(rom.file_size / 1024 / 1024).toFixed(2)} MB)</span>` : ''}</li>`).join('')}
                                     </ul>
+                                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 ms-3 mt-2 small text-muted">
+                                        <span>Showing ${roms.length ? start + 1 : 0}-${Math.min(start + ROMS_PER_PAGE, roms.length)} of ${roms.length}</span>
+                                        <div class="btn-group btn-group-sm" role="group" aria-label="${systemName} pages">
+                                            <button class="btn btn-outline-secondary" ${currentPage <= 1 ? 'disabled' : ''} onclick="setSystemPage('${systemName.replace(/'/g, "\\'")}', ${currentPage - 1})">Previous</button>
+                                            <button class="btn btn-outline-secondary" disabled>Page ${currentPage} of ${totalPages}</button>
+                                            <button class="btn btn-outline-secondary" ${currentPage >= totalPages ? 'disabled' : ''} onclick="setSystemPage('${systemName.replace(/'/g, "\\'")}', ${currentPage + 1})">Next</button>
+                                        </div>
+                                    </div>
                                 </details>
                             `;
                         }).join('')}
@@ -1829,18 +1939,21 @@ def get_ui_html() -> str:
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = viewName === 'gamelogs' ? 'gamelogs' : 'systems';
+                currentDeviceView = ['gamelogs', 'actions'].includes(viewName) ? viewName : 'systems';
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
                 if (activeBtn) activeBtn.classList.add('active');
 
                 const systemsPanel = document.getElementById('device-systems-panel');
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
+                const actionsPanel = document.getElementById('device-actions-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
+                if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
 
                 if (currentDeviceView === 'systems') loadDeviceSystems();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
+                if (currentDeviceView === 'actions') loadDeviceActions();
                 if (updateUrl) setRoute('devices', selectedDeviceId, currentDeviceView);
             }
 
@@ -1860,7 +1973,7 @@ def get_ui_html() -> str:
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
-                const deviceView = tab === 'devices' && parts[2] === 'gamelogs' ? 'gamelogs' : 'systems';
+                const deviceView = tab === 'devices' && ['gamelogs', 'actions'].includes(parts[2]) ? parts[2] : 'systems';
                 return { tab, deviceId, deviceView };
             }
 
@@ -1876,6 +1989,62 @@ def get_ui_html() -> str:
                 updateSelectedDeviceWorkspace();
                 switchTab(route.tab, null, false);
                 if (selectedDeviceId && route.tab === 'devices') switchDeviceView(currentDeviceView, null, false);
+            }
+
+            async function loadDeviceActions() {
+                const container = document.getElementById('actions-list');
+                if (!selectedDeviceId || !container) return;
+                try {
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/actions`);
+                    if (!response.ok) throw new Error('Failed to load device actions');
+                    const data = await response.json();
+                    const actions = data.actions || [];
+                    if (!actions.length) {
+                        container.innerHTML = '<div class="empty-state">No actions queued yet.</div>';
+                        return;
+                    }
+                    container.innerHTML = actions.map(action => `
+                        <div class="card mb-2 shadow-sm">
+                            <div class="card-body py-2">
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                                    <strong>${action.action}</strong>
+                                    <span class="badge text-bg-secondary">${action.status}</span>
+                                </div>
+                                <div class="small text-muted mt-1">Created: ${action.created_at ? new Date(action.created_at).toLocaleString() : 'n/a'}</div>
+                                ${action.message ? `<div class="small mt-1">${action.message}</div>` : ''}
+                            </div>
+                        </div>
+                    `).join('');
+                } catch (error) {
+                    console.error('Error loading actions:', error);
+                    container.innerHTML = '<div class="empty-state">Unable to load actions.</div>';
+                }
+            }
+
+            async function queueDeviceAction(actionName) {
+                if (!selectedDeviceId) return;
+                const labels = { shutdown: 'shutdown', restart: 'restart', update: 'update' };
+                if (!window.confirm(`Queue ${labels[actionName] || actionName} for this device?`)) return;
+                try {
+                    const response = await fetch(`/api/devices/${selectedDeviceId}/actions`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: JSON.stringify({ action: actionName })
+                    });
+                    if (response.status === 401) {
+                        logout();
+                        showMessage('Session expired. Please log in again.', 'error');
+                        throw new Error('Unauthorized');
+                    }
+                    if (!response.ok) throw new Error('Failed to queue action');
+                    await loadDeviceActions();
+                    showMessage('Action queued.', 'success');
+                } catch (error) {
+                    console.error('Error queuing action:', error);
+                }
             }
 
             async function renameDevicePrompt(deviceId) {
