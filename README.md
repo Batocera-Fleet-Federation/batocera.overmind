@@ -1,6 +1,17 @@
 # Batocera Overmind
 
+**Batocera Overmind** is an integration and automation service for Batocera systems.  
 A comprehensive system management and game tracking API for Batocera gaming systems. This application allows users to register their Batocera devices, track games played, and manage their game collections.
+
+**Main features:**
+
+- **Centralized Management:** Connects multiple Batocera devices for fleet management.
+- **Remote Actions:** Send commands and manage devices from a central dashboard.
+- **Automation:** Schedule and automate tasks like updates, syncs, or maintenance.
+- **Integration with Drone:** Works together with Batocera Drone for enhanced admin and monitoring capabilities.
+- **Action Logging:** Tracks all actions and device responses for easy troubleshooting.
+- **Secure Communication:** Uses authentication and secure connections for device management.
+- **Extensible:** Designed to support future integrations and custom workflows.
 
 ## Features
 
