@@ -1,5 +1,5 @@
 # Batocera Overmind
-![Batocera Fleet Federation](./file_00000000151c71f5ae4dc16686a4cea1.png)
+![Batocera Fleet Federation](./main.jpeg)
 
 **Batocera Overmind** is an integration and automation service for Batocera systems.  
 A comprehensive system management and game tracking API for Batocera gaming systems. This application allows users to register their Batocera devices, track games played, and manage their game collections.
