@@ -1,17 +1,21 @@
 """Main FastAPI application."""
 
 import os
+import secrets
 import subprocess
+import urllib.parse
+import urllib.request
+import json
 from pathlib import Path
-from fastapi import FastAPI, Header, HTTPException, status
-from fastapi.responses import HTMLResponse, Response
+from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import timedelta
 from typing import Optional
 
 from overmind.models import (
     UserRegister, UserLogin, User, DeviceRegister,
-    RomListUpdate, GamePlayLog
+    RomListUpdate, GamePlayLog, SocialAuthRequest
 )
 from overmind.db import db
 from overmind import auth
@@ -65,6 +69,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+OAUTH_PROVIDERS = {
+    "google": {
+        "client_id": "GOOGLE_CLIENT_ID",
+        "client_secret": "GOOGLE_CLIENT_SECRET",
+        "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "user_url": "https://www.googleapis.com/oauth2/v2/userinfo",
+        "scope": "openid email profile",
+    },
+    "github": {
+        "client_id": "GITHUB_CLIENT_ID",
+        "client_secret": "GITHUB_CLIENT_SECRET",
+        "auth_url": "https://github.com/login/oauth/authorize",
+        "token_url": "https://github.com/login/oauth/access_token",
+        "user_url": "https://api.github.com/user",
+        "email_url": "https://api.github.com/user/emails",
+        "scope": "read:user user:email",
+    },
+}
+oauth_states: dict[str, str] = {}
+
+
+def oauth_provider_enabled(provider: str) -> bool:
+    """Return whether a social auth provider has the required ENV VARs."""
+    config = OAUTH_PROVIDERS.get(provider)
+    return bool(config and os.getenv(config["client_id"]) and os.getenv(config["client_secret"]))
+
+
+def get_public_base_url(request: Request) -> str:
+    """Build redirect base URL from ENV or current request."""
+    configured = os.getenv("OAUTH_REDIRECT_BASE_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+    return str(request.base_url).rstrip("/")
+
+
+def build_login_response(user: dict) -> dict:
+    """Create the standard login response for a user."""
+    access_token = auth.create_access_token(
+        data={"sub": user["id"], "email": user["email"]},
+        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "full_name": user["full_name"]
+        }
+    }
+
 
 # ==================== Authentication ====================
 
@@ -100,20 +156,112 @@ async def login(credentials: UserLogin):
             detail="Invalid email or password"
         )
     
-    access_token = auth.create_access_token(
-        data={"sub": user["id"], "email": user["email"]},
-        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    
+    return build_login_response(user)
+
+
+@app.get("/api/auth/providers")
+async def auth_providers():
+    """Return social auth providers enabled by ENV VARs."""
     return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": {
-            "id": user["id"],
-            "email": user["email"],
-            "full_name": user["full_name"]
+        "providers": {
+            provider: oauth_provider_enabled(provider)
+            for provider in OAUTH_PROVIDERS.keys()
         }
     }
+
+
+@app.post("/api/auth/{provider}")
+async def social_auth_dev(provider: str, payload: SocialAuthRequest):
+    """Sign up or log in with a configured social provider.
+
+    This endpoint is useful for local/dev clients that already received a
+    provider-verified email. Browser OAuth uses the start/callback routes below.
+    """
+    if not oauth_provider_enabled(provider):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"{provider} auth is disabled")
+    user = db.get_or_create_social_user(payload.email, payload.full_name, provider)
+    return build_login_response(user)
+
+
+@app.get("/api/auth/{provider}/start")
+async def social_auth_start(provider: str, request: Request):
+    """Redirect to a configured Google or GitHub OAuth screen."""
+    config = OAUTH_PROVIDERS.get(provider)
+    if not config or not oauth_provider_enabled(provider):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not configured")
+
+    state = secrets.token_urlsafe(24)
+    oauth_states[state] = provider
+    redirect_uri = f"{get_public_base_url(request)}/api/auth/{provider}/callback"
+    params = {
+        "client_id": os.getenv(config["client_id"]),
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": config["scope"],
+        "state": state,
+    }
+    if provider == "google":
+        params["access_type"] = "offline"
+        params["prompt"] = "select_account"
+    return RedirectResponse(f"{config['auth_url']}?{urllib.parse.urlencode(params)}")
+
+
+@app.get("/api/auth/{provider}/callback")
+async def social_auth_callback(provider: str, request: Request):
+    """Complete OAuth, create/login the Overlord, and return to the UI."""
+    config = OAUTH_PROVIDERS.get(provider)
+    code = request.query_params.get("code")
+    state_value = request.query_params.get("state")
+    if not config or not oauth_provider_enabled(provider) or not code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth callback")
+    if oauth_states.pop(state_value or "", None) != provider:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth state")
+
+    redirect_uri = f"{get_public_base_url(request)}/api/auth/{provider}/callback"
+    token_payload = urllib.parse.urlencode({
+        "client_id": os.getenv(config["client_id"]),
+        "client_secret": os.getenv(config["client_secret"]),
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }).encode()
+    token_request = urllib.request.Request(
+        config["token_url"],
+        data=token_payload,
+        headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(token_request, timeout=10) as response:
+        token_data = json.loads(response.read().decode())
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provider did not return a token")
+
+    user_request = urllib.request.Request(
+        config["user_url"],
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(user_request, timeout=10) as response:
+        provider_user = json.loads(response.read().decode())
+
+    email = provider_user.get("email")
+    full_name = provider_user.get("name") or provider_user.get("login")
+    if provider == "github" and not email:
+        email_request = urllib.request.Request(
+            config["email_url"],
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(email_request, timeout=10) as response:
+            emails = json.loads(response.read().decode())
+        primary = next((item for item in emails if item.get("primary") and item.get("verified")), None)
+        email = (primary or emails[0]).get("email") if emails else None
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provider did not return an email")
+
+    user = db.get_or_create_social_user(email, full_name, provider)
+    login_data = build_login_response(user)
+    token = urllib.parse.quote(login_data["access_token"])
+    return RedirectResponse(f"/#oauth_token={token}&provider={provider}")
 
 
 async def verify_token(token: str) -> dict:
@@ -165,40 +313,73 @@ def get_current_user(authorization: Optional[str]) -> dict:
 
 @app.post("/api/devices/register")
 async def register_device(device_data: DeviceRegister):
-    """Register a Batocera device. Called by batocera.drone app."""
-    # Verify user
-    user = db.get_user_by_email(device_data.email)
-    if not user or not auth.verify_password(device_data.password, user["password"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
-    
-    # Check if device already registered
-    if db.device_exists(user["id"], device_data.device_id):
+    """Detect a drone attempting to connect to Overmind."""
+    user = None
+    if device_data.email and device_data.password:
+        user = db.get_user_by_email(device_data.email)
+        if not user or not auth.verify_password(device_data.password, user["password"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password"
+            )
+
+    if user and db.device_exists(user["id"], device_data.device_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Device already registered for this user"
+            detail="Drone already registered for this Overlord"
         )
-    
-    # Register device
-    internal_id = db.create_device(
-        user["id"],
+
+    connection = db.create_pending_drone_connection(
         device_data.device_id,
         device_data.device_name,
-        device_data.batocera_info.model_dump()
+        device_data.batocera_info.model_dump(),
+        user["id"] if user else None,
     )
-    
-    device = db.get_device(internal_id)
     return {
-        "message": "Device registered successfully",
+        "message": "Psionic connection detected. Awaiting Overlord approval.",
+        "connection": {
+            "id": connection["id"],
+            "device_id": connection["device_id"],
+            "device_name": connection["device_name"],
+            "detected_at": connection["detected_at"],
+            "last_seen": connection["last_seen"],
+        }
+    }
+
+
+@app.get("/api/drone-connections")
+async def list_drone_connections(authorization: Optional[str] = Header(default=None)):
+    """List pending drone connection attempts for the Overlord."""
+    user = get_current_user(authorization)
+    return {"connections": db.get_pending_drone_connections(user["id"])}
+
+
+@app.post("/api/drone-connections/{device_id}/accept")
+async def accept_drone_connection(device_id: str, authorization: Optional[str] = Header(default=None)):
+    """Accept a pending drone connection."""
+    user = get_current_user(authorization)
+    device = db.accept_pending_drone_connection(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drone connection not found")
+    return {
+        "message": "Drone registered to the Overlord.",
         "device": {
             "id": device["id"],
             "device_id": device["device_id"],
             "device_name": device["device_name"],
-            "registered_at": device["registered_at"]
+            "registered_at": device["registered_at"],
+            "last_seen": device["last_seen"],
         }
     }
+
+
+@app.post("/api/drone-connections/{device_id}/deny")
+async def deny_drone_connection(device_id: str, authorization: Optional[str] = Header(default=None)):
+    """Deny a pending drone connection."""
+    user = get_current_user(authorization)
+    if not db.deny_pending_drone_connection(user["id"], device_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drone connection not found")
+    return {"message": "Drone connection denied.", "device_id": device_id}
 
 
 @app.get("/api/devices")
@@ -975,29 +1156,57 @@ def get_ui_html() -> str:
             }
 
             :root {
-                --admin-bg: #f2f5fa;
-                --admin-surface: #ffffff;
-                --admin-surface-muted: #f8f9fc;
-                --admin-border: #e3e6f0;
-                --admin-sidebar: #24406c;
-                --admin-sidebar-accent: #4e73df;
-                --admin-text: #1f2937;
-                --admin-muted: #6b7280;
+                --admin-bg: #101828;
+                --admin-surface: #151f32;
+                --admin-surface-muted: #1f2a44;
+                --admin-border: #31405f;
+                --admin-sidebar: #0b1020;
+                --admin-sidebar-accent: #00c2ff;
+                --admin-accent-hot: #ff3ea5;
+                --admin-accent-coin: #ffbf3f;
+                --admin-accent-green: #34d399;
+                --admin-text: #ecf6ff;
+                --admin-muted: #9fb0c9;
             }
 
             body {
-                background: radial-gradient(circle at top right, #dbe6ff 0%, #f2f5fa 45%, #eef2f8 100%);
+                background:
+                    linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px),
+                    #101828;
+                background-attachment: fixed;
+                background-size: 42px 42px, 42px 42px, cover;
                 color: var(--admin-text);
                 font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             }
+            body::before {
+                content: "";
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+                z-index: 0;
+                background: repeating-linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.035) 1px, transparent 1px, transparent 4px);
+                opacity: 0.35;
+            }
 
-            .layout-shell { min-height: 100vh; }
+            .layout-shell {
+                min-height: 100vh;
+                position: relative;
+                z-index: 1;
+            }
+            .layout-shell > .row { flex-direction: column; }
+            .layout-shell aside,
+            .layout-shell main {
+                width: 100%;
+                max-width: 100%;
+                flex: 0 0 auto;
+            }
 
             .sidebar {
-                background: linear-gradient(180deg, #224abe 0%, var(--admin-sidebar) 100%);
+                background: linear-gradient(90deg, #111936 0%, var(--admin-sidebar) 100%);
                 color: #fff;
-                min-height: 100vh;
-                border-right: 1px solid rgba(255, 255, 255, 0.14);
+                min-height: auto;
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 box-shadow: 0 0.15rem 1rem rgba(0, 0, 0, 0.14);
             }
 
@@ -1010,8 +1219,9 @@ def get_ui_html() -> str:
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
-                background: rgba(255, 255, 255, 0.14);
-                border: 1px solid rgba(255, 255, 255, 0.24);
+                background: rgba(0, 194, 255, 0.15);
+                border: 1px solid rgba(0, 194, 255, 0.55);
+                box-shadow: 0 0 18px rgba(0, 194, 255, 0.24);
             }
 
             .menu-label {
@@ -1043,18 +1253,20 @@ def get_ui_html() -> str:
             }
 
             .topbar {
-                background: var(--admin-surface);
+                background: rgba(21, 31, 50, 0.86);
                 border: 1px solid var(--admin-border);
                 border-radius: 0.75rem;
                 box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
                 min-height: 4.1rem;
+                backdrop-filter: blur(10px);
             }
 
             .app-shell {
-                background: var(--admin-surface);
+                background: rgba(21, 31, 50, 0.84);
                 border: 1px solid var(--admin-border);
                 border-radius: 0.75rem;
                 box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
+                backdrop-filter: blur(10px);
             }
 
             .app-container {
@@ -1104,19 +1316,19 @@ def get_ui_html() -> str:
                 cursor: pointer;
                 padding: 0;
                 color: var(--admin-text);
-                background: var(--admin-surface) !important;
+                background: rgba(21, 31, 50, 0.9) !important;
                 border: 1px solid var(--admin-border) !important;
                 border-radius: 0.5rem;
                 transition: border-color 0.15s ease, box-shadow 0.15s ease;
             }
             .device-tile:hover,
             .device-tile.active {
-                border-color: #b4c7fb !important;
-                box-shadow: 0 0.2rem 1rem rgba(78, 115, 223, 0.14) !important;
+                border-color: var(--admin-sidebar-accent) !important;
+                box-shadow: 0 0.2rem 1rem rgba(0, 194, 255, 0.18) !important;
                 transform: none !important;
             }
             .device-tile.active {
-                background: #f7f9ff !important;
+                background: rgba(0, 194, 255, 0.12) !important;
             }
             .device-detail-view {
                 margin-bottom: 0;
@@ -1126,16 +1338,20 @@ def get_ui_html() -> str:
             .text-muted { color: var(--admin-muted) !important; }
             .card-title, .fw-semibold, h1, h2, h3, h4, h5 { color: var(--admin-text); }
             .card, .device-card, .info-item, .tree-view details, input[type="text"], input[type="email"], input[type="password"], textarea {
-                background: var(--admin-surface);
+                background: rgba(21, 31, 50, 0.9);
                 border-color: var(--admin-border);
+                color: var(--admin-text);
             }
             input[type="text"]:focus,
             input[type="email"]:focus,
             input[type="password"]:focus,
             textarea:focus {
-                border-color: #9bb3f5;
-                box-shadow: 0 0 0 0.2rem rgba(78, 115, 223, 0.2);
+                background: rgba(21, 31, 50, 0.98);
+                color: var(--admin-text);
+                border-color: var(--admin-sidebar-accent);
+                box-shadow: 0 0 0 0.18rem rgba(0, 194, 255, 0.18);
             }
+            input::placeholder { color: #73849e; }
 
             .btn {
                 transform: none !important;
@@ -1149,22 +1365,29 @@ def get_ui_html() -> str:
             button.btn-primary {
                 background: var(--admin-sidebar-accent) !important;
                 border-color: var(--admin-sidebar-accent) !important;
-                color: #fff !important;
+                color: #06111f !important;
+                font-weight: 800;
             }
             .btn-primary:hover,
             button.btn-primary:hover {
-                background: #2e59d9 !important;
-                border-color: #2e59d9 !important;
+                background: var(--admin-accent-hot) !important;
+                border-color: var(--admin-accent-hot) !important;
+                color: #fff !important;
             }
             .btn-outline-secondary, .btn-outline-primary {
-                color: #4b5563;
+                color: #c8d7ee;
                 border-color: var(--admin-border);
-                background: var(--admin-surface) !important;
+                background: rgba(21, 31, 50, 0.9) !important;
+            }
+            .btn-outline-secondary:hover, .btn-outline-primary:hover {
+                background: rgba(0, 194, 255, 0.12) !important;
+                border-color: var(--admin-sidebar-accent) !important;
+                color: #fff !important;
             }
             .btn-outline-danger {
                 color: #b42318 !important;
                 border-color: #f1b7b2 !important;
-                background: var(--admin-surface) !important;
+                background: rgba(21, 31, 50, 0.9) !important;
             }
             .btn-outline-danger:hover {
                 color: #fff !important;
@@ -1205,7 +1428,7 @@ def get_ui_html() -> str:
                 padding: 0;
                 border: 1px solid var(--admin-border);
                 border-radius: 50%;
-                color: #9aa3b2;
+                color: var(--admin-muted);
                 transform: none !important;
                 box-shadow: none !important;
             }
@@ -1219,18 +1442,35 @@ def get_ui_html() -> str:
             }
             .avatar-fallback {
                 background: transparent;
-                color: #9aa3b2;
+                color: var(--admin-muted);
                 font-size: 1rem;
             }
             .empty-state {
-                background: var(--admin-surface-muted);
+                background: rgba(31, 42, 68, 0.86);
                 border: 1px dashed var(--admin-border);
                 border-radius: 0.5rem;
                 color: var(--admin-muted);
             }
             footer {
-                background: var(--admin-surface);
+                background: transparent;
                 border-color: var(--admin-border);
+            }
+            .connection-panel {
+                background: rgba(0, 194, 255, 0.1);
+                border: 1px solid rgba(0, 194, 255, 0.36);
+                border-radius: 0.5rem;
+                padding: 1rem;
+                margin-bottom: 1rem;
+            }
+            .oauth-grid {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.6rem;
+                margin: 1rem 0;
+            }
+            .oauth-grid .btn:disabled {
+                opacity: 0.42;
+                cursor: not-allowed;
             }
 
             @media (max-width: 991.98px) {
@@ -1247,22 +1487,22 @@ def get_ui_html() -> str:
         <div class="container-fluid layout-shell py-3 py-lg-4">
             <div class="row g-3">
                 <aside class="col-12 col-lg-3 col-xl-2">
-                    <div class="sidebar rounded-3 h-100 p-3">
-                        <div class="brand-block pb-3 mb-3">
+                    <div class="sidebar rounded-3 h-100 p-3 d-flex flex-column flex-lg-row align-items-lg-center gap-3">
+                        <div class="brand-block pb-3 mb-3 pb-lg-0 mb-lg-0 pe-lg-3">
                             <div class="d-flex align-items-center gap-2 mb-1">
                                 <span class="brand-mark"><i class="bi bi-controller"></i></span>
-                                <div class="h5 mb-0 text-white">Batocera Admin</div>
+                                <div class="h5 mb-0 text-white">Batocera Overmind</div>
                             </div>
-                            <div class="small text-white-50">Systems and ROMs</div>
+                            <div class="small text-white-50">Overlord command console</div>
                         </div>
-                        <div class="menu-label mb-2">Navigation</div>
-                        <div class="d-grid gap-1 nav-actions">
-                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); switchTab('devices', this)"><i class="bi bi-hdd-network me-2"></i>Devices</a>
-                            <a href="#/fleet" role="button" class="btn nav-btn requires-auth" data-tab="fleet" onclick="event.preventDefault(); switchTab('fleet', this)"><i class="bi bi-sliders me-2"></i>Fleet Settings</a>
+                        <div class="menu-label mb-2 d-lg-none">Navigation</div>
+                        <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
+                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); switchTab('devices', this)"><i class="bi bi-hdd-network me-2"></i>Drones</a>
+                            <a href="#/fleet" role="button" class="btn nav-btn requires-auth" data-tab="fleet" onclick="event.preventDefault(); switchTab('fleet', this)"><i class="bi bi-sliders me-2"></i>Swarm Settings</a>
                             <a href="#/notifications" role="button" class="btn nav-btn requires-auth" data-tab="notifications" onclick="event.preventDefault(); switchTab('notifications', this)"><i class="bi bi-bell me-2"></i>Notifications</a>
                             <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-github me-2"></i>GitHub</a>
                             <a href="/docs" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-braces me-2"></i>API Docs</a>
-                            <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i>Profile</a>
+                            <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i>Overlord</a>
                             <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
                         </div>
                     </div>
@@ -1276,7 +1516,11 @@ def get_ui_html() -> str:
                         
                         <!-- Login Form -->
                         <div id="login-form">
-                            <h2>Login</h2>
+                            <h2>Overlord Login</h2>
+                            <div class="oauth-grid">
+                                <button id="google-login-btn" class="btn btn-outline-primary" type="button" onclick="startOAuth('google')" disabled><i class="bi bi-google me-1"></i>Google</button>
+                                <button id="github-login-btn" class="btn btn-outline-primary" type="button" onclick="startOAuth('github')" disabled><i class="bi bi-github me-1"></i>GitHub</button>
+                            </div>
                             <form onsubmit="handleLogin(event)">
                                 <div class="form-group">
                                     <label>Email</label>
@@ -1286,35 +1530,39 @@ def get_ui_html() -> str:
                                     <label>Password</label>
                                     <input type="password" id="login-password" required>
                                 </div>
-                                <button class="btn btn-primary" type="submit">Login</button>
+                                <button class="btn btn-primary" type="submit">Log In</button>
                             </form>
                             <div class="toggle-form">
                                 Don't have an account?
-                                <button onclick="toggleAuthForm()">Register</button>
+                                <button onclick="toggleAuthForm()">Sign up</button>
                             </div>
                         </div>
                         
                         <!-- Register Form -->
                         <div id="register-form" style="display: none;">
-                            <h2>Register</h2>
+                            <h2>Overlord Sign Up</h2>
+                            <div class="oauth-grid">
+                                <button id="google-register-btn" class="btn btn-outline-primary" type="button" onclick="startOAuth('google')" disabled><i class="bi bi-google me-1"></i>Google</button>
+                                <button id="github-register-btn" class="btn btn-outline-primary" type="button" onclick="startOAuth('github')" disabled><i class="bi bi-github me-1"></i>GitHub</button>
+                            </div>
                             <form onsubmit="handleRegister(event)">
                                 <div class="form-group">
                                     <label>Email</label>
                                     <input type="email" id="register-email" required>
                                 </div>
                                 <div class="form-group">
-                                    <label>Full Name (optional)</label>
+                                    <label>Overlord Name (optional)</label>
                                     <input type="text" id="register-name">
                                 </div>
                                 <div class="form-group">
                                     <label>Password (min. 8 characters)</label>
                                     <input type="password" id="register-password" minlength="8" required>
                                 </div>
-                                <button class="btn btn-primary" type="submit">Register</button>
+                                <button class="btn btn-primary" type="submit">Sign Up</button>
                             </form>
                             <div class="toggle-form">
                                 Already have an account?
-                                <button onclick="toggleAuthForm()">Login</button>
+                                <button onclick="toggleAuthForm()">Log in</button>
                             </div>
                         </div>
                     </div>
@@ -1326,26 +1574,27 @@ def get_ui_html() -> str:
                     <section class="dashboard-content">
                         <div id="devices-tab" class="content-section dashboard-tab active">
                             <div id="device-list-view">
-                                <h3>Your Devices</h3>
+                                <div id="pending-connections"></div>
+                                <h3>Your Drones</h3>
                                 <div id="devices-list"></div>
                             </div>
                             <div id="selected-device-workspace" class="device-card device-detail-view" style="display: none;">
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
                                     <div>
-                                        <h4 id="selected-device-title" class="h5 mb-1">Selected Device</h4>
+                                        <h4 id="selected-device-title" class="h5 mb-1">Selected Drone</h4>
                                         <div id="selected-device-id" class="small text-muted"></div>
                                     </div>
                                     <div class="d-flex flex-wrap align-items-center gap-2">
                                         <button class="btn btn-outline-secondary btn-sm" onclick="backToDevices()">
-                                            <i class="bi bi-arrow-left me-1"></i>Devices
+                                            <i class="bi bi-arrow-left me-1"></i>Drones
                                         </button>
                                         <button class="btn btn-outline-secondary btn-sm" onclick="renameDevicePrompt(selectedDeviceId)">
                                             <i class="bi bi-pencil me-1"></i>Rename
                                         </button>
                                         <button class="btn btn-outline-danger btn-sm" onclick="deleteSelectedDevice()">
-                                            <i class="bi bi-trash me-1"></i>Delete
+                                            <i class="bi bi-plug-x me-1"></i>Disconnect
                                         </button>
-                                        <div class="btn-group" role="group" aria-label="Device views">
+                                        <div class="btn-group" role="group" aria-label="Drone views">
                                             <button class="btn btn-outline-primary btn-sm device-view-btn active" data-device-view="systems" onclick="switchDeviceView('systems', this)">
                                                 <i class="bi bi-grid me-1"></i>Systems
                                             </button>
@@ -1381,29 +1630,29 @@ def get_ui_html() -> str:
                         </div>
 
                         <div id="profile-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>Profile</h3>
+                            <h3>Overlord Profile</h3>
                             <div class="device-card">
                                 <div class="form-group">
                                     <label>Avatar</label>
                                     <input type="file" id="profile-avatar-input" accept="image/*" onchange="handleAvatarSelected(event)">
                                 </div>
                                 <div class="form-group">
-                                    <label>Name</label>
-                                    <input type="text" id="profile-name-input" placeholder="Your display name">
+                                    <label>Overlord Name</label>
+                                    <input type="text" id="profile-name-input" placeholder="Your Overlord name">
                                 </div>
                                 <button class="btn btn-primary" onclick="saveProfile()">Save Profile</button>
                             </div>
                         </div>
 
                         <div id="fleet-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>Fleet Settings</h3>
+                            <h3>Swarm Settings</h3>
                             <div class="device-card">
                                 <label style="display:flex; gap:10px; align-items:center;">
                                     <input type="checkbox" id="fleet-auto-sync-roms">
-                                    Auto-sync ROMs
+                                    Auto-sync ROMs from Drones
                                 </label>
                                 <div style="margin-top: 14px;">
-                                    <button class="btn btn-primary" onclick="saveFleetSettings()">Save Fleet Settings</button>
+                                    <button class="btn btn-primary" onclick="saveFleetSettings()">Save Swarm Settings</button>
                                 </div>
                             </div>
                         </div>
@@ -1442,7 +1691,7 @@ def get_ui_html() -> str:
                                         <input type="checkbox" id="notify-type-gamelist-update"> Gamelist update
                                     </label>
                                     <label style="display:flex; gap:10px; align-items:center;">
-                                        <input type="checkbox" id="notify-type-device-offline"> Device offline
+                                        <input type="checkbox" id="notify-type-device-offline"> Drone offline
                                     </label>
                                     <label style="display:flex; gap:10px; align-items:center;">
                                         <input type="checkbox" id="notify-type-sync-failure"> Sync failure
@@ -1455,7 +1704,7 @@ def get_ui_html() -> str:
                     </section>
                 </div>
                         <footer class="mt-4 pt-3 border-top text-muted small">
-                            Batocera Overmind centralized API console
+                            Batocera Overmind centralized command console
                         </footer>
                     </div>
                 </main>
@@ -1466,28 +1715,33 @@ def get_ui_html() -> str:
             let currentUser = null;
             let currentProfile = null;
             let currentDevices = [];
+            let pendingConnections = [];
             let selectedDeviceId = null;
             let currentTab = 'devices';
             let currentDeviceView = 'systems';
             let currentDeviceSystems = {};
             let deviceRomSearchQuery = '';
             let systemPageState = {};
+            let pendingConnectionTimer = null;
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
-                auth: ['Login', 'Access your fleet'],
-                devices: ['Devices', 'Systems and ROMs'],
-                profile: ['Profile', 'Account settings'],
-                fleet: ['Fleet Settings', 'Sync preferences'],
+                auth: ['Overlord Login', 'Access the Overmind'],
+                devices: ['Drones', 'Systems and ROMs'],
+                profile: ['Overlord', 'Account settings'],
+                fleet: ['Swarm Settings', 'Sync preferences'],
                 notifications: ['Notifications', 'Delivery preferences'],
             };
 
             document.addEventListener('DOMContentLoaded', () => {
+                loadAuthProviders();
+                handleOAuthReturn();
                 const token = localStorage.getItem('auth_token');
                 if (token) {
                     authToken = token;
                     showDashboard();
                     loadProfile();
                     loadDevices();
+                    loadPendingConnections();
                 } else {
                     setPageChrome('auth');
                 }
@@ -1542,6 +1796,42 @@ def get_ui_html() -> str:
                 return response;
             }
 
+            async function loadAuthProviders() {
+                try {
+                    const response = await fetch('/api/auth/providers');
+                    const data = await response.json();
+                    const providers = data.providers || {};
+                    ['google', 'github'].forEach(provider => {
+                        ['login', 'register'].forEach(form => {
+                            const btn = document.getElementById(`${provider}-${form}-btn`);
+                            if (!btn) return;
+                            btn.disabled = !providers[provider];
+                            btn.title = providers[provider]
+                                ? `Continue with ${provider}`
+                                : `Set ${provider.toUpperCase()}_CLIENT_ID and ${provider.toUpperCase()}_CLIENT_SECRET to enable`;
+                        });
+                    });
+                } catch (error) {
+                    console.error('Error loading auth providers:', error);
+                }
+            }
+
+            function startOAuth(provider) {
+                window.location.href = `/api/auth/${provider}/start`;
+            }
+
+            function handleOAuthReturn() {
+                const hash = window.location.hash || '';
+                if (!hash.startsWith('#oauth_token=')) return;
+                const params = new URLSearchParams(hash.slice(1));
+                const token = params.get('oauth_token');
+                if (!token) return;
+                authToken = token;
+                localStorage.setItem('auth_token', authToken);
+                window.location.hash = '#/devices';
+                showMessage('Overlord authenticated.', 'success');
+            }
+
             async function handleLogin(e) {
                 e.preventDefault();
                 const email = document.getElementById('login-email').value;
@@ -1562,7 +1852,8 @@ def get_ui_html() -> str:
                     showDashboard();
                     await loadProfile();
                     await loadDevices();
-                    showMessage('Login successful!', 'success');
+                    await loadPendingConnections();
+                    showMessage('Overlord authenticated.', 'success');
                 } catch (error) {
                     showMessage('Login failed: ' + error.message, 'error');
                 } finally {
@@ -1587,7 +1878,7 @@ def get_ui_html() -> str:
                         const error = await response.json();
                         throw new Error(error.detail || 'Registration failed');
                     }
-                    showMessage('Registration successful! Please login.', 'success');
+                    showMessage('Overlord created. Please log in.', 'success');
                     setTimeout(() => toggleAuthForm(), 500);
                 } catch (error) {
                     showMessage('Registration failed: ' + error.message, 'error');
@@ -1600,8 +1891,11 @@ def get_ui_html() -> str:
                 authToken = null;
                 currentUser = null;
                 currentProfile = null;
+                pendingConnections = [];
                 selectedDeviceId = null;
                 currentDeviceView = 'systems';
+                if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
+                pendingConnectionTimer = null;
                 localStorage.removeItem('auth_token');
                 document.body.classList.remove('is-authenticated');
                 document.getElementById('auth-section').classList.add('active');
@@ -1621,6 +1915,12 @@ def get_ui_html() -> str:
                 document.getElementById('auth-section').style.display = 'none';
                 document.getElementById('dashboard-section').style.display = 'block';
                 setPageChrome(currentTab);
+                startPendingConnectionPolling();
+            }
+
+            function startPendingConnectionPolling() {
+                if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
+                pendingConnectionTimer = setInterval(loadPendingConnections, 10000);
             }
 
             function toggleAuthForm() {
@@ -1752,22 +2052,102 @@ def get_ui_html() -> str:
                 }
             }
 
+            async function loadPendingConnections() {
+                if (!authToken) return;
+                try {
+                    const response = await apiGet('/api/drone-connections');
+                    if (!response.ok) throw new Error('Failed to load drone connections');
+                    const data = await response.json();
+                    pendingConnections = data.connections || [];
+                    displayPendingConnections();
+                } catch (error) {
+                    console.error('Error loading drone connections:', error);
+                }
+            }
+
+            function displayPendingConnections() {
+                const container = document.getElementById('pending-connections');
+                if (!container) return;
+                if (!pendingConnections.length) {
+                    container.innerHTML = '';
+                    return;
+                }
+                container.innerHTML = `
+                    <div class="connection-panel">
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                            <div>
+                                <div class="fw-bold"><i class="bi bi-broadcast-pin me-1"></i>Psionic connection detected</div>
+                                <div class="small text-muted">A Drone is requesting control from the Overmind.</div>
+                            </div>
+                            <button class="btn btn-outline-secondary btn-sm" onclick="loadPendingConnections()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                        </div>
+                        ${pendingConnections.map(conn => `
+                            <div class="card mb-2">
+                                <div class="card-body py-2">
+                                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                                        <div>
+                                            <strong>${conn.device_name}</strong>
+                                            <div class="small text-muted">Drone ID: <code>${conn.device_id}</code></div>
+                                            <div class="small text-muted">Detected: ${conn.detected_at ? new Date(conn.detected_at).toLocaleString() : 'now'}</div>
+                                        </div>
+                                        <div class="d-flex gap-2">
+                                            <button class="btn btn-primary btn-sm" onclick="acceptDroneConnection('${conn.device_id}')"><i class="bi bi-check2-circle me-1"></i>Accept</button>
+                                            <button class="btn btn-outline-danger btn-sm" onclick="denyDroneConnection('${conn.device_id}')"><i class="bi bi-x-circle me-1"></i>Deny</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+
+            async function acceptDroneConnection(deviceId) {
+                try {
+                    const response = await fetch(`/api/drone-connections/${deviceId}/accept`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    if (!response.ok) throw new Error('Failed to accept Drone connection');
+                    await loadPendingConnections();
+                    await loadDevices();
+                    showMessage('Drone registered to the Overlord.', 'success');
+                } catch (error) {
+                    console.error('Error accepting Drone connection:', error);
+                }
+            }
+
+            async function denyDroneConnection(deviceId) {
+                if (!window.confirm('Deny this psionic connection?')) return;
+                try {
+                    const response = await fetch(`/api/drone-connections/${deviceId}/deny`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    if (!response.ok) throw new Error('Failed to deny Drone connection');
+                    await loadPendingConnections();
+                    showMessage('Drone connection denied.', 'success');
+                } catch (error) {
+                    console.error('Error denying Drone connection:', error);
+                }
+            }
+
             function updateSelectedDeviceSummary() {
                 const summary = document.getElementById('selected-device-summary');
                 if (!summary) return;
                 summary.style.display = selectedDeviceId ? 'none' : 'block';
                 if (!selectedDeviceId) {
-                    summary.textContent = 'Select a device to view systems, ROMs, and game logs.';
+                    summary.textContent = 'Select a Drone to view systems, ROMs, and game logs.';
                     return;
                 }
                 const device = currentDevices.find(d => d.device_id === selectedDeviceId);
-                summary.textContent = device ? `Selected device: ${device.device_name} (${device.device_id})` : `Selected device: ${selectedDeviceId}`;
+                summary.textContent = device ? `Selected Drone: ${device.device_name} (${device.device_id})` : `Selected Drone: ${selectedDeviceId}`;
             }
 
             function displayDevices() {
                 const container = document.getElementById('devices-list');
                 if (currentDevices.length === 0) {
-                    container.innerHTML = '<div class="empty-state">No devices registered yet</div>';
+                    container.innerHTML = '<div class="empty-state">No Drones registered yet</div>';
                     return;
                 }
                 container.innerHTML = `
@@ -1779,7 +2159,7 @@ def get_ui_html() -> str:
                                         <h5 class="card-title mb-0">${device.device_name}</h5>
                                         <i class="bi bi-hdd-network text-muted"></i>
                                     </div>
-                                    <div class="small text-muted mb-3">Device ID</div>
+                                    <div class="small text-muted mb-3">Drone ID</div>
                                     <code class="small d-block text-break">${device.device_id}</code>
                                     <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
@@ -1805,7 +2185,7 @@ def get_ui_html() -> str:
 
             async function loadGameLogs() {
                 if (!selectedDeviceId) {
-                    document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a device in Devices to view game logs.</div>';
+                    document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a Drone to view game logs.</div>';
                     return;
                 }
                 try {
@@ -1838,7 +2218,7 @@ def get_ui_html() -> str:
 
             async function loadDeviceSystems() {
                 if (!selectedDeviceId) {
-                    document.getElementById('systems-list').innerHTML = '<div class="empty-state">Select a device to view systems.</div>';
+                    document.getElementById('systems-list').innerHTML = '<div class="empty-state">Select a Drone to view systems.</div>';
                     return;
                 }
                 try {
@@ -1927,8 +2307,8 @@ def get_ui_html() -> str:
                 const device = currentDevices.find(d => d.device_id === selectedDeviceId);
                 if (listView) listView.style.display = 'none';
                 workspace.style.display = 'block';
-                if (title) title.textContent = device ? device.device_name : 'Selected Device';
-                if (idNode) idNode.textContent = device ? `Device ID: ${device.device_id}` : `Device ID: ${selectedDeviceId}`;
+                if (title) title.textContent = device ? device.device_name : 'Selected Drone';
+                if (idNode) idNode.textContent = device ? `Drone ID: ${device.device_id}` : `Drone ID: ${selectedDeviceId}`;
             }
 
             function backToDevices() {
@@ -2024,7 +2404,7 @@ def get_ui_html() -> str:
             async function queueDeviceAction(actionName) {
                 if (!selectedDeviceId) return;
                 const labels = { shutdown: 'shutdown', restart: 'restart', update: 'update' };
-                if (!window.confirm(`Queue ${labels[actionName] || actionName} for this device?`)) return;
+                if (!window.confirm(`Queue ${labels[actionName] || actionName} for this Drone?`)) return;
                 try {
                     const response = await fetch(`/api/devices/${selectedDeviceId}/actions`, {
                         method: 'POST',
@@ -2050,7 +2430,7 @@ def get_ui_html() -> str:
             async function renameDevicePrompt(deviceId) {
                 if (!deviceId) return;
                 const current = currentDevices.find(d => d.device_id === deviceId);
-                const nextName = window.prompt('Enter device name:', current ? current.device_name : '');
+                const nextName = window.prompt('Enter Drone name:', current ? current.device_name : '');
                 if (!nextName || !nextName.trim()) return;
                 try {
                     const response = await apiPatch(`/api/devices/${deviceId}/name`, { device_name: nextName.trim() });
@@ -2065,7 +2445,7 @@ def get_ui_html() -> str:
                 if (!selectedDeviceId) return;
                 const current = currentDevices.find(d => d.device_id === selectedDeviceId);
                 const label = current ? current.device_name : selectedDeviceId;
-                if (!window.confirm(`Delete ${label}? This removes the device, ROM list, and game logs from Overmind.`)) return;
+                if (!window.confirm(`Disconnect ${label}? This removes the Drone from this Overlord and it will no longer be controllable.`)) return;
                 try {
                     const response = await apiDelete(`/api/devices/${selectedDeviceId}`);
                     if (!response.ok) throw new Error('Failed to delete device');
@@ -2073,7 +2453,7 @@ def get_ui_html() -> str:
                     currentDeviceView = 'systems';
                     await loadDevices();
                     setRoute('devices', null, 'systems');
-                    showMessage('Device deleted.', 'success');
+                    showMessage('Drone disconnected.', 'success');
                 } catch (error) {
                     console.error('Error deleting device:', error);
                 }
@@ -2152,6 +2532,7 @@ async def startup_event():
         print("✓ Sample data loaded successfully!")
         print("  • 2 demo users")
         print("  • 3 sample devices")
+        print("  • 2 pending drone psionic connections")
         print("  • 10+ sample ROMs")
         print("  • 8 sample game plays")
         print("\n  Demo Credentials:")

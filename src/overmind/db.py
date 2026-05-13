@@ -3,6 +3,7 @@
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
+from overmind import auth
 from overmind.models import User, Device, RomMetadata, GamePlay
 
 
@@ -18,6 +19,7 @@ class FakeDatabase:
         self.roms: Dict[str, list] = {}  # device_id -> list of roms
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
         self.device_actions: Dict[str, list] = {}  # internal device_id -> queued actions
+        self.pending_drone_connections: Dict[str, dict] = {}
     
     # User operations
     def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None) -> str:
@@ -50,6 +52,20 @@ class FakeDatabase:
         self.user_by_email[email] = user_id
         self.user_devices[user_id] = []
         return user_id
+
+    def get_or_create_social_user(self, email: str, full_name: Optional[str], provider: str) -> dict:
+        """Create or return a user authenticated by a configured social provider."""
+        existing = self.get_user_by_email(email)
+        if existing:
+            existing["auth_provider"] = existing.get("auth_provider") or provider
+            if full_name and not existing.get("full_name"):
+                existing["full_name"] = full_name
+            return existing
+
+        user_id = self.create_user(email, auth.hash_password(str(uuid.uuid4())), full_name)
+        user = self.users[user_id]
+        user["auth_provider"] = provider
+        return user
     
     def get_user_by_email(self, email: str) -> Optional[dict]:
         """Get user by email."""
@@ -103,6 +119,76 @@ class FakeDatabase:
         return user
     
     # Device operations
+    def create_pending_drone_connection(
+        self,
+        device_id: str,
+        device_name: str,
+        batocera_info: dict,
+        user_id: Optional[str] = None,
+    ) -> dict:
+        """Record that a drone is attempting to connect to Overmind."""
+        now = datetime.utcnow()
+        existing = self.pending_drone_connections.get(device_id)
+        if existing:
+            existing.update({
+                "device_name": device_name,
+                "batocera_info": batocera_info,
+                "user_id": user_id,
+                "last_seen": now,
+                "status": "pending",
+            })
+            return existing
+
+        connection = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "device_id": device_id,
+            "device_name": device_name,
+            "batocera_info": batocera_info,
+            "detected_at": now,
+            "last_seen": now,
+            "status": "pending",
+        }
+        self.pending_drone_connections[device_id] = connection
+        return connection
+
+    def get_pending_drone_connections(self, user_id: str) -> List[dict]:
+        """Return pending drone connections visible to this user."""
+        visible = [
+            conn for conn in self.pending_drone_connections.values()
+            if conn.get("status") == "pending" and conn.get("user_id") in (None, user_id)
+        ]
+        visible.sort(key=lambda row: row.get("last_seen"), reverse=True)
+        return visible
+
+    def accept_pending_drone_connection(self, user_id: str, device_id: str) -> Optional[dict]:
+        """Accept a pending drone connection and register it to the Overlord."""
+        connection = self.pending_drone_connections.get(device_id)
+        if not connection or connection.get("status") != "pending":
+            return None
+        if connection.get("user_id") not in (None, user_id):
+            return None
+        if self.device_exists(user_id, device_id):
+            self.pending_drone_connections.pop(device_id, None)
+            return self.get_device_by_device_id(device_id)
+
+        internal_id = self.create_device(
+            user_id,
+            connection["device_id"],
+            connection["device_name"],
+            connection["batocera_info"],
+        )
+        self.pending_drone_connections.pop(device_id, None)
+        return self.get_device(internal_id)
+
+    def deny_pending_drone_connection(self, user_id: str, device_id: str) -> bool:
+        """Deny a pending drone connection."""
+        connection = self.pending_drone_connections.get(device_id)
+        if not connection or connection.get("user_id") not in (None, user_id):
+            return False
+        self.pending_drone_connections.pop(device_id, None)
+        return True
+
     def create_device(self, user_id: str, device_id: str, device_name: str, batocera_info: dict) -> str:
         """Register a new device."""
         internal_id = str(uuid.uuid4())
@@ -525,6 +611,52 @@ class FakeDatabase:
         # Add sample game logs for device3
         self.log_gameplay("arcade-cabinet-002", "snes", "Final Fantasy VI", 5400)
         self.log_gameplay("arcade-cabinet-002", "snes", "Chrono Trigger", 4200)
+
+        # Add sample pending drone connection attempts for the demo Overlord.
+        self.create_pending_drone_connection(
+            "rogue-signal-001",
+            "Basement Recon Drone",
+            {
+                "model": "Mini PC N100",
+                "system": "Linux 6.8.0",
+                "architecture": "x86_64",
+                "cpu_model": "Intel N100",
+                "cpu_cores": 4,
+                "cpu_threads": 4,
+                "cpu_max_frequency": "3.40 GHz",
+                "temperature": "39 C",
+                "memory_available": "7.2 GiB",
+                "memory_total": "8 GiB",
+                "display_resolution": "1920x1080",
+                "display_refresh_rate": "60 Hz",
+                "data_partition_available": "420 GiB",
+                "ip_address": "192.168.1.118",
+                "battery": "N/A",
+            },
+            user1_id,
+        )
+        self.create_pending_drone_connection(
+            "rogue-signal-002",
+            "Workshop Handheld Drone",
+            {
+                "model": "Steam Deck OLED",
+                "system": "Linux 6.1.52",
+                "architecture": "x86_64",
+                "cpu_model": "AMD Custom APU 0405",
+                "cpu_cores": 4,
+                "cpu_threads": 8,
+                "cpu_max_frequency": "3.50 GHz",
+                "temperature": "44 C",
+                "memory_available": "11.8 GiB",
+                "memory_total": "16 GiB",
+                "display_resolution": "1280x800",
+                "display_refresh_rate": "90 Hz",
+                "data_partition_available": "730 GiB",
+                "ip_address": "192.168.1.119",
+                "battery": "82%",
+            },
+            user1_id,
+        )
 
 
 # Global database instance

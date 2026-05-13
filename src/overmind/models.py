@@ -47,11 +47,17 @@ class User(BaseModel):
 
 class DeviceRegister(BaseModel):
     """Device registration request from Batocera app."""
-    email: EmailStr
-    password: str
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
     device_id: str = Field(..., description="Unique device identifier")
     device_name: str = Field(..., description="User-friendly device name")
     batocera_info: BatoceraInfo
+
+
+class SocialAuthRequest(BaseModel):
+    """Development-friendly social auth request for configured providers."""
+    email: EmailStr
+    full_name: Optional[str] = None
 
 
 class Device(BaseModel):

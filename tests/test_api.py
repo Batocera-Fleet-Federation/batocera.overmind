@@ -21,6 +21,7 @@ def client():
     db.roms.clear()
     db.gamelogs.clear()
     db.device_actions.clear()
+    db.pending_drone_connections.clear()
     return TestClient(app)
 
 
@@ -106,8 +107,17 @@ def test_invalid_login(client):
     assert response.status_code == 401
 
 
+def test_social_auth_buttons_disabled_without_env(client, monkeypatch):
+    """Social auth providers are disabled until required ENV VARs are set."""
+    for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    response = client.get("/api/auth/providers")
+    assert response.status_code == 200
+    assert response.json()["providers"] == {"google": False, "github": False}
+
+
 def test_register_device(client):
-    """Test device registration."""
+    """Test drone connection detection."""
     # Register user
     client.post(
         "/api/auth/register",
@@ -117,7 +127,7 @@ def test_register_device(client):
         }
     )
     
-    # Register device
+    # Drone attempts to connect
     response = client.post(
         "/api/devices/register",
         json={
@@ -140,6 +150,103 @@ def test_register_device(client):
         }
     )
     assert response.status_code == 200
+    data = response.json()
+    assert data["message"] == "Psionic connection detected. Awaiting Overlord approval."
+    assert data["connection"]["device_id"] == "device-123"
+
+
+def test_accept_pending_drone_connection_registers_device(client):
+    """Overlord can accept a pending drone connection."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "test@example.com", "password": "testpass123"},
+    )
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    )
+    token = login_response.json()["access_token"]
+
+    client.post(
+        "/api/devices/register",
+        json={
+            "email": "test@example.com",
+            "password": "testpass123",
+            "device_id": "drone-123",
+            "device_name": "Test Drone",
+            "batocera_info": {
+                "model": "Test Model",
+                "system": "Linux",
+                "architecture": "x86_64",
+                "cpu_model": "Test CPU",
+                "cpu_cores": 4,
+                "cpu_threads": 8,
+                "cpu_max_frequency": "3.0 GHz",
+                "memory_available": "8 GiB",
+                "memory_total": "16 GiB",
+                "ip_address": "192.168.1.1",
+            },
+        },
+    )
+
+    pending_response = client.get(
+        "/api/drone-connections",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert pending_response.status_code == 200
+    assert pending_response.json()["connections"][0]["device_id"] == "drone-123"
+
+    accept_response = client.post(
+        "/api/drone-connections/drone-123/accept",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert accept_response.status_code == 200
+    assert accept_response.json()["device"]["device_name"] == "Test Drone"
+
+    devices_response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+    assert devices_response.status_code == 200
+    assert devices_response.json()["devices"][0]["device_id"] == "drone-123"
+
+
+def test_deny_pending_drone_connection(client):
+    """Overlord can deny a pending drone connection."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "test@example.com", "password": "testpass123"},
+    )
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    client.post(
+        "/api/devices/register",
+        json={
+            "device_id": "rogue-drone",
+            "device_name": "Rogue Drone",
+            "batocera_info": {
+                "model": "Test Model",
+                "system": "Linux",
+                "architecture": "x86_64",
+                "cpu_model": "Test CPU",
+                "cpu_cores": 4,
+                "cpu_threads": 8,
+                "cpu_max_frequency": "3.0 GHz",
+                "memory_available": "8 GiB",
+                "memory_total": "16 GiB",
+                "ip_address": "192.168.1.1",
+            },
+        },
+    )
+    response = client.post(
+        "/api/drone-connections/rogue-drone/deny",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    pending_response = client.get(
+        "/api/drone-connections",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert pending_response.json()["connections"] == []
 
 
 def test_list_devices_uses_authorization_header(client):
@@ -193,6 +300,28 @@ def test_demo_seed_exposes_devices_and_systems(client):
     assert len(systems.keys()) >= 5
     for rom_list in systems.values():
         assert len(rom_list) >= 5
+
+
+def test_demo_seed_exposes_pending_drone_connections(client):
+    """Seeded demo user should see pending psionic Drone connection requests."""
+    db.populate_fake_data()
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    )
+    token = login_response.json()["access_token"]
+
+    pending_response = client.get(
+        "/api/drone-connections",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert pending_response.status_code == 200
+    connections = pending_response.json()["connections"]
+    assert len(connections) == 2
+    assert {conn["device_id"] for conn in connections} == {
+        "rogue-signal-001",
+        "rogue-signal-002",
+    }
 
 
 def test_rename_device(client):
