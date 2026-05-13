@@ -253,7 +253,13 @@ class FakeDatabase:
         ]
         return True
 
-    def create_device_action(self, user_id: str, device_id: str, action_type: str) -> Optional[dict]:
+    def create_device_action(
+        self,
+        user_id: str,
+        device_id: str,
+        action_type: str,
+        payload: Optional[dict] = None,
+    ) -> Optional[dict]:
         """Queue an action for a user's device."""
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
@@ -265,10 +271,13 @@ class FakeDatabase:
             "device_id": device_id,
             "action": action_type,
             "status": "pending",
+            "payload": payload or {},
             "created_at": datetime.utcnow(),
             "claimed_at": None,
             "completed_at": None,
             "message": None,
+            "result": None,
+            "result_received_at": None,
         }
         self.device_actions.setdefault(internal_id, []).append(action)
         return action
@@ -292,7 +301,14 @@ class FakeDatabase:
                 return action
         return None
 
-    def complete_device_action(self, device_id: str, action_id: str, status: str, message: Optional[str] = None) -> Optional[dict]:
+    def complete_device_action(
+        self,
+        device_id: str,
+        action_id: str,
+        status: str,
+        message: Optional[str] = None,
+        result: Optional[dict] = None,
+    ) -> Optional[dict]:
         """Mark an action completed or failed."""
         device = self.get_device_by_device_id(device_id)
         if not device:
@@ -302,6 +318,8 @@ class FakeDatabase:
                 action["status"] = status
                 action["completed_at"] = datetime.utcnow()
                 action["message"] = message
+                action["result"] = result
+                action["result_received_at"] = datetime.utcnow() if result is not None else None
                 return action
         return None
     

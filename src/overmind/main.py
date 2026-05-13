@@ -20,6 +20,16 @@ from overmind.models import (
 from overmind.db import db
 from overmind import auth
 
+SUPPORTED_DEVICE_ACTIONS = {
+    "shutdown",
+    "restart",
+    "update",
+    "collect_rom_metadata",
+    "collect_game_logs",
+    "collect_emulator_configs",
+    "collect_log_sources",
+}
+
 app = FastAPI(
     title="Batocera Overmind API",
     description="API for Batocera system management and game tracking",
@@ -476,9 +486,9 @@ async def create_device_action(
     action_type = str(payload.get("action") or "").strip().lower()
     if action_type == "reboot":
         action_type = "restart"
-    if action_type not in {"shutdown", "restart", "update"}:
+    if action_type not in SUPPORTED_DEVICE_ACTIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported action")
-    action = db.create_device_action(user["id"], device_id, action_type)
+    action = db.create_device_action(user["id"], device_id, action_type, payload.get("payload") if isinstance(payload.get("payload"), dict) else {})
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"action": action}
@@ -505,6 +515,18 @@ async def claim_device_action(device_id: str, payload: dict):
     return {"action": action}
 
 
+@app.post("/api/devices/{device_id}/alive")
+async def drone_alive(device_id: str, payload: dict):
+    """Update drone last-seen and return the next pending action, if any."""
+    user = verify_device_credentials(payload)
+    device = db.get_device_by_device_id(device_id)
+    if not device or device["user_id"] != user["id"]:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    db.update_device_last_seen(device["id"])
+    action = db.claim_next_device_action(device_id)
+    return {"status": "ok", "action": action}
+
+
 @app.post("/api/devices/{device_id}/actions/{action_id}/complete")
 async def complete_device_action(device_id: str, action_id: str, payload: dict):
     """Mark a claimed device action completed or failed."""
@@ -515,7 +537,8 @@ async def complete_device_action(device_id: str, action_id: str, payload: dict):
     result_status = str(payload.get("status") or "").strip().lower()
     if result_status not in {"completed", "failed"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="status must be completed or failed")
-    action = db.complete_device_action(device_id, action_id, result_status, payload.get("message"))
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else None
+    action = db.complete_device_action(device_id, action_id, result_status, payload.get("message"), result)
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found")
     return {"action": action}
@@ -1619,6 +1642,10 @@ def get_ui_html() -> str:
                                 </div>
                                 <div id="device-actions-panel" class="device-subpanel" style="display:none;">
                                     <div class="d-flex flex-wrap gap-2 mb-3">
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_rom_metadata')"><i class="bi bi-list-stars me-1"></i>ROM Metadata</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Game Logs</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')"><i class="bi bi-file-earmark-code me-1"></i>Emulator Configs</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_log_sources')"><i class="bi bi-journal-text me-1"></i>Log Sources</button>
                                         <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('shutdown')"><i class="bi bi-power me-1"></i>Shutdown</button>
                                         <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Restart</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('update')"><i class="bi bi-download me-1"></i>Update</button>
@@ -2383,18 +2410,30 @@ def get_ui_html() -> str:
                         container.innerHTML = '<div class="empty-state">No actions queued yet.</div>';
                         return;
                     }
-                    container.innerHTML = actions.map(action => `
+                    container.innerHTML = actions.map(action => {
+                        const result = action.result || null;
+                        const resultSummary = summarizeActionResult(result);
+                        return `
                         <div class="card mb-2 shadow-sm">
                             <div class="card-body py-2">
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-                                    <strong>${action.action}</strong>
+                                    <strong>${formatActionName(action.action)}</strong>
                                     <span class="badge text-bg-secondary">${action.status}</span>
                                 </div>
                                 <div class="small text-muted mt-1">Created: ${action.created_at ? new Date(action.created_at).toLocaleString() : 'n/a'}</div>
+                                ${action.completed_at ? `<div class="small text-muted mt-1">Completed: ${new Date(action.completed_at).toLocaleString()}</div>` : ''}
                                 ${action.message ? `<div class="small mt-1">${action.message}</div>` : ''}
+                                ${result ? `
+                                    <div class="small text-muted mt-2">${resultSummary}</div>
+                                    <details class="mt-2">
+                                        <summary class="small">View returned data</summary>
+                                        <pre class="small mt-2 p-2 rounded" style="white-space:pre-wrap;background:rgba(0,0,0,0.18);max-height:360px;overflow:auto;">${escapeHtml(JSON.stringify(result, null, 2))}</pre>
+                                    </details>
+                                ` : ''}
                             </div>
                         </div>
-                    `).join('');
+                    `;
+                    }).join('');
                 } catch (error) {
                     console.error('Error loading actions:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load actions.</div>';
@@ -2403,7 +2442,15 @@ def get_ui_html() -> str:
 
             async function queueDeviceAction(actionName) {
                 if (!selectedDeviceId) return;
-                const labels = { shutdown: 'shutdown', restart: 'restart', update: 'update' };
+                const labels = {
+                    shutdown: 'shutdown',
+                    restart: 'restart',
+                    update: 'update',
+                    collect_rom_metadata: 'collect ROM metadata',
+                    collect_game_logs: 'collect game logs',
+                    collect_emulator_configs: 'collect emulator configs',
+                    collect_log_sources: 'collect log sources',
+                };
                 if (!window.confirm(`Queue ${labels[actionName] || actionName} for this Drone?`)) return;
                 try {
                     const response = await fetch(`/api/devices/${selectedDeviceId}/actions`, {
@@ -2425,6 +2472,28 @@ def get_ui_html() -> str:
                 } catch (error) {
                     console.error('Error queuing action:', error);
                 }
+            }
+
+            function formatActionName(actionName) {
+                return String(actionName || 'n/a').replaceAll('_', ' ');
+            }
+
+            function summarizeActionResult(result) {
+                if (!result) return '';
+                if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;
+                if (result.type === 'game_logs') return `${(result.sessions || []).length} parsed play sessions, ${(result.logs || []).length} logs`;
+                if (result.type === 'emulator_configs') return `${(result.configs || []).length} config files`;
+                if (result.type === 'log_sources') return `${(result.logs || []).length} log sources`;
+                return 'Data returned from Drone';
+            }
+
+            function escapeHtml(value) {
+                return String(value ?? '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
             }
 
             async function renameDevicePrompt(deviceId) {

@@ -407,6 +407,52 @@ def test_device_action_lifecycle(client):
     assert complete_response.json()["action"]["status"] == "completed"
 
 
+def test_drone_alive_claims_data_action_and_stores_result(client):
+    db.populate_fake_data()
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    )
+    token = login_response.json()["access_token"]
+
+    create_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "collect_rom_metadata"},
+    )
+    assert create_response.status_code == 200
+    action_id = create_response.json()["action"]["id"]
+
+    alive_response = client.post(
+        "/api/devices/arcade-cabinet-001/alive",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    )
+    assert alive_response.status_code == 200
+    assert alive_response.json()["action"]["id"] == action_id
+    assert alive_response.json()["action"]["status"] == "in_progress"
+
+    result = {
+        "type": "rom_metadata",
+        "systems": [{"name": "snes"}],
+        "roms": [{"system": "snes", "rom_name": "Super Metroid"}],
+        "gamelists": [{"system": "snes", "content": "<gameList />"}],
+    }
+    complete_response = client.post(
+        f"/api/devices/arcade-cabinet-001/actions/{action_id}/complete",
+        json={
+            "email": "demo@example.com",
+            "password": "DemoPass123",
+            "status": "completed",
+            "message": "Collected 1 system.",
+            "result": result,
+        },
+    )
+    assert complete_response.status_code == 200
+    action = complete_response.json()["action"]
+    assert action["result"] == result
+    assert action["result_received_at"] is not None
+
+
 def test_profile_and_settings_update(client):
     db.populate_fake_data()
     login_response = client.post(
