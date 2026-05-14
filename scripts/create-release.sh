@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT="Batocera Overmind"
 REPO="Batocera-Fleet-Federation/batocera.overmind"
 DEFAULT_BRANCH="main"
+LATEST_TAG="latest"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -81,9 +82,10 @@ fi
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  $PROJECT Release"
-echo "  Version : $VERSION"
-echo "  Mode    : $PUSH_MODE"
-echo "  Repo    : $REPO"
+echo "  Version    : $VERSION"
+echo "  Latest Tag : $LATEST_TAG"
+echo "  Mode       : $PUSH_MODE"
+echo "  Repo       : $REPO"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
@@ -134,7 +136,8 @@ if [[ "$PUSH_MODE" == "dry-run" ]]; then
   PREVIOUS_TAG="$(get_previous_tag)"
 
   info "DRY-RUN mode. No files, tags, or releases will be created."
-  info "Would validate repo, update CHANGELOG.md, commit, tag, push, and create GitHub Release."
+  info "Would validate repo, update CHANGELOG.md, commit, tag $VERSION, push, and create GitHub Release."
+  info "Would also move tag '$LATEST_TAG' to point at $VERSION."
 
   if [[ -n "$PREVIOUS_TAG" ]]; then
     info "Would generate release notes from $PREVIOUS_TAG to $VERSION."
@@ -159,9 +162,13 @@ else
   info "No changelog changes to commit."
 fi
 
-info "Creating annotated tag: $VERSION"
+info "Creating annotated version tag: $VERSION"
 git tag -a "$VERSION" -m "Release $VERSION"
 git push origin "$VERSION"
+
+info "Moving '$LATEST_TAG' tag to $VERSION"
+git tag -fa "$LATEST_TAG" -m "Latest stable release: $VERSION"
+git push origin "refs/tags/$LATEST_TAG" --force
 
 PREVIOUS_TAG="$(get_previous_tag)"
 
@@ -185,4 +192,5 @@ else
 fi
 
 info "Release created: https://github.com/$REPO/releases/tag/$VERSION"
+info "Latest tag updated: https://github.com/$REPO/releases/tag/$LATEST_TAG"
 info "Release $VERSION completed successfully."
