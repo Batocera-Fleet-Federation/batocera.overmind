@@ -21,6 +21,7 @@ def client():
     db.roms.clear()
     db.gamelogs.clear()
     db.device_actions.clear()
+    db.speed_samples.clear()
     db.pending_drone_connections.clear()
     return TestClient(app)
 
@@ -388,7 +389,8 @@ def test_device_action_lifecycle(client):
 
     claim_response = client.post(
         "/api/devices/arcade-cabinet-001/actions/claim",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={},
     )
     assert claim_response.status_code == 200
     assert claim_response.json()["action"]["id"] == action_id
@@ -396,9 +398,8 @@ def test_device_action_lifecycle(client):
 
     complete_response = client.post(
         f"/api/devices/arcade-cabinet-001/actions/{action_id}/complete",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
         json={
-            "email": "demo@example.com",
-            "password": "DemoPass123",
             "status": "completed",
             "message": "Restart scheduled",
         },
@@ -425,7 +426,12 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
 
     alive_response = client.post(
         "/api/devices/arcade-cabinet-001/alive",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={
+            "device_id": "arcade-cabinet-001",
+            "network": {"ipv4": ["192.168.1.50"], "ipv6": ["::1"]},
+            "rom_systems": [{"name": "snes"}],
+        },
     )
     assert alive_response.status_code == 200
     assert alive_response.json()["action"]["id"] == action_id
@@ -439,9 +445,8 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
     }
     complete_response = client.post(
         f"/api/devices/arcade-cabinet-001/actions/{action_id}/complete",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
         json={
-            "email": "demo@example.com",
-            "password": "DemoPass123",
             "status": "completed",
             "message": "Collected 1 system.",
             "result": result,

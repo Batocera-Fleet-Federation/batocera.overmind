@@ -19,6 +19,7 @@ from overmind.models import (
 )
 from overmind.db import db
 from overmind import auth
+from overmind.postgres_store import postgres_store
 
 SUPPORTED_DEVICE_ACTIONS = {
     "shutdown",
@@ -129,6 +130,27 @@ def build_login_response(user: dict) -> dict:
             "email": user["email"],
             "full_name": user["full_name"]
         }
+    }
+
+
+def device_response(device: dict) -> dict:
+    """Public device shape for the Overmind UI."""
+    return {
+        "id": device["id"],
+        "device_id": device["device_id"],
+        "device_name": device["device_name"],
+        "batocera_info": device["batocera_info"],
+        "registered_at": device["registered_at"],
+        "last_seen": device["last_seen"],
+        "network": device.get("network") or {},
+        "resolved_network": device.get("resolved_network") or {"ipv4": [], "ipv6": []},
+        "swarm_connected": bool(device.get("swarm_connected")),
+        "rom_systems": device.get("rom_systems") or [],
+        "auto_sync_policy": device.get("auto_sync_policy") or {"enabled": False, "systems": []},
+        "last_speed_sample": device.get("last_speed_sample"),
+        "emulator_configs": device.get("emulator_configs"),
+        "log_sources": device.get("log_sources"),
+        "token_rotated_at": device.get("token_rotated_at"),
     }
 
 
@@ -319,6 +341,23 @@ def get_current_user(authorization: Optional[str]) -> dict:
     return user
 
 
+def get_bearer_token(authorization: Optional[str]) -> str:
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token")
+    return parts[1]
+
+
+def get_current_drone(device_id: str, authorization: Optional[str]) -> dict:
+    """Validate a Drone bearer token for Drone -> Overmind APIs."""
+    device = db.verify_device_token(device_id, get_bearer_token(authorization))
+    if not device:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Drone token")
+    return device
+
+
 # ==================== Device Management ====================
 
 @app.post("/api/devices/register")
@@ -373,13 +412,8 @@ async def accept_drone_connection(device_id: str, authorization: Optional[str] =
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drone connection not found")
     return {
         "message": "Drone registered to the Overlord.",
-        "device": {
-            "id": device["id"],
-            "device_id": device["device_id"],
-            "device_name": device["device_name"],
-            "registered_at": device["registered_at"],
-            "last_seen": device["last_seen"],
-        }
+        "device": device_response(device),
+        "drone_token": device.pop("raw_token_once", None),
     }
 
 
@@ -400,15 +434,7 @@ async def list_devices(authorization: Optional[str] = Header(default=None)):
     
     return {
         "devices": [
-            {
-                "id": d["id"],
-                "device_id": d["device_id"],
-                "device_name": d["device_name"],
-                "batocera_info": d["batocera_info"],
-                "registered_at": d["registered_at"],
-                "last_seen": d["last_seen"]
-            }
-            for d in devices
+            device_response(d) for d in devices
         ]
     }
 
@@ -425,14 +451,17 @@ async def get_device(device_id: str, authorization: Optional[str] = Header(defau
             detail="Device not found"
         )
     
-    return {
-        "id": device["id"],
-        "device_id": device["device_id"],
-        "device_name": device["device_name"],
-        "batocera_info": device["batocera_info"],
-        "registered_at": device["registered_at"],
-        "last_seen": device["last_seen"]
-    }
+    return device_response(device)
+
+
+@app.post("/api/devices/{device_id}/token/rotate")
+async def rotate_device_token(device_id: str, authorization: Optional[str] = Header(default=None)):
+    """Rotate a Drone bearer token. The raw value is returned once."""
+    user = get_current_user(authorization)
+    rotated = db.rotate_device_token(user["id"], device_id)
+    if not rotated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"device": device_response(rotated["device"]), "drone_token": rotated["token"]}
 
 
 @app.patch("/api/devices/{device_id}/name")
@@ -454,6 +483,21 @@ async def rename_device(
     db.update_device_name(device_id, new_name)
     updated = db.get_device_by_device_id(device_id)
     return {"device_id": updated["device_id"], "device_name": updated["device_name"]}
+
+
+@app.patch("/api/devices/{device_id}/auto-sync")
+async def update_device_auto_sync(
+    device_id: str,
+    payload: dict,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Update per-Drone ROM metadata sync policy."""
+    user = get_current_user(authorization)
+    systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
+    policy = db.update_device_auto_sync_policy(user["id"], device_id, bool(payload.get("enabled")), systems)
+    if policy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"auto_sync_policy": policy}
 
 
 @app.delete("/api/devices/{device_id}")
@@ -494,46 +538,32 @@ async def create_device_action(
     return {"action": action}
 
 
-def verify_device_credentials(payload: dict) -> dict:
-    """Verify drone-supplied Overmind credentials."""
-    email = str(payload.get("email") or "").strip()
-    password = str(payload.get("password") or "")
-    user = db.get_user_by_email(email)
-    if not user or not auth.verify_password(password, user["password"]):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
-    return user
-
-
 @app.post("/api/devices/{device_id}/actions/claim")
-async def claim_device_action(device_id: str, payload: dict):
+async def claim_device_action(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     """Claim the next pending action for a polling drone."""
-    user = verify_device_credentials(payload)
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    get_current_drone(device_id, authorization)
     action = db.claim_next_device_action(device_id)
     return {"action": action}
 
 
 @app.post("/api/devices/{device_id}/alive")
-async def drone_alive(device_id: str, payload: dict):
+async def drone_alive(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     """Update drone last-seen and return the next pending action, if any."""
-    user = verify_device_credentials(payload)
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    db.update_device_last_seen(device["id"])
+    device = get_current_drone(device_id, authorization)
+    db.update_device_last_seen(
+        device["id"],
+        network=payload.get("network") if isinstance(payload.get("network"), dict) else None,
+        rom_systems=payload.get("rom_systems") if isinstance(payload.get("rom_systems"), list) else None,
+    )
     action = db.claim_next_device_action(device_id)
-    return {"status": "ok", "action": action}
+    updated = db.get_device(device["id"])
+    return {"status": "ok", "action": action, "device": device_response(updated)}
 
 
 @app.post("/api/devices/{device_id}/actions/{action_id}/complete")
-async def complete_device_action(device_id: str, action_id: str, payload: dict):
+async def complete_device_action(device_id: str, action_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     """Mark a claimed device action completed or failed."""
-    user = verify_device_credentials(payload)
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    get_current_drone(device_id, authorization)
     result_status = str(payload.get("status") or "").strip().lower()
     if result_status not in {"completed", "failed"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="status must be completed or failed")
@@ -542,6 +572,26 @@ async def complete_device_action(device_id: str, action_id: str, payload: dict):
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found")
     return {"action": action}
+
+
+@app.post("/api/devices/{device_id}/speed")
+async def add_speed_sample(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Store a Drone upload/download speed sample."""
+    get_current_drone(device_id, authorization)
+    sample = db.add_speed_sample(device_id, payload)
+    if not sample:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    print(f"Speed sample stored for {device_id}: up={sample.get('upload_mbps')} down={sample.get('download_mbps')}")
+    return {"sample": sample}
+
+
+@app.get("/api/devices/{device_id}/speed")
+async def get_speed_samples(device_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    samples = db.get_speed_samples(user["id"], device_id)
+    if samples is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"samples": samples}
 
 
 @app.get("/api/profile")
@@ -1521,7 +1571,7 @@ def get_ui_html() -> str:
                         <div class="menu-label mb-2 d-lg-none">Navigation</div>
                         <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
                             <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); switchTab('devices', this)"><i class="bi bi-hdd-network me-2"></i>Drones</a>
-                            <a href="#/fleet" role="button" class="btn nav-btn requires-auth" data-tab="fleet" onclick="event.preventDefault(); switchTab('fleet', this)"><i class="bi bi-sliders me-2"></i>Swarm Settings</a>
+                            <a href="#/help" role="button" class="btn nav-btn requires-auth" data-tab="help" onclick="event.preventDefault(); switchTab('help', this)"><i class="bi bi-question-circle me-2"></i>Help</a>
                             <a href="#/notifications" role="button" class="btn nav-btn requires-auth" data-tab="notifications" onclick="event.preventDefault(); switchTab('notifications', this)"><i class="bi bi-bell me-2"></i>Notifications</a>
                             <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-github me-2"></i>GitHub</a>
                             <a href="/docs" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-braces me-2"></i>API Docs</a>
@@ -1608,9 +1658,6 @@ def get_ui_html() -> str:
                                         <div id="selected-device-id" class="small text-muted"></div>
                                     </div>
                                     <div class="d-flex flex-wrap align-items-center gap-2">
-                                        <button class="btn btn-outline-secondary btn-sm" onclick="backToDevices()">
-                                            <i class="bi bi-arrow-left me-1"></i>Drones
-                                        </button>
                                         <button class="btn btn-outline-secondary btn-sm" onclick="renameDevicePrompt(selectedDeviceId)">
                                             <i class="bi bi-pencil me-1"></i>Rename
                                         </button>
@@ -1631,6 +1678,10 @@ def get_ui_html() -> str:
                                     </div>
                                 </div>
                                 <div id="device-systems-panel" class="device-subpanel">
+                                    <div id="drone-network-panel" class="mb-3"></div>
+                                    <div id="drone-token-panel" class="mb-3"></div>
+                                    <div id="drone-speed-panel" class="mb-3"></div>
+                                    <div id="drone-auto-sync-panel" class="mb-3"></div>
                                     <div class="mb-3">
                                         <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
                                         <input id="device-rom-search" class="form-control" type="search" placeholder="Type to filter systems and ROMs" oninput="handleDeviceRomSearch(event)">
@@ -1642,7 +1693,7 @@ def get_ui_html() -> str:
                                 </div>
                                 <div id="device-actions-panel" class="device-subpanel" style="display:none;">
                                     <div class="d-flex flex-wrap gap-2 mb-3">
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_rom_metadata')"><i class="bi bi-list-stars me-1"></i>ROM Metadata</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_rom_metadata')"><i class="bi bi-list-stars me-1"></i>ROM & System Metadata</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Game Logs</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')"><i class="bi bi-file-earmark-code me-1"></i>Emulator Configs</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_log_sources')"><i class="bi bi-journal-text me-1"></i>Log Sources</button>
@@ -1671,16 +1722,20 @@ def get_ui_html() -> str:
                             </div>
                         </div>
 
-                        <div id="fleet-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>Swarm Settings</h3>
+                        <div id="help-tab" class="content-section dashboard-tab" style="display: none;">
+                            <h3>IPv4 Port Forwarding Help</h3>
                             <div class="device-card">
-                                <label style="display:flex; gap:10px; align-items:center;">
-                                    <input type="checkbox" id="fleet-auto-sync-roms">
-                                    Auto-sync ROMs from Drones
-                                </label>
-                                <div style="margin-top: 14px;">
-                                    <button class="btn btn-primary" onclick="saveFleetSettings()">Save Swarm Settings</button>
+                                <p>Port forwarding is only needed for fleet management features that require one Drone to reach another Drone directly, such as syncing ROMs or settings across devices.</p>
+                                <div class="row g-3">
+                                    <div class="col-md-6"><strong>Router login IP</strong><div id="help-router-ip" class="text-muted">Usually your gateway IP, such as 192.168.1.1</div></div>
+                                    <div class="col-md-6"><strong>Internal Drone IP</strong><div id="help-internal-ip" class="text-muted">Open a Drone page after it reports alive.</div></div>
+                                    <div class="col-md-6"><strong>Internal port</strong><div class="text-muted">8443</div></div>
+                                    <div class="col-md-6"><strong>External port</strong><div class="text-muted">8443</div></div>
+                                    <div class="col-md-6"><strong>Protocol</strong><div class="text-muted">TCP</div></div>
+                                    <div class="col-md-6"><strong>Test URL</strong><div id="help-test-url" class="text-muted">https://&lt;public_ip&gt;:8443/health</div></div>
                                 </div>
+                                <hr>
+                                <p>Log in to your router, look for settings named Port Forwarding, NAT, Virtual Server, or Applications. Add a TCP rule from external port 8443 to internal port 8443 on the Drone internal IP.</p>
                             </div>
                         </div>
 
@@ -1750,12 +1805,13 @@ def get_ui_html() -> str:
             let deviceRomSearchQuery = '';
             let systemPageState = {};
             let pendingConnectionTimer = null;
+            let actionRefreshTimer = null;
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
                 auth: ['Overlord Login', 'Access the Overmind'],
                 devices: ['Drones', 'Systems and ROMs'],
                 profile: ['Overlord', 'Account settings'],
-                fleet: ['Swarm Settings', 'Sync preferences'],
+                help: ['Help', 'Port forwarding guide'],
                 notifications: ['Notifications', 'Delivery preferences'],
             };
 
@@ -1922,7 +1978,9 @@ def get_ui_html() -> str:
                 selectedDeviceId = null;
                 currentDeviceView = 'systems';
                 if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
+                if (actionRefreshTimer) clearInterval(actionRefreshTimer);
                 pendingConnectionTimer = null;
+                actionRefreshTimer = null;
                 localStorage.removeItem('auth_token');
                 document.body.classList.remove('is-authenticated');
                 document.getElementById('auth-section').classList.add('active');
@@ -1972,7 +2030,6 @@ def get_ui_html() -> str:
                 if (!currentProfile) return;
                 document.getElementById('profile-name-input').value = currentProfile.full_name || '';
 
-                document.getElementById('fleet-auto-sync-roms').checked = !!(currentProfile.fleet_settings || {}).auto_sync_roms;
                 const ns = currentProfile.notification_settings || {};
                 document.getElementById('notify-slack').checked = !!ns.notify_slack;
                 document.getElementById('notify-discord').checked = !!ns.notify_discord;
@@ -2019,21 +2076,6 @@ def get_ui_html() -> str:
                     showMessage('Profile updated.', 'success');
                 } catch (error) {
                     console.error('Error saving profile:', error);
-                }
-            }
-
-            async function saveFleetSettings() {
-                try {
-                    const response = await apiPatch('/api/profile', {
-                        fleet_settings: {
-                            auto_sync_roms: document.getElementById('fleet-auto-sync-roms').checked
-                        }
-                    });
-                    if (!response.ok) throw new Error('Failed to save fleet settings');
-                    currentProfile = await response.json();
-                    showMessage('Fleet settings saved.', 'success');
-                } catch (error) {
-                    console.error('Error saving fleet settings:', error);
                 }
             }
 
@@ -2188,6 +2230,7 @@ def get_ui_html() -> str:
                                     </div>
                                     <div class="small text-muted mb-3">Drone ID</div>
                                     <code class="small d-block text-break">${device.device_id}</code>
+                                    <div class="mt-3"><span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span></div>
                                     <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
                             </button>
@@ -2318,6 +2361,105 @@ def get_ui_html() -> str:
                         }).join('')}
                     </div>
                 `;
+                renderDroneAutoSyncPanel();
+            }
+
+            function selectedDrone() {
+                return currentDevices.find(d => d.device_id === selectedDeviceId) || null;
+            }
+
+            function renderDroneNetworkPanel() {
+                const container = document.getElementById('drone-network-panel');
+                const device = selectedDrone();
+                if (!container || !device) return;
+                const resolved = device.resolved_network || {};
+                const ipv4 = resolved.ipv4 || [];
+                const ipv6 = resolved.ipv6 || [];
+                container.innerHTML = `
+                    <div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                            <strong>Swarm Connection</strong>
+                            <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
+                        </div>
+                        <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
+                        <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
+                    </div></div>
+                `;
+            }
+
+            function renderDroneTokenPanel() {
+                const container = document.getElementById('drone-token-panel');
+                const device = selectedDrone();
+                if (!container || !device) return;
+                container.innerHTML = `
+                    <div class="card"><div class="card-body py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
+                        <div>
+                            <strong>Drone Authorization Token</strong>
+                            <div class="small text-muted">${device.token_rotated_at ? `Last rotated: ${new Date(device.token_rotated_at).toLocaleString()}` : 'Token hash stored in Overmind'}</div>
+                        </div>
+                        <button class="btn btn-outline-danger btn-sm" onclick="rotateDroneToken()"><i class="bi bi-arrow-clockwise me-1"></i>Rotate Token</button>
+                    </div></div>
+                `;
+            }
+
+            function renderDroneSpeedPanel() {
+                const container = document.getElementById('drone-speed-panel');
+                const device = selectedDrone();
+                if (!container || !device) return;
+                const sample = device.last_speed_sample;
+                container.innerHTML = `
+                    <div class="card"><div class="card-body py-2">
+                        <strong>Speed Sample</strong>
+                        ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
+                    </div></div>
+                `;
+            }
+
+            function renderDroneAutoSyncPanel() {
+                const container = document.getElementById('drone-auto-sync-panel');
+                const device = selectedDrone();
+                if (!container || !device) return;
+                const policy = device.auto_sync_policy || { enabled: false, systems: [] };
+                const systems = Object.keys(currentDeviceSystems || {}).sort();
+                container.innerHTML = `
+                    <div class="card"><div class="card-body py-2">
+                        <label class="d-flex gap-2 align-items-center mb-2">
+                            <input id="drone-auto-sync-enabled" type="checkbox" ${policy.enabled ? 'checked' : ''}>
+                            <strong>Auto-sync ROM metadata from this Drone</strong>
+                        </label>
+                        <div class="d-flex flex-wrap gap-2 mb-2">
+                            ${systems.length ? systems.map(system => `
+                                <label class="badge text-bg-secondary">
+                                    <input class="drone-auto-sync-system me-1" type="checkbox" value="${escapeHtml(system)}" ${policy.systems.includes(system) ? 'checked' : ''}>
+                                    ${escapeHtml(system)}
+                                </label>
+                            `).join('') : '<span class="small text-muted">Queue ROM & System Metadata to populate system checkboxes.</span>'}
+                        </div>
+                        <button class="btn btn-primary btn-sm" onclick="saveDroneAutoSyncPolicy()">Save Policy</button>
+                    </div></div>
+                `;
+            }
+
+            async function saveDroneAutoSyncPolicy() {
+                if (!selectedDeviceId) return;
+                const systems = Array.from(document.querySelectorAll('.drone-auto-sync-system:checked')).map(input => input.value);
+                const enabled = !!document.getElementById('drone-auto-sync-enabled')?.checked;
+                const response = await apiPatch(`/api/devices/${selectedDeviceId}/auto-sync`, { enabled, systems });
+                if (!response.ok) throw new Error('Failed to save policy');
+                await loadDevices();
+                showMessage('Drone sync policy saved.', 'success');
+            }
+
+            async function rotateDroneToken() {
+                if (!selectedDeviceId || !window.confirm('Rotate this Drone token? The old token will stop working immediately.')) return;
+                const response = await fetch(`/api/devices/${selectedDeviceId}/token/rotate`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                if (!response.ok) throw new Error('Failed to rotate token');
+                const data = await response.json();
+                await loadDevices();
+                window.alert(`New Drone token. It is shown only once:\\n\\n${data.drone_token}`);
             }
 
             function updateSelectedDeviceWorkspace() {
@@ -2336,6 +2478,9 @@ def get_ui_html() -> str:
                 workspace.style.display = 'block';
                 if (title) title.textContent = device ? device.device_name : 'Selected Drone';
                 if (idNode) idNode.textContent = device ? `Drone ID: ${device.device_id}` : `Drone ID: ${selectedDeviceId}`;
+                renderDroneNetworkPanel();
+                renderDroneTokenPanel();
+                renderDroneSpeedPanel();
             }
 
             function backToDevices() {
@@ -2360,7 +2505,12 @@ def get_ui_html() -> str:
 
                 if (currentDeviceView === 'systems') loadDeviceSystems();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
-                if (currentDeviceView === 'actions') loadDeviceActions();
+                if (actionRefreshTimer) clearInterval(actionRefreshTimer);
+                actionRefreshTimer = null;
+                if (currentDeviceView === 'actions') {
+                    loadDeviceActions();
+                    actionRefreshTimer = setInterval(loadDeviceActions, 5000);
+                }
                 if (updateUrl) setRoute('devices', selectedDeviceId, currentDeviceView);
             }
 
@@ -2374,7 +2524,7 @@ def get_ui_html() -> str:
                 const raw = window.location.hash || '#/devices';
                 const clean = raw.replace(/^#\\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
-                const allowed = ['devices', 'profile', 'fleet', 'notifications'];
+                const allowed = ['devices', 'profile', 'help', 'notifications'];
                 if ((parts[0] === 'systems' || parts[0] === 'gamelogs') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
@@ -2446,7 +2596,7 @@ def get_ui_html() -> str:
                     shutdown: 'shutdown',
                     restart: 'restart',
                     update: 'update',
-                    collect_rom_metadata: 'collect ROM metadata',
+                    collect_rom_metadata: 'collect ROM and system metadata',
                     collect_game_logs: 'collect game logs',
                     collect_emulator_configs: 'collect emulator configs',
                     collect_log_sources: 'collect log sources',
@@ -2548,14 +2698,14 @@ def get_ui_html() -> str:
                 const tabMap = {
                     devices: 'devices-tab',
                     profile: 'profile-tab',
-                    fleet: 'fleet-tab',
+                    help: 'help-tab',
                     notifications: 'notifications-tab',
                 };
                 const tabElement = document.getElementById(tabMap[tabName]);
                 if (tabElement) tabElement.style.display = 'block';
                 currentTab = tabName;
                 if (tabName === 'devices') updateSelectedDeviceWorkspace();
-                if (tabName === 'profile' || tabName === 'fleet' || tabName === 'notifications') renderProfileUI();
+                if (tabName === 'profile' || tabName === 'notifications') renderProfileUI();
                 setPageChrome(tabName);
                 if (updateUrl) setRoute(tabName);
             }
@@ -2593,6 +2743,7 @@ async def startup_event():
     print("🏠 UI: http://localhost:8000/")
     if key_file and cert_file:
         print(f"🔐 Self-signed cert ready: {cert_file} / {key_file}")
+    postgres_store.ensure_schema()
     
     # Load fake data if USE_FAKE_DATA environment variable is set to true
     if os.getenv("USE_FAKE_DATA", "").lower() == "true":

@@ -4,6 +4,9 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 from overmind import auth
+from overmind.drone_security import generate_drone_token, hash_drone_token
+from overmind.networking import resolve_reported_network
+from overmind.postgres_store import postgres_store
 from overmind.models import User, Device, RomMetadata, GamePlay
 
 
@@ -19,6 +22,7 @@ class FakeDatabase:
         self.roms: Dict[str, list] = {}  # device_id -> list of roms
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
         self.device_actions: Dict[str, list] = {}  # internal device_id -> queued actions
+        self.speed_samples: Dict[str, list] = {}  # internal device_id -> speed samples
         self.pending_drone_connections: Dict[str, dict] = {}
     
     # User operations
@@ -172,14 +176,18 @@ class FakeDatabase:
             self.pending_drone_connections.pop(device_id, None)
             return self.get_device_by_device_id(device_id)
 
+        raw_token = generate_drone_token()
         internal_id = self.create_device(
             user_id,
             connection["device_id"],
             connection["device_name"],
             connection["batocera_info"],
+            raw_token=raw_token,
         )
         self.pending_drone_connections.pop(device_id, None)
-        return self.get_device(internal_id)
+        device = self.get_device(internal_id)
+        device["raw_token_once"] = raw_token
+        return device
 
     def deny_pending_drone_connection(self, user_id: str, device_id: str) -> bool:
         """Deny a pending drone connection."""
@@ -189,9 +197,17 @@ class FakeDatabase:
         self.pending_drone_connections.pop(device_id, None)
         return True
 
-    def create_device(self, user_id: str, device_id: str, device_name: str, batocera_info: dict) -> str:
+    def create_device(
+        self,
+        user_id: str,
+        device_id: str,
+        device_name: str,
+        batocera_info: dict,
+        raw_token: Optional[str] = None,
+    ) -> str:
         """Register a new device."""
         internal_id = str(uuid.uuid4())
+        network_state = resolve_reported_network(batocera_info.get("network") if isinstance(batocera_info, dict) else None)
         self.devices[internal_id] = {
             "id": internal_id,
             "user_id": user_id,
@@ -200,11 +216,18 @@ class FakeDatabase:
             "batocera_info": batocera_info,
             "registered_at": datetime.utcnow(),
             "last_seen": datetime.utcnow(),
+            "network": network_state["reported"],
+            "resolved_network": network_state["resolved"],
+            "swarm_connected": network_state["swarm_connected"],
+            "rom_systems": [],
+            "auto_sync_policy": {"enabled": False, "systems": []},
+            "drone_token_hash": hash_drone_token(raw_token or generate_drone_token()),
         }
         self.user_devices[user_id].append(internal_id)
         self.roms[internal_id] = []
         self.gamelogs[internal_id] = []
         self.device_actions[internal_id] = []
+        self.speed_samples[internal_id] = []
         return internal_id
     
     def get_device(self, internal_id: str) -> Optional[dict]:
@@ -223,10 +246,59 @@ class FakeDatabase:
         device_ids = self.user_devices.get(user_id, [])
         return [self.devices[did] for did in device_ids if did in self.devices]
     
-    def update_device_last_seen(self, internal_id: str):
+    def update_device_last_seen(
+        self,
+        internal_id: str,
+        network: Optional[dict] = None,
+        rom_systems: Optional[list] = None,
+    ):
         """Update last_seen timestamp for device."""
         if internal_id in self.devices:
             self.devices[internal_id]["last_seen"] = datetime.utcnow()
+            if network is not None:
+                network_state = resolve_reported_network(network)
+                self.devices[internal_id]["network"] = network_state["reported"]
+                self.devices[internal_id]["resolved_network"] = network_state["resolved"]
+                self.devices[internal_id]["swarm_connected"] = network_state["swarm_connected"]
+            if isinstance(rom_systems, list):
+                names = []
+                for system in rom_systems:
+                    if isinstance(system, dict):
+                        name = str(system.get("name") or system.get("system_name") or "").strip()
+                    else:
+                        name = str(system or "").strip()
+                    if name and name not in names:
+                        names.append(name)
+                self.devices[internal_id]["rom_systems"] = sorted(names)
+
+    def verify_device_token(self, device_id: str, raw_token: str) -> Optional[dict]:
+        """Return the device if its bearer token is valid."""
+        from overmind.drone_security import verify_drone_token
+
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        if not verify_drone_token(raw_token, device.get("drone_token_hash") or ""):
+            return None
+        return device
+
+    def rotate_device_token(self, user_id: str, device_id: str) -> Optional[dict]:
+        """Rotate a Drone token and return the raw token once."""
+        device = self.get_device_by_device_id(device_id)
+        if not device or device["user_id"] != user_id:
+            return None
+        raw_token = generate_drone_token()
+        device["drone_token_hash"] = hash_drone_token(raw_token)
+        device["token_rotated_at"] = datetime.utcnow()
+        return {"device": device, "token": raw_token}
+
+    def update_device_auto_sync_policy(self, user_id: str, device_id: str, enabled: bool, systems: list) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device["user_id"] != user_id:
+            return None
+        cleaned = sorted({str(system).strip() for system in systems if str(system).strip()})
+        device["auto_sync_policy"] = {"enabled": bool(enabled), "systems": cleaned}
+        return device["auto_sync_policy"]
 
     def update_device_name(self, device_id: str, device_name: str) -> bool:
         """Update a device's display name."""
@@ -247,6 +319,7 @@ class FakeDatabase:
         self.roms.pop(internal_id, None)
         self.gamelogs.pop(internal_id, None)
         self.device_actions.pop(internal_id, None)
+        self.speed_samples.pop(internal_id, None)
         self.user_devices[user_id] = [
             did for did in self.user_devices.get(user_id, [])
             if did != internal_id
@@ -320,8 +393,47 @@ class FakeDatabase:
                 action["message"] = message
                 action["result"] = result
                 action["result_received_at"] = datetime.utcnow() if result is not None else None
+                if isinstance(result, dict):
+                    self.store_action_result(device, result)
+                    postgres_store.store_action_result(device_id, action_id, result)
                 return action
         return None
+
+    def store_action_result(self, device: dict, result: dict) -> None:
+        """Persist returned action data on the device record for UI use."""
+        result_type = result.get("type")
+        if result_type == "rom_metadata":
+            systems = result.get("systems") if isinstance(result.get("systems"), list) else []
+            self.update_device_last_seen(device["id"], rom_systems=systems)
+        if result_type == "emulator_configs":
+            device["emulator_configs"] = result
+        if result_type == "log_sources":
+            device["log_sources"] = result
+
+    def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        entry = {
+            "id": str(uuid.uuid4()),
+            "device_id": device_id,
+            "sampled_at": datetime.utcnow(),
+            "upload_mbps": sample.get("upload_mbps"),
+            "download_mbps": sample.get("download_mbps"),
+            "latency_ms": sample.get("latency_ms"),
+            "source": sample.get("source") or "drone",
+        }
+        bucket = self.speed_samples.setdefault(device["id"], [])
+        bucket.append(entry)
+        del bucket[:-200]
+        device["last_speed_sample"] = entry
+        return entry
+
+    def get_speed_samples(self, user_id: str, device_id: str) -> Optional[List[dict]]:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device["user_id"] != user_id:
+            return None
+        return list(reversed(self.speed_samples.get(device["id"], [])))
     
     def device_exists(self, user_id: str, device_id: str) -> bool:
         """Check if device exists for user."""
@@ -499,7 +611,10 @@ class FakeDatabase:
             "Arcade Enthusiast"
         )
         
-        # Create sample devices for user1
+        # Create sample devices for user1. A local demo Drone also uses this
+        # machine's MAC so a local batocera.drone instance lines up with it.
+        local_demo_device_id = ":".join(f"{(uuid.getnode() >> shift) & 0xff:02x}" for shift in range(40, -1, -8))
+        demo_drone_token = "demo-local-drone-token"
         device1_id = self.create_device(
             user1_id,
             "arcade-cabinet-001",
@@ -519,9 +634,36 @@ class FakeDatabase:
                 "display_refresh_rate": "60 Hz",
                 "data_partition_available": "850 GiB",
                 "ip_address": "192.168.1.100",
-                "battery": "N/A"
-            }
+                "battery": "N/A",
+                "network": {"ipv4": ["127.0.0.1", "192.168.1.100"], "ipv6": ["::1"]},
+            },
+            raw_token=demo_drone_token,
         )
+        if local_demo_device_id != "arcade-cabinet-001":
+            self.create_device(
+                user1_id,
+                local_demo_device_id,
+                "Local Demo Drone",
+                {
+                    "model": "Batocera DevBox",
+                    "system": "Linux 6.6.0",
+                    "architecture": "x86_64",
+                    "cpu_model": "AMD Ryzen 7 7800X3D",
+                    "cpu_cores": 8,
+                    "cpu_threads": 16,
+                    "cpu_max_frequency": "5.00 GHz",
+                    "temperature": "42 C",
+                    "memory_available": "28.5 GiB",
+                    "memory_total": "32 GiB",
+                    "display_resolution": "1920x1080",
+                    "display_refresh_rate": "60 Hz",
+                    "data_partition_available": "850 GiB",
+                    "ip_address": "192.168.1.100",
+                    "battery": "N/A",
+                    "network": {"ipv4": ["127.0.0.1", "192.168.1.100"], "ipv6": ["::1"]},
+                },
+                raw_token=demo_drone_token,
+            )
         
         device2_id = self.create_device(
             user1_id,
@@ -603,7 +745,10 @@ class FakeDatabase:
 
         n = 1000
         for system, names in catalog.items():
-            self.add_roms("arcade-cabinet-001", system, [make_rom(system, name, n + i) for i, name in enumerate(names)])
+            rom_batch = [make_rom(system, name, n + i) for i, name in enumerate(names)]
+            self.add_roms("arcade-cabinet-001", system, rom_batch)
+            if local_demo_device_id != "arcade-cabinet-001":
+                self.add_roms(local_demo_device_id, system, rom_batch)
             n += 50
 
         for system, names in catalog.items():
@@ -617,10 +762,11 @@ class FakeDatabase:
             n += 50
         
         # Add sample game logs for device1
-        self.log_gameplay("arcade-cabinet-001", "snes", "Super Mario Bros", 1800)
-        self.log_gameplay("arcade-cabinet-001", "snes", "The Legend of Zelda", 3600)
-        self.log_gameplay("arcade-cabinet-001", "genesis", "Sonic the Hedgehog", 900)
-        self.log_gameplay("arcade-cabinet-001", "snes", "Super Metroid", 2700)
+        for demo_device_id in {"arcade-cabinet-001", local_demo_device_id}:
+            self.log_gameplay(demo_device_id, "snes", "Super Mario Bros", 1800)
+            self.log_gameplay(demo_device_id, "snes", "The Legend of Zelda", 3600)
+            self.log_gameplay(demo_device_id, "genesis", "Sonic the Hedgehog", 900)
+            self.log_gameplay(demo_device_id, "snes", "Super Metroid", 2700)
         
         # Add sample game logs for device2
         self.log_gameplay("raspberry-pi-001", "nes", "Super Mario Bros", 1200)

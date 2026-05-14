@@ -8,6 +8,23 @@ services:
     environment:
       - DEBUG=True
       - SECRET_KEY=change-this-in-production
+      - OVERMIND_DATABASE_URL=postgresql://overmind:overmind@postgres:5432/overmind
     volumes:
       - .:/app
     command: python -m uvicorn src.overmind.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=overmind
+      - POSTGRES_PASSWORD=overmind
+      - POSTGRES_DB=overmind
+    ports:
+      - "5432:5432"
+    volumes:
+      - overmind-postgres:/var/lib/postgresql/data
+
+volumes:
+  overmind-postgres:
