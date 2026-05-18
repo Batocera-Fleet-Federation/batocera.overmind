@@ -30,6 +30,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "collect_emulator_configs",
     "collect_log_sources",
 }
+SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "90"))
 
 app = FastAPI(
     title="Batocera Overmind API",
@@ -135,6 +136,13 @@ def build_login_response(user: dict) -> dict:
 
 def device_response(device: dict) -> dict:
     """Public device shape for the Overmind UI."""
+    last_seen = device.get("last_seen")
+    online = False
+    try:
+        from datetime import datetime
+        online = bool(last_seen and last_seen >= datetime.utcnow() - timedelta(seconds=SWARM_OFFLINE_THRESHOLD_SECONDS))
+    except Exception:
+        online = False
     return {
         "id": device["id"],
         "device_id": device["device_id"],
@@ -151,6 +159,12 @@ def device_response(device: dict) -> dict:
         "emulator_configs": device.get("emulator_configs"),
         "log_sources": device.get("log_sources"),
         "token_rotated_at": device.get("token_rotated_at"),
+        "api_port": device.get("api_port"),
+        "scheme": device.get("scheme") or "https",
+        "certificate": device.get("certificate"),
+        "peer_checks": device.get("peer_checks") or [],
+        "online": online,
+        "status": "online" if online else "offline",
     }
 
 
@@ -554,10 +568,35 @@ async def drone_alive(device_id: str, payload: dict, authorization: Optional[str
         device["id"],
         network=payload.get("network") if isinstance(payload.get("network"), dict) else None,
         rom_systems=payload.get("rom_systems") if isinstance(payload.get("rom_systems"), list) else None,
+        api_port=payload.get("api_port") if payload.get("api_port") is not None else None,
+        scheme=str(payload.get("scheme") or payload.get("protocol") or "").strip() or None,
+        certificate=payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
     )
     action = db.claim_next_device_action(device_id)
     updated = db.get_device(device["id"])
-    return {"status": "ok", "action": action, "device": device_response(updated)}
+    swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
+    return {"status": "ok", "action": action, "device": device_response(updated), "swarm": swarm}
+
+
+@app.post("/api/devices/{device_id}/events")
+async def add_drone_event(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Persist Drone telemetry events using the existing Drone bearer token."""
+    get_current_drone(device_id, authorization)
+    event = db.add_device_event(device_id, payload)
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"event": event}
+
+
+@app.post("/api/devices/{device_id}/peer-checks")
+async def add_peer_checks(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Persist peer-to-peer health results reported by a Drone."""
+    get_current_drone(device_id, authorization)
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    stored = db.add_peer_checks(device_id, results)
+    if stored is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"results": stored}
 
 
 @app.post("/api/devices/{device_id}/actions/{action_id}/complete")
@@ -2230,7 +2269,10 @@ def get_ui_html() -> str:
                                     </div>
                                     <div class="small text-muted mb-3">Drone ID</div>
                                     <code class="small d-block text-break">${device.device_id}</code>
-                                    <div class="mt-3"><span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span></div>
+                                    <div class="mt-3 d-flex flex-wrap gap-1">
+                                        <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
+                                        <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
+                                    </div>
                                     <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
                             </button>
@@ -2375,6 +2417,8 @@ def get_ui_html() -> str:
                 const resolved = device.resolved_network || {};
                 const ipv4 = resolved.ipv4 || [];
                 const ipv6 = resolved.ipv6 || [];
+                const cert = device.certificate || {};
+                const peerChecks = device.peer_checks || [];
                 container.innerHTML = `
                     <div class="card"><div class="card-body py-2">
                         <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
@@ -2383,6 +2427,28 @@ def get_ui_html() -> str:
                         </div>
                         <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
+                        <div class="small text-muted">API: ${escapeHtml(device.scheme || 'https')}://${ipv4[0] || escapeHtml(device.device_id)}:${escapeHtml(String(device.api_port || 8443))}</div>
+                        <hr>
+                        <strong>Certificate</strong>
+                        <div class="small text-muted">Status: ${escapeHtml(cert.status || 'unknown')}</div>
+                        <div class="small text-muted">Fingerprint: ${escapeHtml(cert.fingerprint || 'n/a')}</div>
+                        <div class="small text-muted">Subject: ${escapeHtml(cert.subject || 'n/a')}</div>
+                        <div class="small text-muted">Issuer: ${escapeHtml(cert.issuer || 'n/a')}</div>
+                        <div class="small text-muted">SAN: ${(cert.san || []).map(escapeHtml).join(', ') || 'n/a'}</div>
+                        <div class="small text-muted">Valid: ${escapeHtml(cert.valid_from || 'n/a')} - ${escapeHtml(cert.valid_until || 'n/a')}</div>
+                        <div class="small text-muted">Renewal: ${escapeHtml(cert.renewal_status || 'n/a')}</div>
+                        <hr>
+                        <strong>Peer-to-Peer Checks</strong>
+                        ${peerChecks.length ? peerChecks.slice(0, 12).map(check => `
+                            <div class="mt-2 p-2 rounded border">
+                                <div class="d-flex justify-content-between gap-2">
+                                    <span class="small mono">${escapeHtml(check.source_drone_id || '')} → ${escapeHtml(check.target_drone_id || '')}</span>
+                                    <span class="badge ${check.status === 'pass' ? 'text-bg-success' : 'text-bg-danger'}">${check.status === 'pass' ? 'GREEN' : 'RED'}</span>
+                                </div>
+                                <div class="small text-muted">${escapeHtml(check.target_address || 'n/a')} · ${escapeHtml(check.checked_at || 'n/a')} · ${check.latency_ms ?? 'n/a'} ms</div>
+                                ${check.failure_reason ? `<div class="small text-danger">${escapeHtml(check.failure_reason)}</div>` : ''}
+                            </div>
+                        `).join('') : '<div class="small text-muted mt-1">No peer checks reported yet.</div>'}
                     </div></div>
                 `;
             }

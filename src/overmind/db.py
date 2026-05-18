@@ -1,7 +1,7 @@
 """Fake in-memory database storage."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from overmind import auth
 from overmind.drone_security import generate_drone_token, hash_drone_token
@@ -23,6 +23,8 @@ class FakeDatabase:
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
         self.device_actions: Dict[str, list] = {}  # internal device_id -> queued actions
         self.speed_samples: Dict[str, list] = {}  # internal device_id -> speed samples
+        self.device_events: Dict[str, list] = {}  # internal device_id -> telemetry events
+        self.peer_checks: Dict[str, list] = {}  # internal device_id -> peer check results
         self.pending_drone_connections: Dict[str, dict] = {}
     
     # User operations
@@ -222,12 +224,18 @@ class FakeDatabase:
             "rom_systems": [],
             "auto_sync_policy": {"enabled": False, "systems": []},
             "drone_token_hash": hash_drone_token(raw_token or generate_drone_token()),
+            "api_port": None,
+            "scheme": "https",
+            "certificate": None,
+            "peer_checks": [],
         }
         self.user_devices[user_id].append(internal_id)
         self.roms[internal_id] = []
         self.gamelogs[internal_id] = []
         self.device_actions[internal_id] = []
         self.speed_samples[internal_id] = []
+        self.device_events[internal_id] = []
+        self.peer_checks[internal_id] = []
         return internal_id
     
     def get_device(self, internal_id: str) -> Optional[dict]:
@@ -251,6 +259,9 @@ class FakeDatabase:
         internal_id: str,
         network: Optional[dict] = None,
         rom_systems: Optional[list] = None,
+        api_port: Optional[int] = None,
+        scheme: Optional[str] = None,
+        certificate: Optional[dict] = None,
     ):
         """Update last_seen timestamp for device."""
         if internal_id in self.devices:
@@ -270,6 +281,53 @@ class FakeDatabase:
                     if name and name not in names:
                         names.append(name)
                 self.devices[internal_id]["rom_systems"] = sorted(names)
+            if api_port is not None:
+                self.devices[internal_id]["api_port"] = api_port
+            if scheme:
+                self.devices[internal_id]["scheme"] = scheme
+            if isinstance(certificate, dict):
+                clean_cert = dict(certificate)
+                clean_cert.pop("private_key", None)
+                clean_cert.pop("key", None)
+                clean_cert.pop("key_file", None)
+                clean_cert["last_seen"] = datetime.utcnow()
+                self.devices[internal_id]["certificate"] = clean_cert
+
+    def get_swarm_for_device(self, device_id: str, offline_seconds: int = 90) -> List[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return []
+        cutoff = datetime.utcnow() - timedelta(seconds=max(1, int(offline_seconds)))
+        output = []
+        for peer in self.get_user_devices(device["user_id"]):
+            resolved = peer.get("resolved_network") or {}
+            ipv4 = resolved.get("ipv4") or []
+            reported = peer.get("network") or {}
+            public_ip = reported.get("public_ip") or reported.get("public")
+            last_seen = peer.get("last_seen")
+            online = bool(last_seen and last_seen >= cutoff)
+            output.append({
+                "drone_id": peer.get("device_id"),
+                "device_id": peer.get("device_id"),
+                "name": peer.get("device_name"),
+                "hostname": (peer.get("batocera_info") or {}).get("hostname"),
+                "local_ip": ipv4[0] if ipv4 else (peer.get("batocera_info") or {}).get("ip_address"),
+                "private_ip": ipv4,
+                "public_ip": public_ip,
+                "api_port": peer.get("api_port") or 8443,
+                "scheme": peer.get("scheme") or "https",
+                "last_alive": last_seen,
+                "last_seen": last_seen,
+                "online": online,
+                "status": "online" if online else "offline",
+                "certificate": peer.get("certificate"),
+                "network": peer.get("network") or {},
+                "resolved_network": resolved,
+                "swarm_connected": bool(peer.get("swarm_connected")),
+                "peer_checks": list(reversed(self.peer_checks.get(peer["id"], [])))[:50],
+            })
+        output.sort(key=lambda row: (not row["online"], str(row.get("name") or row.get("drone_id") or "").lower()))
+        return output
 
     def verify_device_token(self, device_id: str, raw_token: str) -> Optional[dict]:
         """Return the device if its bearer token is valid."""
@@ -320,6 +378,8 @@ class FakeDatabase:
         self.gamelogs.pop(internal_id, None)
         self.device_actions.pop(internal_id, None)
         self.speed_samples.pop(internal_id, None)
+        self.device_events.pop(internal_id, None)
+        self.peer_checks.pop(internal_id, None)
         self.user_devices[user_id] = [
             did for did in self.user_devices.get(user_id, [])
             if did != internal_id
@@ -428,6 +488,54 @@ class FakeDatabase:
         del bucket[:-200]
         device["last_speed_sample"] = entry
         return entry
+
+    def add_device_event(self, device_id: str, event: dict) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        entry = {
+            "id": str(uuid.uuid4()),
+            "device_id": device_id,
+            "event_type": event.get("event_type") or event.get("type"),
+            "timestamp": event.get("timestamp") or datetime.utcnow(),
+            "system": event.get("system"),
+            "rom": event.get("rom"),
+            "path": event.get("path"),
+            "metadata": event.get("metadata") if isinstance(event.get("metadata"), dict) else {},
+            "received_at": datetime.utcnow(),
+        }
+        bucket = self.device_events.setdefault(device["id"], [])
+        bucket.append(entry)
+        del bucket[:-500]
+        return entry
+
+    def add_peer_checks(self, device_id: str, results: list) -> Optional[List[dict]]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        cleaned = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            status = str(result.get("status") or "").lower()
+            if status not in {"pass", "fail"}:
+                status = "fail"
+            cleaned.append({
+                "id": str(uuid.uuid4()),
+                "source_drone_id": result.get("source_drone_id") or result.get("source") or device_id,
+                "target_drone_id": result.get("target_drone_id") or result.get("target"),
+                "target_address": result.get("target_address"),
+                "status": status,
+                "latency_ms": result.get("latency_ms"),
+                "failure_reason": result.get("failure_reason") if status == "fail" else None,
+                "checked_at": result.get("checked_at") or datetime.utcnow(),
+                "received_at": datetime.utcnow(),
+            })
+        bucket = self.peer_checks.setdefault(device["id"], [])
+        bucket.extend(cleaned)
+        del bucket[:-500]
+        device["peer_checks"] = list(reversed(bucket))[:50]
+        return cleaned
 
     def get_speed_samples(self, user_id: str, device_id: str) -> Optional[List[dict]]:
         device = self.get_device_by_device_id(device_id)
