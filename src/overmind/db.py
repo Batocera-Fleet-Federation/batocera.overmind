@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from overmind import auth
-from overmind.drone_security import generate_drone_token, hash_drone_token
+from overmind.drone_security import generate_drone_token, hash_drone_token, verify_drone_token
 from overmind.networking import resolve_reported_network
 from overmind.postgres_store import postgres_store
 from overmind.models import User, Device, RomMetadata, GamePlay
@@ -25,6 +25,9 @@ class FakeDatabase:
         self.speed_samples: Dict[str, list] = {}  # internal device_id -> speed samples
         self.device_events: Dict[str, list] = {}  # internal device_id -> telemetry events
         self.peer_checks: Dict[str, list] = {}  # internal device_id -> peer check results
+        self.integration_tokens: Dict[str, list] = {}
+        self.approved_drone_tokens: Dict[str, str] = {}
+        self.rom_sync_activity: Dict[str, list] = {}
         self.pending_drone_connections: Dict[str, dict] = {}
     
     # User operations
@@ -124,6 +127,48 @@ class FakeDatabase:
         user["notification_settings"] = merged
         return user
     
+    # Drone onboarding token operations
+    def create_integration_token(self, user_id: str, label: str = "Drone onboarding") -> dict:
+        raw_token = generate_drone_token()
+        entry = {
+            "id": str(uuid.uuid4()),
+            "label": label or "Drone onboarding",
+            "token_hash": hash_drone_token(raw_token),
+            "created_at": datetime.utcnow(),
+            "last_used_at": None,
+            "revoked_at": None,
+            "raw_token_once": raw_token,
+        }
+        self.integration_tokens.setdefault(user_id, []).append(entry)
+        return entry
+
+    def get_integration_tokens(self, user_id: str) -> List[dict]:
+        return [
+            {k: v for k, v in token.items() if k not in {"token_hash", "raw_token_once"}}
+            for token in self.integration_tokens.get(user_id, [])
+        ]
+
+    def verify_integration_token(self, email: Optional[str], token: Optional[str]) -> Optional[dict]:
+        if not email or not token:
+            return None
+        user = self.get_user_by_email(email)
+        if not user:
+            return None
+        for entry in self.integration_tokens.get(user["id"], []):
+            if entry.get("revoked_at"):
+                continue
+            if verify_drone_token(token, entry.get("token_hash")):
+                entry["last_used_at"] = datetime.utcnow()
+                return user
+        return None
+
+    def revoke_integration_token(self, user_id: str, token_id: str) -> bool:
+        for entry in self.integration_tokens.get(user_id, []):
+            if entry.get("id") == token_id and not entry.get("revoked_at"):
+                entry["revoked_at"] = datetime.utcnow()
+                return True
+        return False
+
     # Device operations
     def create_pending_drone_connection(
         self,
@@ -189,6 +234,7 @@ class FakeDatabase:
         self.pending_drone_connections.pop(device_id, None)
         device = self.get_device(internal_id)
         device["raw_token_once"] = raw_token
+        self.approved_drone_tokens[device_id] = raw_token
         return device
 
     def deny_pending_drone_connection(self, user_id: str, device_id: str) -> bool:
@@ -236,6 +282,7 @@ class FakeDatabase:
         self.speed_samples[internal_id] = []
         self.device_events[internal_id] = []
         self.peer_checks[internal_id] = []
+        self.rom_sync_activity[internal_id] = []
         return internal_id
     
     def get_device(self, internal_id: str) -> Optional[dict]:
@@ -311,6 +358,9 @@ class FakeDatabase:
             public_ip = reported.get("public_ip") or reported.get("public")
             last_seen = peer.get("last_seen")
             online = bool(last_seen and last_seen >= cutoff)
+            cert = dict(peer.get("certificate") or {})
+            cert.pop("public_certificate", None)
+            cert.pop("certificate_pem", None)
             output.append({
                 "drone_id": peer.get("device_id"),
                 "device_id": peer.get("device_id"),
@@ -325,7 +375,9 @@ class FakeDatabase:
                 "last_seen": last_seen,
                 "online": online,
                 "status": "online" if online else "offline",
-                "certificate": peer.get("certificate"),
+                "certificate": cert or None,
+                "rom_systems": peer.get("rom_systems") or [],
+                "last_speed_sample": peer.get("last_speed_sample"),
                 "network": peer.get("network") or {},
                 "resolved_network": resolved,
                 "swarm_connected": bool(peer.get("swarm_connected")),
@@ -385,6 +437,7 @@ class FakeDatabase:
         self.speed_samples.pop(internal_id, None)
         self.device_events.pop(internal_id, None)
         self.peer_checks.pop(internal_id, None)
+        self.rom_sync_activity.pop(internal_id, None)
         self.user_devices[user_id] = [
             did for did in self.user_devices.get(user_id, [])
             if did != internal_id
@@ -474,6 +527,10 @@ class FakeDatabase:
             device["emulator_configs"] = result
         if result_type == "log_sources":
             device["log_sources"] = result
+        if result_type == "rom_sync":
+            for activity in result.get("activity") if isinstance(result.get("activity"), list) else []:
+                if isinstance(activity, dict):
+                    self.add_rom_sync_activity(device.get("device_id"), activity)
 
     def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)
@@ -606,11 +663,89 @@ class FakeDatabase:
                 "file_path": rom.get("file_path"),
                 "file_size": rom.get("file_size"),
                 "added_at": datetime.utcnow(),
+                "last_seen": datetime.utcnow(),
             }
             self.roms[internal_id].append(rom_entry)
             rom_ids.append(rom_id)
         
         return rom_ids
+
+    def _rom_key(self, rom: dict) -> tuple:
+        system = str(rom.get("system_name") or "").strip().lower()
+        path = str(rom.get("file_path") or rom.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+        return (system, path)
+
+    def get_master_roms_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
+        selected = self.get_device_by_device_id(selected_device_id)
+        if not selected or selected["user_id"] != user_id:
+            return None
+        devices = {device["device_id"]: device for device in self.get_user_devices(user_id)}
+        selected_keys = {self._rom_key(rom) for rom in self.roms.get(selected["id"], [])}
+        master: Dict[tuple, dict] = {}
+        for device in devices.values():
+            for rom in self.roms.get(device["id"], []):
+                key = self._rom_key(rom)
+                if not key[0] or not key[1]:
+                    continue
+                row = master.setdefault(key, {
+                    "system_name": rom.get("system_name"),
+                    "rom_name": rom.get("rom_name") or rom.get("file_path"),
+                    "file_path": rom.get("file_path") or rom.get("rom_name"),
+                    "rom_md5": rom.get("rom_md5"),
+                    "file_size": rom.get("file_size"),
+                    "last_seen": rom.get("last_seen") or rom.get("added_at"),
+                    "devices": [],
+                    "present_on_selected": key in selected_keys,
+                })
+                info = device.get("system_info") or {}
+                row["devices"].append({
+                    "device_id": device["device_id"],
+                    "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
+                })
+                if not row.get("rom_md5") and rom.get("rom_md5"):
+                    row["rom_md5"] = rom.get("rom_md5")
+                if not row.get("file_size") and rom.get("file_size"):
+                    row["file_size"] = rom.get("file_size")
+        rows = list(master.values())
+        rows.sort(key=lambda row: (str(row.get("system_name") or "").lower(), str(row.get("file_path") or "").lower()))
+        return rows
+
+    def add_rom_sync_activity(self, device_id: str, payload: dict) -> Optional[dict]:
+        if not self.get_device_by_device_id(device_id):
+            return None
+        entry = {
+            "id": payload.get("sync_id") or str(uuid.uuid4()),
+            "source_drone_id": payload.get("source_drone_id"),
+            "target_drone_id": payload.get("target_drone_id") or device_id,
+            "system": payload.get("system"),
+            "rom_name": payload.get("rom_name") or payload.get("rom_path"),
+            "action": payload.get("action") or "download",
+            "status": payload.get("status") or "pending",
+            "selected_peer_reason": payload.get("selected_peer_reason"),
+            "bytes_transferred": payload.get("bytes_transferred"),
+            "file_size": payload.get("file_size"),
+            "rom_md5": payload.get("rom_md5"),
+            "started_at": payload.get("started_at") or datetime.utcnow(),
+            "completed_at": payload.get("completed_at"),
+            "failure_reason": payload.get("failure_reason"),
+            "received_at": datetime.utcnow(),
+        }
+        for related_id in {entry.get("target_drone_id"), entry.get("source_drone_id")}:
+            if not related_id:
+                continue
+            device = self.get_device_by_device_id(str(related_id))
+            if not device:
+                continue
+            bucket = self.rom_sync_activity.setdefault(device["id"], [])
+            bucket.append(entry)
+            del bucket[:-200]
+        return entry
+
+    def get_rom_sync_activity(self, user_id: str, device_id: str) -> Optional[List[dict]]:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device["user_id"] != user_id:
+            return None
+        return list(reversed(self.rom_sync_activity.get(device["id"], [])))[:100]
     
     def get_device_roms(self, device_id: str) -> List[dict]:
         """Get all ROMs for a device."""
@@ -822,6 +957,31 @@ class FakeDatabase:
             },
             raw_token=demo_drone_token,
         )
+
+        for index, suffix in enumerate(("a", "b", "c", "d"), start=1):
+            self.create_device(
+                user1_id,
+                f"local-drone-{suffix}",
+                f"Local Drone {suffix.upper()}",
+                {
+                    "model": "Containerized Batocera-like Drone",
+                    "system": "Linux container",
+                    "architecture": "x86_64",
+                    "cpu_model": "Container CPU",
+                    "cpu_cores": 1,
+                    "cpu_threads": 1,
+                    "cpu_max_frequency": "shared",
+                    "memory_available": "384 MiB",
+                    "memory_total": "384 MiB",
+                    "display_resolution": "N/A",
+                    "display_refresh_rate": "N/A",
+                    "data_partition_available": "container volume",
+                    "ip_address": f"172.20.0.{10 + index}",
+                    "battery": "N/A",
+                    "network": {"ipv4": [f"172.20.0.{10 + index}"]},
+                },
+                raw_token=demo_drone_token,
+            )
         
         # Create sample device for user2
         device3_id = self.create_device(

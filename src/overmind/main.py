@@ -29,6 +29,8 @@ SUPPORTED_DEVICE_ACTIONS = {
     "collect_game_logs",
     "collect_emulator_configs",
     "collect_log_sources",
+    "sync_rom",
+    "sync_system",
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
 
@@ -123,6 +125,9 @@ def build_login_response(user: dict) -> dict:
         data={"sub": user["id"], "email": user["email"]},
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
+    cert = dict(device.get("certificate") or {})
+    cert.pop("public_certificate", None)
+    cert.pop("certificate_pem", None)
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -162,7 +167,7 @@ def device_response(device: dict) -> dict:
         "token_rotated_at": device.get("token_rotated_at"),
         "api_port": device.get("api_port"),
         "scheme": device.get("scheme") or "https",
-        "certificate": device.get("certificate"),
+        "certificate": cert or None,
         "peer_checks": db.get_latest_peer_checks(device.get("device_id")) if device.get("device_id") else [],
         "online": online,
         "status": "online" if online else "offline",
@@ -379,6 +384,13 @@ def get_current_drone(device_id: str, authorization: Optional[str]) -> dict:
 async def register_device(device_data: DeviceRegister):
     """Detect a drone attempting to connect to Overmind."""
     user = None
+    if device_data.email and device_data.authorization_token:
+        user = db.verify_integration_token(str(device_data.email), device_data.authorization_token)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or authorization token"
+            )
     if device_data.email and device_data.password:
         user = db.get_user_by_email(device_data.email)
         if not user or not auth.verify_password(device_data.password, user["password"]):
@@ -388,10 +400,19 @@ async def register_device(device_data: DeviceRegister):
             )
 
     if user and db.device_exists(user["id"], device_data.device_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Drone already registered for this Overlord"
-        )
+        approved_token = db.approved_drone_tokens.pop(device_data.device_id, None)
+        if approved_token:
+            return {
+                "message": "Drone approved by Overlord.",
+                "status": "approved",
+                "device_id": device_data.device_id,
+                "drone_token": approved_token,
+            }
+        return {
+            "message": "Drone already registered for this Overlord.",
+            "status": "registered",
+            "device_id": device_data.device_id,
+        }
 
     connection = db.create_pending_drone_connection(
         device_data.device_id,
@@ -409,6 +430,29 @@ async def register_device(device_data: DeviceRegister):
             "last_seen": connection["last_seen"],
         }
     }
+
+
+@app.get("/api/integration-tokens")
+async def list_integration_tokens(authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    return {"tokens": db.get_integration_tokens(user["id"])}
+
+
+@app.post("/api/integration-tokens")
+async def create_integration_token(payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    token = db.create_integration_token(user["id"], str(payload.get("label") or "Drone onboarding"))
+    public = {k: v for k, v in token.items() if k != "token_hash"}
+    public["authorization_token"] = public.pop("raw_token_once")
+    return {"token": public}
+
+
+@app.delete("/api/integration-tokens/{token_id}")
+async def revoke_integration_token(token_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    if not db.revoke_integration_token(user["id"], token_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Integration token not found")
+    return {"status": "revoked", "id": token_id}
 
 
 @app.get("/api/drone-connections")
@@ -467,6 +511,23 @@ async def get_device(device_id: str, authorization: Optional[str] = Header(defau
         )
     
     return device_response(device)
+
+
+@app.get("/api/devices/{device_id}/peer-certificate/{peer_id}")
+async def get_peer_certificate(device_id: str, peer_id: str, authorization: Optional[str] = Header(default=None)):
+    """Return public certificate trust material for an approved peer Drone."""
+    device = get_current_drone(device_id, authorization)
+    peer = db.get_device_by_device_id(peer_id)
+    if not peer or peer.get("user_id") != device.get("user_id"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Peer Drone not found")
+    cert = peer.get("certificate") or {}
+    public_cert = cert.get("public_certificate") or cert.get("certificate_pem")
+    if not public_cert:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Peer certificate not available")
+    safe_meta = dict(cert)
+    safe_meta.pop("private_key", None)
+    safe_meta.pop("key", None)
+    return {"device_id": peer_id, "certificate_pem": public_cert, "metadata": safe_meta}
 
 
 @app.post("/api/devices/{device_id}/token/rotate")
@@ -739,6 +800,87 @@ async def get_device_roms(
         return {"systems": grouped}
     
     return {"roms": roms}
+
+
+@app.get("/api/devices/{device_id}/master-roms")
+async def get_device_master_roms(device_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    rows = db.get_master_roms_for_device(user["id"], device_id)
+    if rows is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"roms": rows}
+
+
+@app.post("/api/devices/{device_id}/sync-rom")
+async def sync_device_rom(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
+    rom_path = str(payload.get("file_path") or payload.get("rom_name") or "").strip()
+    if not system_name or not rom_path:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name and rom path are required")
+    action = db.create_device_action(user["id"], device_id, "sync_rom", {
+        "system_name": system_name,
+        "rom_name": payload.get("rom_name") or rom_path,
+        "file_path": rom_path,
+        "rom_md5": payload.get("rom_md5"),
+        "file_size": payload.get("file_size"),
+    })
+    if not action:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    db.add_rom_sync_activity(device_id, {
+        "sync_id": action["id"],
+        "target_drone_id": device_id,
+        "system": system_name,
+        "rom_name": rom_path,
+        "action": "download",
+        "status": "pending",
+        "file_size": payload.get("file_size"),
+        "rom_md5": payload.get("rom_md5"),
+    })
+    return {"action": action}
+
+
+@app.post("/api/devices/{device_id}/sync-system")
+async def sync_device_system(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
+    if not system_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name is required")
+    master_rows = db.get_master_roms_for_device(user["id"], device_id) or []
+    missing = [
+        row for row in master_rows
+        if str(row.get("system_name") or "").lower() == system_name.lower() and not row.get("present_on_selected")
+    ]
+    action = db.create_device_action(user["id"], device_id, "sync_system", {"system_name": system_name, "roms": missing})
+    if not action:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    db.add_rom_sync_activity(device_id, {
+        "sync_id": action["id"],
+        "target_drone_id": device_id,
+        "system": system_name,
+        "rom_name": "*",
+        "action": "download",
+        "status": "pending",
+    })
+    return {"action": action}
+
+
+@app.post("/api/devices/{device_id}/sync-activity")
+async def add_device_sync_activity(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    get_current_drone(device_id, authorization)
+    entry = db.add_rom_sync_activity(device_id, payload)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"activity": entry}
+
+
+@app.get("/api/devices/{device_id}/sync-activity")
+async def get_device_sync_activity(device_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    rows = db.get_rom_sync_activity(user["id"], device_id)
+    if rows is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"activity": rows}
 
 
 @app.get("/api/devices/{device_id}/systems")
@@ -1611,7 +1753,7 @@ def get_ui_html() -> str:
                         </div>
                         <div class="menu-label mb-2 d-lg-none">Navigation</div>
                         <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
-                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); switchTab('devices', this)"><i class="bi bi-hdd-network me-2"></i>Drones</a>
+                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>Drones</a>
                             <a href="#/help" role="button" class="btn nav-btn requires-auth" data-tab="help" onclick="event.preventDefault(); switchTab('help', this)"><i class="bi bi-question-circle me-2"></i>Help</a>
                             <a href="#/notifications" role="button" class="btn nav-btn requires-auth" data-tab="notifications" onclick="event.preventDefault(); switchTab('notifications', this)"><i class="bi bi-bell me-2"></i>Notifications</a>
                             <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-github me-2"></i>GitHub</a>
@@ -1689,6 +1831,15 @@ def get_ui_html() -> str:
                         <div id="devices-tab" class="content-section dashboard-tab active">
                             <div id="device-list-view">
                                 <div id="pending-connections"></div>
+                                <div id="integration-token-panel" class="card mb-3">
+                                    <div class="card-body py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
+                                        <div>
+                                            <strong>Drone Authorization Token</strong>
+                                            <div class="small text-muted">Generate a token, paste it into Drone admin, then approve the Psionic connection.</div>
+                                        </div>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="generateIntegrationToken()"><i class="bi bi-key me-1"></i>Generate Token</button>
+                                    </div>
+                                </div>
                                 <h3>Your Drones</h3>
                                 <div id="devices-list"></div>
                             </div>
@@ -1723,6 +1874,8 @@ def get_ui_html() -> str:
                                     <div id="drone-token-panel" class="mb-3"></div>
                                     <div id="drone-speed-panel" class="mb-3"></div>
                                     <div id="drone-auto-sync-panel" class="mb-3"></div>
+                                    <div id="drone-sync-activity-panel" class="mb-3"></div>
+                                    <div id="master-rom-panel" class="mb-3"></div>
                                     <div class="mb-3">
                                         <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
                                         <input id="device-rom-search" class="form-control" type="search" placeholder="Type to filter systems and ROMs" oninput="handleDeviceRomSearch(event)">
@@ -2242,6 +2395,24 @@ def get_ui_html() -> str:
                 }
             }
 
+            async function generateIntegrationToken() {
+                try {
+                    const response = await fetch('/api/integration-tokens', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: JSON.stringify({ label: 'Local Drone onboarding' })
+                    });
+                    if (!response.ok) throw new Error('Failed to generate authorization token');
+                    const data = await response.json();
+                    window.alert(`Drone authorization token. It is shown only once:\\n\\n${data.token.authorization_token}`);
+                } catch (error) {
+                    console.error('Error generating integration token:', error);
+                }
+            }
+
             function updateSelectedDeviceSummary() {
                 const summary = document.getElementById('selected-device-summary');
                 if (!summary) return;
@@ -2542,6 +2713,79 @@ def get_ui_html() -> str:
                 showMessage('Drone sync policy saved.', 'success');
             }
 
+            async function loadMasterRomPanel() {
+                const container = document.getElementById('master-rom-panel');
+                if (!container || !selectedDeviceId) return;
+                try {
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/master-roms`);
+                    if (!response.ok) throw new Error('Failed to load master ROM list');
+                    const rows = (await response.json()).roms || [];
+                    const missing = rows.filter(row => !row.present_on_selected).slice(0, 50);
+                    const systems = [...new Set(missing.map(row => row.system_name).filter(Boolean))].slice(0, 20);
+                    container.innerHTML = `
+                        <div class="card"><div class="card-body py-2">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <strong>Master Swarm ROM List</strong>
+                                <span class="small text-muted">${rows.length} unique ROMs · ${missing.length} missing here</span>
+                            </div>
+                            ${systems.length ? `<div class="d-flex flex-wrap gap-2 mb-2">${systems.map(system => `<button class="btn btn-outline-primary btn-sm" onclick="syncSystem('${escapeHtml(system)}')">Sync ${escapeHtml(system)}</button>`).join('')}</div>` : ''}
+                            ${missing.length ? `<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>System</th><th>ROM</th><th>Available On</th><th></th></tr></thead><tbody>
+                                ${missing.map(row => `<tr>
+                                    <td>${escapeHtml(row.system_name || '')}</td>
+                                    <td>${escapeHtml(row.file_path || row.rom_name || '')}</td>
+                                    <td>${escapeHtml((row.devices || []).map(d => d.device_name || d.device_id).join(', '))}</td>
+                                    <td><button class="btn btn-primary btn-sm" onclick='syncRom(${JSON.stringify(row).replace(/'/g, "&apos;")})'>Sync</button></td>
+                                </tr>`).join('')}
+                            </tbody></table></div>` : '<div class="small text-muted">This Drone has every ROM currently known to the swarm.</div>'}
+                        </div></div>
+                    `;
+                } catch (error) {
+                    container.innerHTML = '<div class="empty-state">Unable to load master ROM list.</div>';
+                }
+            }
+
+            async function syncRom(row) {
+                const response = await fetch(`/api/devices/${selectedDeviceId}/sync-rom`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
+                    body: JSON.stringify(row)
+                });
+                if (!response.ok) throw new Error('Failed to queue ROM sync');
+                showMessage('ROM sync queued. The Drone will choose the source peer automatically.', 'success');
+                await loadSyncActivityPanel();
+            }
+
+            async function syncSystem(systemName) {
+                const response = await fetch(`/api/devices/${selectedDeviceId}/sync-system`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
+                    body: JSON.stringify({ system_name: systemName })
+                });
+                if (!response.ok) throw new Error('Failed to queue system sync');
+                showMessage('System sync queued. The Drone will choose source peers automatically.', 'success');
+                await loadSyncActivityPanel();
+            }
+
+            async function loadSyncActivityPanel() {
+                const container = document.getElementById('drone-sync-activity-panel');
+                if (!container || !selectedDeviceId) return;
+                try {
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/sync-activity`);
+                    if (!response.ok) throw new Error('Failed to load sync activity');
+                    const rows = ((await response.json()).activity || []).slice(0, 20);
+                    container.innerHTML = `<div class="card"><div class="card-body py-2"><strong>ROM Sync Activity</strong>
+                        ${rows.length ? rows.map(row => `<div class="mt-2 small">
+                            <span class="badge ${row.status === 'completed' ? 'text-bg-success' : row.status === 'failed' ? 'text-bg-danger' : 'text-bg-secondary'}">${escapeHtml(row.status || 'pending')}</span>
+                            ${escapeHtml(row.system || '')} / ${escapeHtml(row.rom_name || '')}
+                            ${row.source_drone_id ? `from ${escapeHtml(row.source_drone_id)}` : ''}
+                            ${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}
+                        </div>`).join('') : '<div class="small text-muted mt-1">No ROM sync activity yet.</div>'}
+                    </div></div>`;
+                } catch (error) {
+                    container.innerHTML = '<div class="empty-state">Unable to load ROM sync activity.</div>';
+                }
+            }
+
             async function rotateDroneToken() {
                 if (!selectedDeviceId || !window.confirm('Rotate this Drone token? The old token will stop working immediately.')) return;
                 const response = await fetch(`/api/devices/${selectedDeviceId}/token/rotate`, {
@@ -2573,6 +2817,8 @@ def get_ui_html() -> str:
                 renderDroneNetworkPanel();
                 renderDroneTokenPanel();
                 renderDroneSpeedPanel();
+                loadMasterRomPanel();
+                loadSyncActivityPanel();
             }
 
             function backToDevices() {

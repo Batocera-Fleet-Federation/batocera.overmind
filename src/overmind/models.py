@@ -49,6 +49,7 @@ class DeviceRegister(BaseModel):
     """Device registration request from Batocera app."""
     email: Optional[EmailStr] = None
     password: Optional[str] = None
+    authorization_token: Optional[str] = None
     device_id: str = Field(..., description="Unique device identifier")
     device_name: str = Field(..., description="User-friendly device name")
     batocera_info: BatoceraInfo

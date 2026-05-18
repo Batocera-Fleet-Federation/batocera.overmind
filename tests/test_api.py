@@ -24,6 +24,9 @@ def client():
     db.speed_samples.clear()
     db.device_events.clear()
     db.peer_checks.clear()
+    db.integration_tokens.clear()
+    db.approved_drone_tokens.clear()
+    db.rom_sync_activity.clear()
     db.pending_drone_connections.clear()
     return TestClient(app)
 
@@ -209,6 +212,79 @@ def test_accept_pending_drone_connection_registers_device(client):
     devices_response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
     assert devices_response.status_code == 200
     assert devices_response.json()["devices"][0]["device_id"] == "drone-123"
+
+
+def test_integration_token_onboarding_and_approved_token_claim(client):
+    client.post(
+        "/api/auth/register",
+        json={"email": "test@example.com", "password": "testpass123"},
+    )
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    token_response = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"label": "Test token"},
+    )
+    assert token_response.status_code == 200
+    auth_token = token_response.json()["token"]["authorization_token"]
+
+    register_response = client.post(
+        "/api/devices/register",
+        json={
+            "email": "test@example.com",
+            "authorization_token": auth_token,
+            "device_id": "token-drone",
+            "device_name": "Token Drone",
+            "batocera_info": {
+                "model": "Test Model",
+                "system": "Linux",
+                "architecture": "x86_64",
+                "cpu_model": "Test CPU",
+                "cpu_cores": 4,
+                "cpu_threads": 8,
+                "cpu_max_frequency": "3.0 GHz",
+                "memory_available": "8 GiB",
+                "memory_total": "16 GiB",
+                "ip_address": "192.168.1.1",
+            },
+        },
+    )
+    assert register_response.status_code == 200
+    assert register_response.json()["message"].startswith("Psionic connection detected")
+
+    accept_response = client.post(
+        "/api/drone-connections/token-drone/accept",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert accept_response.status_code == 200
+
+    claim_response = client.post(
+        "/api/devices/register",
+        json={
+            "email": "test@example.com",
+            "authorization_token": auth_token,
+            "device_id": "token-drone",
+            "device_name": "Token Drone",
+            "batocera_info": {
+                "model": "Test Model",
+                "system": "Linux",
+                "architecture": "x86_64",
+                "cpu_model": "Test CPU",
+                "cpu_cores": 4,
+                "cpu_threads": 8,
+                "cpu_max_frequency": "3.0 GHz",
+                "memory_available": "8 GiB",
+                "memory_total": "16 GiB",
+                "ip_address": "192.168.1.1",
+            },
+        },
+    )
+    assert claim_response.status_code == 200
+    assert claim_response.json()["status"] == "approved"
+    assert claim_response.json()["drone_token"]
 
 
 def test_deny_pending_drone_connection(client):
