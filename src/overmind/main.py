@@ -30,7 +30,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "collect_emulator_configs",
     "collect_log_sources",
 }
-SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "90"))
+SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
 
 app = FastAPI(
     title="Batocera Overmind API",
@@ -148,6 +148,7 @@ def device_response(device: dict) -> dict:
         "device_id": device["device_id"],
         "device_name": device["device_name"],
         "batocera_info": device["batocera_info"],
+        "system_info": device.get("system_info") or {},
         "registered_at": device["registered_at"],
         "last_seen": device["last_seen"],
         "network": device.get("network") or {},
@@ -162,7 +163,7 @@ def device_response(device: dict) -> dict:
         "api_port": device.get("api_port"),
         "scheme": device.get("scheme") or "https",
         "certificate": device.get("certificate"),
-        "peer_checks": device.get("peer_checks") or [],
+        "peer_checks": db.get_latest_peer_checks(device.get("device_id")) if device.get("device_id") else [],
         "online": online,
         "status": "online" if online else "offline",
     }
@@ -571,6 +572,7 @@ async def drone_alive(device_id: str, payload: dict, authorization: Optional[str
         api_port=payload.get("api_port") if payload.get("api_port") is not None else None,
         scheme=str(payload.get("scheme") or payload.get("protocol") or "").strip() or None,
         certificate=payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
+        system_info=payload.get("system_info") if isinstance(payload.get("system_info"), dict) else None,
     )
     action = db.claim_next_device_action(device_id)
     updated = db.get_device(device["id"])
@@ -620,7 +622,7 @@ async def add_speed_sample(device_id: str, payload: dict, authorization: Optiona
     sample = db.add_speed_sample(device_id, payload)
     if not sample:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    print(f"Speed sample stored for {device_id}: up={sample.get('upload_mbps')} down={sample.get('download_mbps')}")
+    print(f"Speed sample accepted for {device_id}: up={sample.get('upload_mbps')} down={sample.get('download_mbps')}")
     return {"sample": sample}
 
 
@@ -2419,6 +2421,25 @@ def get_ui_html() -> str:
                 const ipv6 = resolved.ipv6 || [];
                 const cert = device.certificate || {};
                 const peerChecks = device.peer_checks || [];
+                const info = device.system_info || {};
+                const systemRows = [
+                    ['Hostname', info.hostname || device.device_name],
+                    ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
+                    ['Batocera', info.batocera_version],
+                    ['Drone App', info.drone_app_version],
+                    ['Architecture', info.architecture],
+                    ['CPU', info.cpu ? `${info.cpu.model || 'CPU'} ${info.cpu.count ? `(${info.cpu.count} cores)` : ''}` : ''],
+                    ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
+                    ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
+                    ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
+                    ['Updated', info.last_system_info_update || info.updated_at],
+                ].filter(row => row[1]);
+                const latestPeers = Object.values(peerChecks.reduce((acc, check) => {
+                    const key = check.target_drone_id || check.target_address || '';
+                    if (!key) return acc;
+                    if (!acc[key] || String(check.checked_at || '') >= String(acc[key].checked_at || '')) acc[key] = check;
+                    return acc;
+                }, {}));
                 container.innerHTML = `
                     <div class="card"><div class="card-body py-2">
                         <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
@@ -2438,12 +2459,17 @@ def get_ui_html() -> str:
                         <div class="small text-muted">Valid: ${escapeHtml(cert.valid_from || 'n/a')} - ${escapeHtml(cert.valid_until || 'n/a')}</div>
                         <div class="small text-muted">Renewal: ${escapeHtml(cert.renewal_status || 'n/a')}</div>
                         <hr>
+                        <strong>System Information</strong>
+                        ${systemRows.length ? `<div class="row g-2 mt-1">${systemRows.map(([label, value]) => `
+                            <div class="col-12 col-md-6"><div class="small text-muted">${escapeHtml(label)}</div><div class="small">${escapeHtml(String(value || ''))}</div></div>
+                        `).join('')}</div>` : '<div class="small text-muted mt-1">No system information reported yet.</div>'}
+                        <hr>
                         <strong>Peer-to-Peer Checks</strong>
-                        ${peerChecks.length ? peerChecks.slice(0, 12).map(check => `
+                        ${latestPeers.length ? latestPeers.map(check => `
                             <div class="mt-2 p-2 rounded border">
                                 <div class="d-flex justify-content-between gap-2">
-                                    <span class="small mono">${escapeHtml(check.source_drone_id || '')} → ${escapeHtml(check.target_drone_id || '')}</span>
-                                    <span class="badge ${check.status === 'pass' ? 'text-bg-success' : 'text-bg-danger'}">${check.status === 'pass' ? 'GREEN' : 'RED'}</span>
+                                    <span class="small">${escapeHtml(check.target_name || check.target_drone_id || 'Peer Drone')}</span>
+                                    <span class="badge ${check.status === 'pass' ? 'text-bg-success' : 'text-bg-danger'}">${check.status === 'pass' ? 'RESOLVED' : 'FAILED'}</span>
                                 </div>
                                 <div class="small text-muted">${escapeHtml(check.target_address || 'n/a')} · ${escapeHtml(check.checked_at || 'n/a')} · ${check.latency_ms ?? 'n/a'} ms</div>
                                 ${check.failure_reason ? `<div class="small text-danger">${escapeHtml(check.failure_reason)}</div>` : ''}

@@ -262,6 +262,7 @@ class FakeDatabase:
         api_port: Optional[int] = None,
         scheme: Optional[str] = None,
         certificate: Optional[dict] = None,
+        system_info: Optional[dict] = None,
     ):
         """Update last_seen timestamp for device."""
         if internal_id in self.devices:
@@ -292,6 +293,10 @@ class FakeDatabase:
                 clean_cert.pop("key_file", None)
                 clean_cert["last_seen"] = datetime.utcnow()
                 self.devices[internal_id]["certificate"] = clean_cert
+            if isinstance(system_info, dict):
+                clean_info = dict(system_info)
+                clean_info["last_system_info_update"] = datetime.utcnow()
+                self.devices[internal_id]["system_info"] = clean_info
 
     def get_swarm_for_device(self, device_id: str, offline_seconds: int = 90) -> List[dict]:
         device = self.get_device_by_device_id(device_id)
@@ -536,6 +541,27 @@ class FakeDatabase:
         del bucket[:-500]
         device["peer_checks"] = list(reversed(bucket))[:50]
         return cleaned
+
+    def get_latest_peer_checks(self, device_id: str) -> List[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return []
+        devices_by_id = {row.get("device_id"): row for row in self.get_user_devices(device["user_id"])}
+        latest: Dict[str, dict] = {}
+        for check in self.peer_checks.get(device["id"], []):
+            target_id = check.get("target_drone_id")
+            if not target_id or target_id == device_id:
+                continue
+            previous = latest.get(target_id)
+            if previous is None or str(check.get("checked_at") or "") >= str(previous.get("checked_at") or ""):
+                peer = devices_by_id.get(target_id) or {}
+                info = peer.get("system_info") or {}
+                latest[target_id] = {
+                    **check,
+                    "target_name": peer.get("device_name") or info.get("hostname") or target_id,
+                    "source_name": device.get("device_name") or (device.get("system_info") or {}).get("hostname") or device_id,
+                }
+        return sorted(latest.values(), key=lambda row: str(row.get("target_name") or row.get("target_drone_id") or "").lower())
 
     def get_speed_samples(self, user_id: str, device_id: str) -> Optional[List[dict]]:
         device = self.get_device_by_device_id(device_id)
@@ -793,7 +819,8 @@ class FakeDatabase:
                 "data_partition_available": "60 GiB",
                 "ip_address": "192.168.1.101",
                 "battery": "N/A"
-            }
+            },
+            raw_token=demo_drone_token,
         )
         
         # Create sample device for user2

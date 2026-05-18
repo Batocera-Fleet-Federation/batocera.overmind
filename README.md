@@ -12,6 +12,8 @@ A comprehensive system management and game tracking API for Batocera gaming syst
 - Overmind shows registered Drones, online/offline status, network details, certificate metadata, telemetry, speed samples, and peer check results.
 - Normal Drone management still uses bearer tokens and a pull model, so Overmind does not need to reach into your home network for routine actions.
 - Drone-to-Drone API calls can use mTLS with local Drone-created certificates. No public domain is required.
+- Docker images and the shared Compose swarm support local testing with multiple realistic Drone containers.
+- The Drone-to-Overmind heartbeat interval is 60 seconds by default.
 
 **Main features:**
 
@@ -21,6 +23,7 @@ A comprehensive system management and game tracking API for Batocera gaming syst
 - **Integration with Drone:** Works together with Batocera Drone for enhanced admin and monitoring capabilities.
 - **Swarm Awareness:** Tracks which Drones are known, online, and reachable by other Drones.
 - **Telemetry:** Stores speed samples, filesystem events, peer checks, gameplay events, and ROM/library updates.
+- **System Information:** Shows each Drone's latest hostname, platform, Batocera version when available, architecture, CPU, memory, disk, network, uptime, and Docker/runtime indicator.
 - **Action Logging:** Tracks all actions and device responses for easy troubleshooting.
 - **Secure Communication:** Uses authentication and secure connections for device management.
 - **Extensible:** Designed to support future integrations and custom workflows.
@@ -115,6 +118,24 @@ The application will be available at:
 - **API Docs**: `http://localhost:8000/docs`
 - **Alternative API Docs**: `http://localhost:8000/redoc`
 
+### Docker
+
+Build the local image:
+
+```bash
+docker build -t ghcr.io/batocera-fleet-federation/batocera-overmind:local .
+```
+
+Publish a multi-arch GHCR image:
+
+```bash
+gh auth login
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+./scripts/docker-publish.sh --push
+```
+
+The publish script targets `linux/amd64` and `linux/arm64`, tags the next patch version, and updates `latest`. Use `--dry-run` to preview it.
+
 ## API Endpoints
 
 ### Authentication
@@ -153,9 +174,9 @@ The local Docker Compose file includes a lightweight `postgres:16-alpine` servic
 
 ## Drone Push/Pull Architecture
 
-Drones call Overmind every 30 seconds with an alive payload. That payload includes the MAC-address `device_id`, IPv4/IPv6 connectivity info, API port, protocol, certificate metadata, and ROM systems. Overmind validates the Drone bearer token, stores the latest network state, updates `last_seen`, and marks Drones offline when heartbeats stop for the expected window.
+Drones call Overmind every 60 seconds with an alive payload. That payload includes the MAC-address `device_id`, IPv4/IPv6 connectivity info, API port, protocol, certificate metadata, ROM systems, and system information. Overmind validates the Drone bearer token, stores the latest network state, updates `last_seen`, and marks Drones offline after the offline threshold, which defaults to 180 seconds.
 
-Overmind returns the current swarm list in the alive response. Each Drone stores that list, skips itself, and checks the other Drones through their peer health API. The result says which Drone checked which peer, what address was used, whether it passed, how long it took, and the failure reason if it failed. Overmind stores those results and shows them on the selected Drone page.
+Overmind returns the current swarm list in the alive response. Each Drone stores that list, skips itself, and checks the other Drones through their peer health API. The result says which Drone checked which peer, what address was used, whether it passed, how long it took, and the failure reason if it failed. Overmind stores those results and shows only the latest check per peer on the selected Drone page, using `RESOLVED` or `FAILED` labels.
 
 Overmind never needs an inbound connection to the Drone for normal management. Instead, the Overlord queues actions in Overmind, and each Drone claims one pending action during its alive request. The Drone performs the local work, then posts the action status/result back to Overmind with `Authorization: Bearer <drone_token>`.
 
@@ -170,6 +191,18 @@ Drones can send live telemetry events to Overmind, including filesystem create/u
 For Drone-to-Drone security, each Drone creates or reuses a local self-signed certificate during startup. Overmind stores only safe certificate metadata such as fingerprint, subject, issuer, serial number, SANs, validity dates, and renewal status. It does not receive the Drone private key.
 
 These certificates are for Drone-to-Drone peer API calls. Drone-to-Overmind calls continue to use the existing bearer token pattern.
+
+For local swarm testing, use the shared `.github` repo:
+
+```bash
+.github/scripts/import-roms-remotely.sh
+.github/scripts/swarm-up.sh
+.github/scripts/swarm-status.sh
+.github/scripts/run-integration-tests.sh
+.github/scripts/swarm-down.sh --volumes
+```
+
+ROM test data must live under `.github/data/roms/<system>/<files>`. Each Drone container copies a different subset into its own `/userdata/roms` folder, which makes ROM-difference testing possible. If downloads return `{"error": "not found"}`, confirm the source file exists in the configured ROM root and that the URL uses the ROM `unique_id`.
 
 ## Batocera Device Registration
 

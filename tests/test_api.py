@@ -22,6 +22,8 @@ def client():
     db.gamelogs.clear()
     db.device_actions.clear()
     db.speed_samples.clear()
+    db.device_events.clear()
+    db.peer_checks.clear()
     db.pending_drone_connections.clear()
     return TestClient(app)
 
@@ -456,6 +458,70 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
     action = complete_response.json()["action"]
     assert action["result"] == result
     assert action["result_received_at"] is not None
+
+
+def test_alive_stores_system_info_and_peer_detail_is_latest(client):
+    db.populate_fake_data()
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    )
+    token = login_response.json()["access_token"]
+
+    alive_response = client.post(
+        "/api/devices/arcade-cabinet-001/alive",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={
+            "device_id": "arcade-cabinet-001",
+            "network": {"ipv4": ["192.168.1.50"]},
+            "rom_systems": [{"name": "snes"}],
+            "system_info": {
+                "hostname": "arcade-alpha",
+                "architecture": "x86_64",
+                "container": True,
+            },
+        },
+    )
+    assert alive_response.status_code == 200
+
+    first_peer = client.post(
+        "/api/devices/arcade-cabinet-001/peer-checks",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={
+            "results": [
+                {
+                    "source_drone_id": "arcade-cabinet-001",
+                    "target_drone_id": "raspberry-pi-001",
+                    "target_address": "https://old.example",
+                    "status": "fail",
+                    "failure_reason": "timeout",
+                    "checked_at": "2026-05-18T10:00:00Z",
+                },
+                {
+                    "source_drone_id": "arcade-cabinet-001",
+                    "target_drone_id": "raspberry-pi-001",
+                    "target_address": "https://new.example",
+                    "status": "pass",
+                    "latency_ms": 12,
+                    "checked_at": "2026-05-18T10:01:00Z",
+                },
+            ]
+        },
+    )
+    assert first_peer.status_code == 200
+
+    detail_response = client.get(
+        "/api/devices/arcade-cabinet-001",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["system_info"]["hostname"] == "arcade-alpha"
+    assert detail["system_info"]["container"] is True
+    assert len(detail["peer_checks"]) == 1
+    assert detail["peer_checks"][0]["status"] == "pass"
+    assert detail["peer_checks"][0]["target_address"] == "https://new.example"
+    assert detail["peer_checks"][0]["target_name"]
 
 
 def test_profile_and_settings_update(client):
