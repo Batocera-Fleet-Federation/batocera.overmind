@@ -387,9 +387,14 @@ async def register_device(device_data: DeviceRegister):
     if device_data.email and device_data.authorization_token:
         user = db.verify_integration_token(str(device_data.email), device_data.authorization_token)
         if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or authorization token"
+            # Token verification failed — do not block registration entirely.
+            # Fall through so a pending connection is created and the Overlord
+            # can approve the drone manually.
+            print(
+                f"WARN  /api/devices/register: integration token verification failed for "
+                f"device_id={device_data.device_id} email={device_data.email}. "
+                f"Falling through to pending connection flow.",
+                flush=True,
             )
     if device_data.email and device_data.password:
         user = db.get_user_by_email(device_data.email)
@@ -410,6 +415,37 @@ async def register_device(device_data: DeviceRegister):
             }
         return {
             "message": "Drone already registered for this Overlord.",
+            "status": "registered",
+            "device_id": device_data.device_id,
+        }
+
+    # Even without a valid user token, check if this device was already approved
+    # by the Overlord. This handles the case where the drone re-polls register
+    # after acceptance but has no valid auth credentials.
+    if db.get_device_by_device_id(device_data.device_id):
+        approved_token = db.approved_drone_tokens.pop(device_data.device_id, None)
+        if approved_token:
+            return {
+                "message": "Drone approved by Overlord.",
+                "status": "approved",
+                "device_id": device_data.device_id,
+                "drone_token": approved_token,
+            }
+        # Drone already registered — try returning its existing token so the
+        # drone can start polling /alive immediately instead of waiting for a
+        # new token. The token may have been consumed already from a prior
+        # successful registration attempt, so fall back to offering a rotation.
+        existing_device = db.get_device_by_device_id(device_data.device_id)
+        rotated = db.rotate_device_token(existing_device["user_id"], device_data.device_id) if existing_device else None
+        if rotated:
+            return {
+                "message": "Drone already registered. Token rotated for this Drone.",
+                "status": "approved",
+                "device_id": device_data.device_id,
+                "drone_token": rotated["token"],
+            }
+        return {
+            "message": "Drone already registered. Awaiting the correct credentials or token rotation.",
             "status": "registered",
             "device_id": device_data.device_id,
         }
@@ -2407,7 +2443,7 @@ def get_ui_html() -> str:
                     });
                     if (!response.ok) throw new Error('Failed to generate authorization token');
                     const data = await response.json();
-                    window.alert(`Drone authorization token. It is shown only once:\\n\\n${data.token.authorization_token}`);
+                    showTokenModal(data.token.authorization_token);
                 } catch (error) {
                     console.error('Error generating integration token:', error);
                 }
@@ -3046,6 +3082,31 @@ def get_ui_html() -> str:
                 if (tabName === 'profile' || tabName === 'notifications') renderProfileUI();
                 setPageChrome(tabName);
                 if (updateUrl) setRoute(tabName);
+            }
+
+            function showTokenModal(tokenValue) {
+                const hidden = document.getElementById('token-modal-overlay');
+                if (hidden) hidden.remove();
+                const overlay = document.createElement('div');
+                overlay.id = 'token-modal-overlay';
+                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;';
+                overlay.innerHTML = `
+                  <div style="background:var(--admin-surface,#151f32);border:1px solid var(--admin-border,#31405f);border-radius:0.75rem;max-width:600px;width:90%;padding:1.5rem;box-shadow:0 1rem 3rem rgba(0,0,0,0.45);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+                      <h4 style="margin:0;color:var(--admin-text,#ecf6ff);">Drone Authorization Token</h4>
+                      <button onclick="this.closest('#token-modal-overlay').remove()" style="background:transparent;border:none;color:var(--admin-muted,#9fb0c9);font-size:1.5rem;cursor:pointer;">&times;</button>
+                    </div>
+                    <p style="color:var(--admin-muted,#9fb0c9);margin-bottom:0.75rem;">Copy this token and paste it into the Drone admin page. It is shown only once.</p>
+                    <div style="display:flex;gap:0.5rem;">
+                      <input id="token-modal-value" type="text" readonly value="${escapeHtml(tokenValue)}" style="flex:1;font-family:monospace;background:rgba(0,0,0,0.3);border:1px solid var(--admin-border,#31405f);color:var(--admin-text,#ecf6ff);padding:0.65rem;border-radius:0.35rem;font-size:0.85rem;">
+                      <button onclick="navigator.clipboard.writeText(document.getElementById('token-modal-value').value).then(()=>{const b=this;b.textContent='Copied!';setTimeout(()=>b.innerHTML='<i class=\\'bi bi-clipboard\\'></i>',2000)}).catch(()=>{this.textContent='Copy failed';setTimeout(()=>this.innerHTML='<i class=\\'bi bi-clipboard\\'></i>',2000)})" style="background:var(--admin-sidebar-accent,#00c2ff);border:none;color:#06111f;font-weight:800;padding:0.65rem 1rem;border-radius:0.35rem;cursor:pointer;white-space:nowrap;"><i class="bi bi-clipboard"></i></button>
+                    </div>
+                    <div style="margin-top:1rem;text-align:right;">
+                      <button onclick="this.closest('#token-modal-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid var(--admin-border,#31405f);color:var(--admin-text,#ecf6ff);padding:0.5rem 1rem;border-radius:0.35rem;cursor:pointer;">Close</button>
+                    </div>
+                  </div>
+                `;
+                document.body.appendChild(overlay);
             }
 
             function showMessage(message, type) {
