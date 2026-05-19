@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import timedelta
-from typing import Optional
+from typing import Optional, Tuple
 
 from overmind.models import (
     UserRegister, UserLogin, User, DeviceRegister,
@@ -41,9 +41,9 @@ app = FastAPI(
 )
 
 
-def ensure_self_signed_cert() -> tuple[Path | None, Path | None]:
+def ensure_self_signed_cert() -> Tuple[Optional[Path], Optional[Path]]:
     """Create a self-signed TLS certificate if one does not already exist."""
-    cert_dir = Path(os.getenv("TLS_SELF_SIGNED_DIR", "./local-data/certs"))
+    cert_dir = Path(os.getenv("TLS_SELF_SIGNED_DIR", "./local-data/certs")).expanduser()
     cert_dir.mkdir(parents=True, exist_ok=True)
 
     key_file = cert_dir / "server.key"
@@ -125,9 +125,6 @@ def build_login_response(user: dict) -> dict:
         data={"sub": user["id"], "email": user["email"]},
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    cert = dict(device.get("certificate") or {})
-    cert.pop("public_certificate", None)
-    cert.pop("certificate_pem", None)
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -148,6 +145,9 @@ def device_response(device: dict) -> dict:
         online = bool(last_seen and last_seen >= datetime.utcnow() - timedelta(seconds=SWARM_OFFLINE_THRESHOLD_SECONDS))
     except Exception:
         online = False
+    cert = dict(device.get("certificate") or {})
+    cert.pop("private_key", None)
+    cert.pop("key", None)
     return {
         "id": device["id"],
         "device_id": device["device_id"],
@@ -3103,9 +3103,30 @@ async def startup_event():
 
 if __name__ == "__main__":
     import uvicorn
-    key_file, cert_file = ensure_self_signed_cert()
-    kwargs = {"host": "0.0.0.0", "port": 8000}
-    if key_file and cert_file:
-        kwargs["ssl_keyfile"] = str(key_file)
-        kwargs["ssl_certfile"] = str(cert_file)
-    uvicorn.run(app, **kwargs)
+
+    host = os.getenv("OVERMIND_HOST", "0.0.0.0")
+    port = int(os.getenv("OVERMIND_PORT", os.getenv("PORT", "8000")))
+    cert_file = os.getenv("TLS_CERT_FILE")
+    key_file = os.getenv("TLS_KEY_FILE")
+
+    if cert_file and key_file:
+        cert_path = Path(cert_file).expanduser()
+        key_path = Path(key_file).expanduser()
+    else:
+        key_path, cert_path = ensure_self_signed_cert()
+
+    uvicorn_kwargs = {
+        "app": app,
+        "host": host,
+        "port": port,
+    }
+
+    if key_path and cert_path:
+        uvicorn_kwargs["ssl_keyfile"] = str(key_path)
+        uvicorn_kwargs["ssl_certfile"] = str(cert_path)
+        print(f"🔐 Starting Batocera Overmind over HTTPS on https://{host}:{port}")
+        print(f"🔐 TLS cert: {cert_path}")
+    else:
+        print("⚠️  Starting Batocera Overmind over HTTP because TLS certificate setup failed")
+
+    uvicorn.run(**uvicorn_kwargs)
