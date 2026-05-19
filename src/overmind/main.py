@@ -2843,45 +2843,88 @@ def get_ui_html() -> str:
             }
 
             async function loadSwarmRomAvailabilityPanel() {
+                // Render a single master ROM table that shows all known ROMs across the swarm
+                // and indicates whether the selected Drone already has each ROM.
                 const container = document.getElementById('swarm-rom-availability-panel');
                 if (!container || !selectedDeviceId) return;
                 try {
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/master-roms`);
                     if (!response.ok) throw new Error('Failed to load swarm ROM availability');
                     const rows = (await response.json()).roms || [];
-                    const missing = rows.filter(row => !row.present_on_selected).slice(0, 50);
-                    const systems = [...new Set(missing.map(row => row.system_name).filter(Boolean))].slice(0, 20);
+
+                    // Apply client-side search/filter by system or rom name
+                    const query = (deviceRomSearchQuery || '').trim().toLowerCase();
+                    const filtered = !query ? rows : rows.filter(r => {
+                        const system = String(r.system_name || '').toLowerCase();
+                        const file = String(r.file_path || r.rom_name || '').toLowerCase();
+                        return system.includes(query) || file.includes(query);
+                    });
+
+                    // Build table rows: present (local) or missing (available_on_drones)
+                    const total = filtered.length;
+                    const missingCount = filtered.filter(r => !r.present_on_selected).length;
+
                     container.innerHTML = `
                         <div class="card"><div class="card-body py-2">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <strong>Swarm ROM Availability</strong>
-                                <span class="small text-muted">${rows.length} unique ROMs · ${missing.length} missing here</span>
+                                <strong>ROMs (Master)</strong>
+                                <span class="small text-muted">${total} ROMs · ${missingCount} missing here</span>
                             </div>
-                            ${systems.length ? `<div class="d-flex flex-wrap gap-2 mb-2">${systems.map(system => `<button class="btn btn-outline-primary btn-sm" onclick="syncSystem('${escapeHtml(system)}')">Sync ${escapeHtml(system)}</button>`).join('')}</div>` : ''}
-                            ${missing.length ? `<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>System</th><th>ROM</th><th>Available On</th><th></th></tr></thead><tbody>
-                                ${missing.map(row => `<tr>
-                                    <td>${escapeHtml(row.system_name || '')}</td>
-                                    <td>${escapeHtml(row.file_path || row.rom_name || '')}</td>
-                                    <td>${escapeHtml((row.devices || []).map(d => d.device_name || d.device_id).join(', '))}</td>
-                                    <td><button class="btn btn-primary btn-sm" onclick='syncRom(${JSON.stringify(row).replace(/'/g, "&apos;")})'>Sync</button></td>
-                                </tr>`).join('')}
-                            </tbody></table></div>` : '<div class="small text-muted">This Drone has every ROM currently known to the swarm.</div>'}
+                            <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                                <th>System</th>
+                                <th>ROM</th>
+                                <th>Size</th>
+                                <th>Source</th>
+                                <th>Status</th>
+                                <th></th>
+                            </tr></thead><tbody>
+                                ${filtered.map(row => {
+                                    const present = !!row.present_on_selected;
+                                    const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
+                                    const preferred = row.preferred_source_name || (row.devices && row.devices[0] && (row.devices[0].device_name || row.devices[0].device_id)) || '';
+                                    const sizeText = row.size ? `${(Number(row.size) / 1024 / 1024).toFixed(2)} MB` : (row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '');
+                                    const statusLabel = present ? (row.present_label || 'Present') : (row.devices && row.devices.length ? 'Missing' : 'Unavailable');
+                                    const showSync = !present && row.devices && row.devices.length;
+                                    const rowData = Object.assign({}, row, { preferred_sync_source: row.preferred_source || preferred });
+                                    return `
+                                        <tr>
+                                            <td>${escapeHtml(row.system_name || '')}</td>
+                                            <td style="min-width:240px">${escapeHtml(row.file_path || row.rom_name || '')}</td>
+                                            <td class="text-muted">${escapeHtml(sizeText)}</td>
+                                            <td class="text-muted">${escapeHtml(sources || preferred)}</td>
+                                            <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${escapeHtml(statusLabel)}</span></td>
+                                            <td>
+                                                ${showSync ? `<button class="btn btn-primary btn-sm" onclick='syncRom(${JSON.stringify(rowData).replace(/'/g, "&apos;")})'>Sync</button>` : ''}
+                                            </td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody></table></div>
+                            ${total ? '' : '<div class="small text-muted">No ROMs found for this filter.</div>'}
                         </div></div>
                     `;
                 } catch (error) {
-                    container.innerHTML = '<div class="empty-state">Unable to load swarm ROM availability.</div>';
+                    console.error('Error loading master ROM table:', error);
+                    container.innerHTML = '<div class="empty-state">Unable to load ROMs.</div>';
                 }
             }
 
             async function syncRom(row) {
-                const response = await fetch(`/api/devices/${selectedDeviceId}/sync-rom`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                    body: JSON.stringify(row)
-                });
-                if (!response.ok) throw new Error('Failed to queue ROM sync');
-                showMessage('ROM sync queued. The Drone will choose the source peer automatically.', 'success');
-                await loadSyncActivityPanel();
+                try {
+                    const response = await fetch(`/api/devices/${selectedDeviceId}/sync-rom`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
+                        body: JSON.stringify(row)
+                    });
+                    if (!response.ok) throw new Error('Failed to queue ROM sync');
+                    showMessage('ROM sync queued. The Drone will choose the source peer automatically.', 'success');
+                    await loadSyncActivityPanel();
+                    // Refresh the master ROM table so the Sync button disappears once the Drone reports the ROM
+                    await loadSwarmRomAvailabilityPanel();
+                } catch (error) {
+                    console.error('Error queuing ROM sync:', error);
+                    showMessage('Failed to queue ROM sync.', 'error');
+                }
             }
 
             async function syncSystem(systemName) {
@@ -2970,7 +3013,7 @@ def get_ui_html() -> str:
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
                 if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
 
-                if (currentDeviceView === 'systems') loadDeviceSystems();
+                if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
                 actionRefreshTimer = null;
