@@ -149,6 +149,10 @@ class FakeDatabase:
         ]
 
     def verify_integration_token(self, email: Optional[str], token: Optional[str]) -> Optional[dict]:
+        claimed = self.claim_integration_token(email, token, None)
+        return claimed["user"] if claimed else None
+
+    def claim_integration_token(self, email: Optional[str], token: Optional[str], device_id: Optional[str]) -> Optional[dict]:
         if not email or not token:
             return None
         user = self.get_user_by_email(email)
@@ -158,8 +162,14 @@ class FakeDatabase:
             if entry.get("revoked_at"):
                 continue
             if verify_drone_token(token, entry.get("token_hash")):
+                bound_device = entry.get("bound_device_id")
+                if bound_device and device_id and bound_device != device_id:
+                    return None
+                if device_id and not bound_device:
+                    entry["bound_device_id"] = device_id
+                    entry["bound_at"] = datetime.utcnow()
                 entry["last_used_at"] = datetime.utcnow()
-                return user
+                return {"user": user, "token": entry}
         return None
 
     def revoke_integration_token(self, user_id: str, token_id: str) -> bool:
@@ -252,6 +262,7 @@ class FakeDatabase:
         device_name: str,
         batocera_info: dict,
         raw_token: Optional[str] = None,
+        authorization_token_id: Optional[str] = None,
     ) -> str:
         """Register a new device."""
         internal_id = str(uuid.uuid4())
@@ -273,6 +284,7 @@ class FakeDatabase:
             "rom_systems": [],
             "auto_sync_policy": {"enabled": False, "systems": []},
             "drone_token_hash": hash_drone_token(raw_token or generate_drone_token()),
+            "authorization_token_id": authorization_token_id,
             "api_port": batocera_info.get("api_port") if isinstance(batocera_info, dict) else None,
             "scheme": (batocera_info.get("scheme") if isinstance(batocera_info, dict) else None) or "https",
             "reachable_url": batocera_info.get("reachable_url") if isinstance(batocera_info, dict) else None,
@@ -408,6 +420,12 @@ class FakeDatabase:
             return None
         if not verify_drone_token(raw_token, device.get("drone_token_hash") or ""):
             return None
+        auth_token_id = device.get("authorization_token_id")
+        if auth_token_id:
+            token_rows = self.integration_tokens.get(device.get("user_id"), [])
+            backing = next((row for row in token_rows if row.get("id") == auth_token_id), None)
+            if not backing or backing.get("revoked_at"):
+                return None
         return device
 
     def rotate_device_token(self, user_id: str, device_id: str) -> Optional[dict]:
@@ -419,6 +437,16 @@ class FakeDatabase:
         device["drone_token_hash"] = hash_drone_token(raw_token)
         device["token_rotated_at"] = datetime.utcnow()
         return {"device": device, "token": raw_token}
+
+    def set_device_authorization_token(self, user_id: str, device_id: str, token_id: Optional[str]) -> bool:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device["user_id"] != user_id:
+            return False
+        previous = device.get("authorization_token_id")
+        if previous and previous != token_id:
+            self.revoke_integration_token(user_id, previous)
+        device["authorization_token_id"] = token_id
+        return True
 
     def update_device_auto_sync_policy(self, user_id: str, device_id: str, enabled: bool, systems: list) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)
@@ -534,8 +562,7 @@ class FakeDatabase:
         """Persist returned action data on the device record for UI use."""
         result_type = result.get("type")
         if result_type == "rom_metadata":
-            systems = result.get("systems") if isinstance(result.get("systems"), list) else []
-            self.update_device_last_seen(device["id"], rom_systems=systems)
+            self.store_rom_metadata(device.get("device_id"), result)
         if result_type == "emulator_configs":
             device["emulator_configs"] = result
         if result_type == "log_sources":
@@ -544,6 +571,32 @@ class FakeDatabase:
             for activity in result.get("activity") if isinstance(result.get("activity"), list) else []:
                 if isinstance(activity, dict):
                     self.add_rom_sync_activity(device.get("device_id"), activity)
+
+    def store_rom_metadata(self, device_id: str, metadata: dict) -> None:
+        device = self.get_device_by_device_id(device_id)
+        if not device or not isinstance(metadata, dict):
+            return
+        systems = metadata.get("systems") if isinstance(metadata.get("systems"), list) else []
+        self.update_device_last_seen(device["id"], rom_systems=systems)
+        device["rom_metadata"] = metadata
+
+        grouped: Dict[str, list] = {}
+        for item in metadata.get("roms") if isinstance(metadata.get("roms"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            system_name = str(item.get("system") or item.get("system_name") or "").strip()
+            if not system_name:
+                continue
+            rom_name = str(item.get("rom_name") or item.get("name") or item.get("title") or "").strip()
+            file_path = str(item.get("file_path") or item.get("rom_file") or item.get("rom_path") or rom_name).strip()
+            grouped.setdefault(system_name, []).append({
+                "rom_name": rom_name or file_path,
+                "rom_md5": item.get("rom_md5") or item.get("md5") or item.get("hash"),
+                "file_path": file_path,
+                "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
+            })
+        for system_name, roms in grouped.items():
+            self.add_roms(device_id, system_name, roms)
 
     def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)

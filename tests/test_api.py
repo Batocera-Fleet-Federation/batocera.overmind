@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from overmind.main import app
+from overmind.main import app, ensure_self_signed_cert
 from overmind.db import db
 
 
@@ -288,6 +288,102 @@ def test_integration_token_onboarding_and_approved_token_claim(client):
     assert claim_response.status_code == 200
     assert claim_response.json()["status"] == "approved"
     assert claim_response.json()["drone_token"]
+
+
+def test_integration_token_cannot_register_different_drone(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    user_token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    auth_token = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"label": "single use"},
+    ).json()["token"]["authorization_token"]
+
+    first = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=auth_token, device_id="drone-b"),
+    )
+    assert second.status_code == 401
+    assert db.get_device_by_device_id("drone-b") is None
+
+
+def test_re_register_same_drone_rotates_bearer_and_old_token_fails(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    user_token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    auth_token = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"label": "same drone"},
+    ).json()["token"]["authorization_token"]
+
+    first = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
+    )
+    old_drone_token = first.json()["drone_token"]
+    second = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
+    )
+    assert second.status_code == 200
+    new_drone_token = second.json()["drone_token"]
+    assert new_drone_token != old_drone_token
+
+    obsolete = client.post(
+        "/api/devices/drone-a/alive",
+        headers={"Authorization": f"Bearer {old_drone_token}"},
+        json={"network": {"ipv4": ["192.168.1.50"]}},
+    )
+    assert obsolete.status_code == 401
+
+    current = client.post(
+        "/api/devices/drone-a/alive",
+        headers={"Authorization": f"Bearer {new_drone_token}"},
+        json={"network": {"ipv4": ["192.168.1.50"]}},
+    )
+    assert current.status_code == 200
+
+
+def test_revoked_integration_token_invalidates_backed_drone_token(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    user_token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    token_payload = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"label": "revocable"},
+    ).json()["token"]
+    auth_token = token_payload["authorization_token"]
+    drone_token = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
+    ).json()["drone_token"]
+
+    revoke = client.delete(
+        f"/api/integration-tokens/{token_payload['id']}",
+        headers={"Authorization": f"Bearer {user_token}"},
+    )
+    assert revoke.status_code == 200
+    alive = client.post(
+        "/api/devices/drone-a/alive",
+        headers={"Authorization": f"Bearer {drone_token}"},
+        json={"network": {"ipv4": ["192.168.1.50"]}},
+    )
+    assert alive.status_code == 401
 
 
 def test_deny_pending_drone_connection(client):
@@ -602,6 +698,60 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
     assert detail["peer_checks"][0]["status"] == "pass"
     assert detail["peer_checks"][0]["target_address"] == "https://new.example"
     assert detail["peer_checks"][0]["target_name"]
+
+
+def test_alive_persists_rom_metadata_and_swarm_reachable_url(client):
+    db.populate_fake_data()
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    )
+    token = login_response.json()["access_token"]
+
+    alive_response = client.post(
+        "/api/devices/arcade-cabinet-001/alive",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={
+            "device_id": "arcade-cabinet-001",
+            "network": {"ipv4": ["192.168.1.50"], "ipv6": ["fd00::50"], "hostname_override": "bff-drone-a"},
+            "reachable_url": "https://bff-drone-a:8443",
+            "rom_metadata": {
+                "type": "rom_metadata",
+                "roms_root": "/userdata/roms",
+                "systems": [{"name": "snes", "rom_count": 2}],
+                "roms": [
+                    {"system": "snes", "name": "Super Metroid", "rom_file": "Super Metroid (USA).zip", "byte_count": 32},
+                    {"system": "snes", "name": "Chrono Trigger", "rom_file": "Chrono Trigger (USA).zip", "byte_count": 32},
+                ],
+                "gamelists": [],
+            },
+        },
+    )
+    assert alive_response.status_code == 200
+    swarm_peer = next(row for row in alive_response.json()["swarm"] if row["device_id"] == "arcade-cabinet-001")
+    assert swarm_peer["reachable_url"] == "https://bff-drone-a:8443"
+
+    roms_response = client.get(
+        "/api/devices/arcade-cabinet-001/roms",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert roms_response.status_code == 200
+    assert len(roms_response.json()["systems"]["snes"]) == 2
+
+
+def test_overmind_manufactures_and_reuses_certificate(tmp_path, monkeypatch):
+    monkeypatch.setenv("TLS_SELF_SIGNED_DIR", str(tmp_path))
+    key_file, cert_file = ensure_self_signed_cert()
+    assert key_file.exists()
+    assert cert_file.exists()
+    first_key_mtime = key_file.stat().st_mtime_ns
+    first_cert_mtime = cert_file.stat().st_mtime_ns
+
+    second_key, second_cert = ensure_self_signed_cert()
+    assert second_key == key_file
+    assert second_cert == cert_file
+    assert key_file.stat().st_mtime_ns == first_key_mtime
+    assert cert_file.stat().st_mtime_ns == first_cert_mtime
 
 
 def test_profile_and_settings_update(client):

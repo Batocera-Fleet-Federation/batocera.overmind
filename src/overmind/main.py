@@ -43,14 +43,29 @@ app = FastAPI(
 )
 
 
+def _tls_file_pair_usable(key_file: Path, cert_file: Path) -> bool:
+    if not key_file.exists() or not cert_file.exists():
+        return False
+    checks = [
+        ["openssl", "x509", "-in", str(cert_file), "-noout"],
+        ["openssl", "pkey", "-in", str(key_file), "-noout"],
+    ]
+    try:
+        for cmd in checks:
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=5)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
 def ensure_self_signed_cert() -> Tuple[Optional[Path], Optional[Path]]:
-    """Create a self-signed TLS certificate if one does not already exist."""
+    """Create a self-signed TLS certificate unless the configured pair is usable."""
     cert_dir = Path(os.getenv("TLS_SELF_SIGNED_DIR", "./local-data/certs")).expanduser()
     cert_dir.mkdir(parents=True, exist_ok=True)
 
     key_file = cert_dir / "server.key"
     cert_file = cert_dir / "server.crt"
-    if key_file.exists() and cert_file.exists():
+    if _tls_file_pair_usable(key_file, cert_file):
         return key_file, cert_file
 
     cmd = [
@@ -73,7 +88,7 @@ def ensure_self_signed_cert() -> Tuple[Optional[Path], Optional[Path]]:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         return key_file, cert_file
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        print(f"⚠️  Unable to create self-signed certificate: {exc}")
+        print(f"Unable to create self-signed certificate: {exc}")
         return None, None
     
 def run_https_app() -> None:
@@ -105,6 +120,11 @@ def run_https_app() -> None:
 
     elif not ssl_keyfile or not ssl_certfile:
         raise RuntimeError("Both --ssl-keyfile and --ssl-certfile must be specified together.")
+    elif not _tls_file_pair_usable(Path(ssl_keyfile), Path(ssl_certfile)):
+        print(f"Configured TLS certificate/key are unusable; manufacturing self-signed certificate instead: {ssl_certfile}")
+        generated_keyfile, generated_certfile = ensure_self_signed_cert()
+        ssl_keyfile = str(generated_keyfile) if generated_keyfile else None
+        ssl_certfile = str(generated_certfile) if generated_certfile else None
 
     if not ssl_keyfile or not ssl_certfile:
         raise RuntimeError("HTTPS is required, but no TLS certificate/key could be loaded or generated.")
@@ -429,9 +449,11 @@ def get_current_drone(device_id: str, authorization: Optional[str]) -> dict:
 async def register_device(device_data: DeviceRegister, authorization: Optional[str] = Header(default=None)):
     """Register an authorized Drone and return its bearer token."""
     raw_auth_token = device_data.authorization_token or (get_bearer_token(authorization) if authorization else None)
-    user = db.verify_integration_token(str(device_data.email or ""), raw_auth_token)
-    if not user:
+    claimed_token = db.claim_integration_token(str(device_data.email or ""), raw_auth_token, device_data.device_id)
+    if not claimed_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Drone authorization token")
+    user = claimed_token["user"]
+    integration_token = claimed_token["token"]
 
     batocera_info = device_data.batocera_info.model_dump()
     if device_data.api_port is not None:
@@ -446,6 +468,7 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
         if not rotated:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
         device = rotated["device"]
+        db.set_device_authorization_token(user["id"], device_data.device_id, integration_token.get("id"))
         device["device_name"] = device_data.device_name
         db.update_device_last_seen(
             device["id"],
@@ -464,7 +487,14 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
         }
 
     raw_drone_token = generate_drone_token()
-    internal_id = db.create_device(user["id"], device_data.device_id, device_data.device_name, batocera_info, raw_token=raw_drone_token)
+    internal_id = db.create_device(
+        user["id"],
+        device_data.device_id,
+        device_data.device_name,
+        batocera_info,
+        raw_token=raw_drone_token,
+        authorization_token_id=integration_token.get("id"),
+    )
     device = db.get_device(internal_id)
     return {
         "message": "Drone registered to the Overlord.",
@@ -679,6 +709,8 @@ async def drone_alive(device_id: str, payload: dict, authorization: Optional[str
         certificate=payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
         system_info=payload.get("system_info") if isinstance(payload.get("system_info"), dict) else None,
     )
+    if isinstance(payload.get("rom_metadata"), dict):
+        db.store_rom_metadata(device_id, payload["rom_metadata"])
     action = db.claim_next_device_action(device_id)
     updated = db.get_device(device["id"])
     swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)

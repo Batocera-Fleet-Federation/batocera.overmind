@@ -197,7 +197,7 @@ These certificates are for Drone-to-Drone peer API calls. Drone-to-Overmind call
 For local swarm testing, use the shared `.github` repo:
 
 ```bash
-.github/scripts/import-roms-remotely.sh
+.github/scripts/import-batocera-test-data.sh
 .github/scripts/swarm-up.sh
 .github/scripts/swarm-status.sh
 .github/scripts/run-integration-tests.sh
