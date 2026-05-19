@@ -256,6 +256,9 @@ class FakeDatabase:
         """Register a new device."""
         internal_id = str(uuid.uuid4())
         network_state = resolve_reported_network(batocera_info.get("network") if isinstance(batocera_info, dict) else None)
+        certificate = self._clean_device_certificate(
+            batocera_info.get("certificate") if isinstance(batocera_info, dict) else None
+        )
         self.devices[internal_id] = {
             "id": internal_id,
             "user_id": user_id,
@@ -270,9 +273,10 @@ class FakeDatabase:
             "rom_systems": [],
             "auto_sync_policy": {"enabled": False, "systems": []},
             "drone_token_hash": hash_drone_token(raw_token or generate_drone_token()),
-            "api_port": None,
-            "scheme": "https",
-            "certificate": None,
+            "api_port": batocera_info.get("api_port") if isinstance(batocera_info, dict) else None,
+            "scheme": (batocera_info.get("scheme") if isinstance(batocera_info, dict) else None) or "https",
+            "reachable_url": batocera_info.get("reachable_url") if isinstance(batocera_info, dict) else None,
+            "certificate": certificate,
             "peer_checks": [],
         }
         self.user_devices[user_id].append(internal_id)
@@ -284,6 +288,16 @@ class FakeDatabase:
         self.peer_checks[internal_id] = []
         self.rom_sync_activity[internal_id] = []
         return internal_id
+
+    def _clean_device_certificate(self, certificate: Optional[dict]) -> Optional[dict]:
+        if not isinstance(certificate, dict):
+            return None
+        clean_cert = dict(certificate)
+        clean_cert.pop("private_key", None)
+        clean_cert.pop("key", None)
+        clean_cert.pop("key_file", None)
+        clean_cert["last_seen"] = datetime.utcnow()
+        return clean_cert
     
     def get_device(self, internal_id: str) -> Optional[dict]:
         """Get device by internal ID."""
@@ -308,6 +322,7 @@ class FakeDatabase:
         rom_systems: Optional[list] = None,
         api_port: Optional[int] = None,
         scheme: Optional[str] = None,
+        reachable_url: Optional[str] = None,
         certificate: Optional[dict] = None,
         system_info: Optional[dict] = None,
     ):
@@ -333,13 +348,10 @@ class FakeDatabase:
                 self.devices[internal_id]["api_port"] = api_port
             if scheme:
                 self.devices[internal_id]["scheme"] = scheme
+            if reachable_url:
+                self.devices[internal_id]["reachable_url"] = reachable_url
             if isinstance(certificate, dict):
-                clean_cert = dict(certificate)
-                clean_cert.pop("private_key", None)
-                clean_cert.pop("key", None)
-                clean_cert.pop("key_file", None)
-                clean_cert["last_seen"] = datetime.utcnow()
-                self.devices[internal_id]["certificate"] = clean_cert
+                self.devices[internal_id]["certificate"] = self._clean_device_certificate(certificate)
             if isinstance(system_info, dict):
                 clean_info = dict(system_info)
                 clean_info["last_system_info_update"] = datetime.utcnow()
@@ -371,6 +383,7 @@ class FakeDatabase:
                 "public_ip": public_ip,
                 "api_port": peer.get("api_port") or 8443,
                 "scheme": peer.get("scheme") or "https",
+                "reachable_url": peer.get("reachable_url"),
                 "last_alive": last_seen,
                 "last_seen": last_seen,
                 "online": online,

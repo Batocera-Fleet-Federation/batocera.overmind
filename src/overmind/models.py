@@ -21,6 +21,12 @@ class BatoceraInfo(BaseModel):
     display_refresh_rate: Optional[str] = Field(None, description="Display refresh rate")
     data_partition_available: Optional[str] = Field(None, description="Available disk space")
     ip_address: str = Field(..., description="Network IP address")
+    network: Optional[dict] = None
+    api_port: Optional[int] = None
+    scheme: Optional[str] = None
+    reachable_url: Optional[str] = None
+    certificate: Optional[dict] = None
+    system_info: Optional[dict] = None
     battery: Optional[str] = Field(None, description="Battery status")
 
 
@@ -53,6 +59,9 @@ class DeviceRegister(BaseModel):
     device_id: str = Field(..., description="Unique device identifier")
     device_name: str = Field(..., description="User-friendly device name")
     batocera_info: BatoceraInfo
+    api_port: Optional[int] = None
+    scheme: Optional[str] = None
+    reachable_url: Optional[str] = None
 
 
 class SocialAuthRequest(BaseModel):

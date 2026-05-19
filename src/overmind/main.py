@@ -19,6 +19,7 @@ from overmind.models import (
 )
 from overmind.db import db
 from overmind import auth
+from overmind.drone_security import generate_drone_token
 from overmind.postgres_store import postgres_store
 
 SUPPORTED_DEVICE_ACTIONS = {
@@ -167,6 +168,7 @@ def device_response(device: dict) -> dict:
         "token_rotated_at": device.get("token_rotated_at"),
         "api_port": device.get("api_port"),
         "scheme": device.get("scheme") or "https",
+        "reachable_url": device.get("reachable_url"),
         "certificate": cert or None,
         "peer_checks": db.get_latest_peer_checks(device.get("device_id")) if device.get("device_id") else [],
         "online": online,
@@ -381,90 +383,52 @@ def get_current_drone(device_id: str, authorization: Optional[str]) -> dict:
 # ==================== Device Management ====================
 
 @app.post("/api/devices/register")
-async def register_device(device_data: DeviceRegister):
-    """Detect a drone attempting to connect to Overmind."""
-    user = None
-    if device_data.email and device_data.authorization_token:
-        user = db.verify_integration_token(str(device_data.email), device_data.authorization_token)
-        if not user:
-            # Token verification failed — do not block registration entirely.
-            # Fall through so a pending connection is created and the Overlord
-            # can approve the drone manually.
-            print(
-                f"WARN  /api/devices/register: integration token verification failed for "
-                f"device_id={device_data.device_id} email={device_data.email}. "
-                f"Falling through to pending connection flow.",
-                flush=True,
-            )
-    if device_data.email and device_data.password:
-        user = db.get_user_by_email(device_data.email)
-        if not user or not auth.verify_password(device_data.password, user["password"]):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password"
-            )
+async def register_device(device_data: DeviceRegister, authorization: Optional[str] = Header(default=None)):
+    """Register an authorized Drone and return its bearer token."""
+    raw_auth_token = device_data.authorization_token or (get_bearer_token(authorization) if authorization else None)
+    user = db.verify_integration_token(str(device_data.email or ""), raw_auth_token)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Drone authorization token")
 
-    if user and db.device_exists(user["id"], device_data.device_id):
-        approved_token = db.approved_drone_tokens.pop(device_data.device_id, None)
-        if approved_token:
-            return {
-                "message": "Drone approved by Overlord.",
-                "status": "approved",
-                "device_id": device_data.device_id,
-                "drone_token": approved_token,
-            }
+    batocera_info = device_data.batocera_info.model_dump()
+    if device_data.api_port is not None:
+        batocera_info["api_port"] = device_data.api_port
+    if device_data.scheme:
+        batocera_info["scheme"] = device_data.scheme
+    if device_data.reachable_url:
+        batocera_info["reachable_url"] = device_data.reachable_url
+
+    if db.device_exists(user["id"], device_data.device_id):
+        rotated = db.rotate_device_token(user["id"], device_data.device_id)
+        if not rotated:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+        device = rotated["device"]
+        device["device_name"] = device_data.device_name
+        db.update_device_last_seen(
+            device["id"],
+            network=batocera_info.get("network") if isinstance(batocera_info.get("network"), dict) else None,
+            api_port=batocera_info.get("api_port"),
+            scheme=str(batocera_info.get("scheme") or "").strip() or None,
+            reachable_url=str(batocera_info.get("reachable_url") or "").strip() or None,
+            certificate=batocera_info.get("certificate") if isinstance(batocera_info.get("certificate"), dict) else None,
+            system_info=batocera_info.get("system_info") if isinstance(batocera_info.get("system_info"), dict) else None,
+        )
         return {
-            "message": "Drone already registered for this Overlord.",
-            "status": "registered",
+            "message": "Drone already registered. Token rotated for this Drone.",
+            "status": "approved",
             "device_id": device_data.device_id,
+            "drone_token": rotated["token"],
         }
 
-    # Even without a valid user token, check if this device was already approved
-    # by the Overlord. This handles the case where the drone re-polls register
-    # after acceptance but has no valid auth credentials.
-    if db.get_device_by_device_id(device_data.device_id):
-        approved_token = db.approved_drone_tokens.pop(device_data.device_id, None)
-        if approved_token:
-            return {
-                "message": "Drone approved by Overlord.",
-                "status": "approved",
-                "device_id": device_data.device_id,
-                "drone_token": approved_token,
-            }
-        # Drone already registered — try returning its existing token so the
-        # drone can start polling /alive immediately instead of waiting for a
-        # new token. The token may have been consumed already from a prior
-        # successful registration attempt, so fall back to offering a rotation.
-        existing_device = db.get_device_by_device_id(device_data.device_id)
-        rotated = db.rotate_device_token(existing_device["user_id"], device_data.device_id) if existing_device else None
-        if rotated:
-            return {
-                "message": "Drone already registered. Token rotated for this Drone.",
-                "status": "approved",
-                "device_id": device_data.device_id,
-                "drone_token": rotated["token"],
-            }
-        return {
-            "message": "Drone already registered. Awaiting the correct credentials or token rotation.",
-            "status": "registered",
-            "device_id": device_data.device_id,
-        }
-
-    connection = db.create_pending_drone_connection(
-        device_data.device_id,
-        device_data.device_name,
-        device_data.batocera_info.model_dump(),
-        user["id"] if user else None,
-    )
+    raw_drone_token = generate_drone_token()
+    internal_id = db.create_device(user["id"], device_data.device_id, device_data.device_name, batocera_info, raw_token=raw_drone_token)
+    device = db.get_device(internal_id)
     return {
-        "message": "Psionic connection detected. Awaiting Overlord approval.",
-        "connection": {
-            "id": connection["id"],
-            "device_id": connection["device_id"],
-            "device_name": connection["device_name"],
-            "detected_at": connection["detected_at"],
-            "last_seen": connection["last_seen"],
-        }
+        "message": "Drone registered to the Overlord.",
+        "status": "approved",
+        "device_id": device_data.device_id,
+        "device": device_response(device),
+        "drone_token": raw_drone_token,
     }
 
 
@@ -668,6 +632,7 @@ async def drone_alive(device_id: str, payload: dict, authorization: Optional[str
         rom_systems=payload.get("rom_systems") if isinstance(payload.get("rom_systems"), list) else None,
         api_port=payload.get("api_port") if payload.get("api_port") is not None else None,
         scheme=str(payload.get("scheme") or payload.get("protocol") or "").strip() or None,
+        reachable_url=str(payload.get("reachable_url") or "").strip() or None,
         certificate=payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
         system_info=payload.get("system_info") if isinstance(payload.get("system_info"), dict) else None,
     )
@@ -721,6 +686,24 @@ async def add_speed_sample(device_id: str, payload: dict, authorization: Optiona
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     print(f"Speed sample accepted for {device_id}: up={sample.get('upload_mbps')} down={sample.get('download_mbps')}")
     return {"sample": sample}
+
+
+@app.get("/api/devices/{device_id}/speed/download")
+async def download_speed_probe(device_id: str, bytes: int = 262144, authorization: Optional[str] = Header(default=None)):
+    """Return bounded bytes for a Drone to measure Overmind download throughput."""
+    get_current_drone(device_id, authorization)
+    size = max(1024, min(int(bytes), 2 * 1024 * 1024))
+    return Response(content=b"0" * size, media_type="application/octet-stream")
+
+
+@app.post("/api/devices/{device_id}/speed/upload")
+async def upload_speed_probe(device_id: str, request: Request, authorization: Optional[str] = Header(default=None)):
+    """Accept bounded bytes for a Drone to measure Overmind upload throughput."""
+    get_current_drone(device_id, authorization)
+    body = await request.body()
+    if len(body) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Speed probe payload too large")
+    return {"bytes_received": len(body)}
 
 
 @app.get("/api/devices/{device_id}/speed")
@@ -2655,7 +2638,7 @@ def get_ui_html() -> str:
                         </div>
                         <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">API: ${escapeHtml(device.scheme || 'https')}://${ipv4[0] || escapeHtml(device.device_id)}:${escapeHtml(String(device.api_port || 8443))}</div>
+                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
                         <hr>
                         <strong>Certificate</strong>
                         <div class="small text-muted">Status: ${escapeHtml(cert.status || 'unknown')}</div>
@@ -2831,7 +2814,7 @@ def get_ui_html() -> str:
                 if (!response.ok) throw new Error('Failed to rotate token');
                 const data = await response.json();
                 await loadDevices();
-                window.alert(`New Drone token. It is shown only once:\\n\\n${data.drone_token}`);
+                showTokenModal(data.drone_token, 'New Drone Authorization Token');
             }
 
             function updateSelectedDeviceWorkspace() {
@@ -3084,7 +3067,7 @@ def get_ui_html() -> str:
                 if (updateUrl) setRoute(tabName);
             }
 
-            function showTokenModal(tokenValue) {
+            function showTokenModal(tokenValue, title = 'Drone Authorization Token') {
                 const hidden = document.getElementById('token-modal-overlay');
                 if (hidden) hidden.remove();
                 const overlay = document.createElement('div');
@@ -3093,7 +3076,7 @@ def get_ui_html() -> str:
                 overlay.innerHTML = `
                   <div style="background:var(--admin-surface,#151f32);border:1px solid var(--admin-border,#31405f);border-radius:0.75rem;max-width:600px;width:90%;padding:1.5rem;box-shadow:0 1rem 3rem rgba(0,0,0,0.45);">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
-                      <h4 style="margin:0;color:var(--admin-text,#ecf6ff);">Drone Authorization Token</h4>
+                      <h4 style="margin:0;color:var(--admin-text,#ecf6ff);">${escapeHtml(title)}</h4>
                       <button onclick="this.closest('#token-modal-overlay').remove()" style="background:transparent;border:none;color:var(--admin-muted,#9fb0c9);font-size:1.5rem;cursor:pointer;">&times;</button>
                     </div>
                     <p style="color:var(--admin-muted,#9fb0c9);margin-bottom:0.75rem;">Copy this token and paste it into the Drone admin page. It is shown only once.</p>
