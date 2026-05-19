@@ -1768,8 +1768,43 @@ def get_ui_html() -> str:
                 border: 1px solid var(--admin-border);
                 border-radius: 0.5rem;
             }
+            .rom-item {
+                background: rgba(31, 42, 68, 0.72);
+                border-color: var(--admin-border);
+                color: var(--admin-text);
+            }
             .device-card h3, .tree-view summary, .rom-item strong {
                 color: var(--admin-sidebar-accent);
+            }
+            .table {
+                color: var(--admin-text);
+                --bs-table-color: var(--admin-text);
+                --bs-table-bg: transparent;
+                --bs-table-border-color: var(--admin-border);
+                --bs-table-striped-bg: rgba(255, 255, 255, 0.03);
+                --bs-table-hover-bg: rgba(0, 194, 255, 0.08);
+            }
+            .table thead th {
+                color: var(--admin-muted);
+                border-color: var(--admin-border);
+                font-size: 0.78rem;
+                text-transform: uppercase;
+            }
+            .table td {
+                border-color: var(--admin-border);
+            }
+            .tree-view details {
+                margin-bottom: 0.75rem;
+            }
+            .tree-view li {
+                border-color: rgba(255,255,255,0.08) !important;
+                color: var(--admin-text);
+            }
+            .rom-browser-toolbar {
+                background: rgba(31, 42, 68, 0.72);
+                border: 1px solid var(--admin-border);
+                border-radius: 0.5rem;
+                padding: 0.9rem;
             }
             .profile-chip {
                 background: transparent !important;
@@ -1969,11 +2004,11 @@ def get_ui_html() -> str:
                                     <div id="drone-speed-panel" class="mb-3"></div>
                                     <div id="drone-auto-sync-panel" class="mb-3"></div>
                                     <div id="drone-sync-activity-panel" class="mb-3"></div>
-                                    <div id="master-rom-panel" class="mb-3"></div>
-                                    <div class="mb-3">
+                                    <div class="mb-3 rom-browser-toolbar">
                                         <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
                                         <input id="device-rom-search" class="form-control" type="search" placeholder="Type to filter systems and ROMs" oninput="handleDeviceRomSearch(event)">
                                     </div>
+                                    <div id="swarm-rom-availability-panel" class="mb-3"></div>
                                     <div id="systems-list"></div>
                                 </div>
                                 <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">
@@ -2807,19 +2842,19 @@ def get_ui_html() -> str:
                 showMessage('Drone sync policy saved.', 'success');
             }
 
-            async function loadMasterRomPanel() {
-                const container = document.getElementById('master-rom-panel');
+            async function loadSwarmRomAvailabilityPanel() {
+                const container = document.getElementById('swarm-rom-availability-panel');
                 if (!container || !selectedDeviceId) return;
                 try {
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/master-roms`);
-                    if (!response.ok) throw new Error('Failed to load master ROM list');
+                    if (!response.ok) throw new Error('Failed to load swarm ROM availability');
                     const rows = (await response.json()).roms || [];
                     const missing = rows.filter(row => !row.present_on_selected).slice(0, 50);
                     const systems = [...new Set(missing.map(row => row.system_name).filter(Boolean))].slice(0, 20);
                     container.innerHTML = `
                         <div class="card"><div class="card-body py-2">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <strong>Master Swarm ROM List</strong>
+                                <strong>Swarm ROM Availability</strong>
                                 <span class="small text-muted">${rows.length} unique ROMs · ${missing.length} missing here</span>
                             </div>
                             ${systems.length ? `<div class="d-flex flex-wrap gap-2 mb-2">${systems.map(system => `<button class="btn btn-outline-primary btn-sm" onclick="syncSystem('${escapeHtml(system)}')">Sync ${escapeHtml(system)}</button>`).join('')}</div>` : ''}
@@ -2834,7 +2869,7 @@ def get_ui_html() -> str:
                         </div></div>
                     `;
                 } catch (error) {
-                    container.innerHTML = '<div class="empty-state">Unable to load master ROM list.</div>';
+                    container.innerHTML = '<div class="empty-state">Unable to load swarm ROM availability.</div>';
                 }
             }
 
@@ -2911,7 +2946,7 @@ def get_ui_html() -> str:
                 renderDroneNetworkPanel();
                 renderDroneTokenPanel();
                 renderDroneSpeedPanel();
-                loadMasterRomPanel();
+                loadSwarmRomAvailabilityPanel();
                 loadSyncActivityPanel();
             }
 
@@ -3157,14 +3192,65 @@ def get_ui_html() -> str:
                     <p style="color:var(--admin-muted,#9fb0c9);margin-bottom:0.75rem;">Copy this token and paste it into the Drone admin page. It is shown only once.</p>
                     <div style="display:flex;gap:0.5rem;">
                       <input id="token-modal-value" type="text" readonly value="${escapeHtml(tokenValue)}" style="flex:1;font-family:monospace;background:rgba(0,0,0,0.3);border:1px solid var(--admin-border,#31405f);color:var(--admin-text,#ecf6ff);padding:0.65rem;border-radius:0.35rem;font-size:0.85rem;">
-                      <button onclick="navigator.clipboard.writeText(document.getElementById('token-modal-value').value).then(()=>{const b=this;b.textContent='Copied!';setTimeout(()=>b.innerHTML='<i class=\\'bi bi-clipboard\\'></i>',2000)}).catch(()=>{this.textContent='Copy failed';setTimeout(()=>this.innerHTML='<i class=\\'bi bi-clipboard\\'></i>',2000)})" style="background:var(--admin-sidebar-accent,#00c2ff);border:none;color:#06111f;font-weight:800;padding:0.65rem 1rem;border-radius:0.35rem;cursor:pointer;white-space:nowrap;"><i class="bi bi-clipboard"></i></button>
+                      <button id="token-copy-button" type="button" aria-label="Copy token" title="Copy token" onclick="copyTokenFromModal()" style="background:var(--admin-sidebar-accent,#00c2ff);border:none;color:#06111f;font-weight:800;padding:0.65rem 1rem;border-radius:0.35rem;cursor:pointer;white-space:nowrap;"><i class="bi bi-clipboard"></i></button>
                     </div>
+                    <div id="token-copy-status" class="small mt-2" role="status" aria-live="polite" style="color:var(--admin-muted,#9fb0c9);min-height:1.25rem;"></div>
                     <div style="margin-top:1rem;text-align:right;">
                       <button onclick="this.closest('#token-modal-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid var(--admin-border,#31405f);color:var(--admin-text,#ecf6ff);padding:0.5rem 1rem;border-radius:0.35rem;cursor:pointer;">Close</button>
                     </div>
                   </div>
                 `;
                 document.body.appendChild(overlay);
+            }
+
+            async function copyTextToClipboard(text) {
+                if (!text) throw new Error('No token available to copy.');
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                    return;
+                }
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(textarea);
+                if (!ok) throw new Error('Fallback clipboard copy failed.');
+            }
+
+            async function copyTokenFromModal() {
+                const input = document.getElementById('token-modal-value');
+                const button = document.getElementById('token-copy-button');
+                const status = document.getElementById('token-copy-status');
+                const original = '<i class="bi bi-clipboard"></i>';
+                try {
+                    await copyTextToClipboard(input ? input.value : '');
+                    if (button) {
+                        button.innerHTML = '<i class="bi bi-check2"></i>';
+                        button.title = 'Copied';
+                    }
+                    if (status) {
+                        status.textContent = 'Copied';
+                        status.style.color = 'var(--admin-accent-green,#34d399)';
+                    }
+                    setTimeout(() => {
+                        if (button) {
+                            button.innerHTML = original;
+                            button.title = 'Copy token';
+                        }
+                        if (status) status.textContent = '';
+                    }, 2000);
+                } catch (error) {
+                    console.error('Token copy failed:', error);
+                    if (status) {
+                        status.textContent = error.message || 'Copy failed';
+                        status.style.color = '#ff9aa7';
+                    }
+                    showMessage(error.message || 'Copy failed', 'error');
+                }
             }
 
             function showMessage(message, type) {
