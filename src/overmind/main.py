@@ -1,5 +1,6 @@
 """Main FastAPI application."""
 
+import argparse
 import os
 import secrets
 import subprocess
@@ -74,6 +75,48 @@ def ensure_self_signed_cert() -> Tuple[Optional[Path], Optional[Path]]:
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
         print(f"⚠️  Unable to create self-signed certificate: {exc}")
         return None, None
+    
+def run_https_app() -> None:
+    """Run Overmind with HTTPS, creating a self-signed cert when TLS files are not provided."""
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="Run Batocera Overmind")
+    parser.add_argument("--host", default=os.getenv("OVERMIND_HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("OVERMIND_PORT", "8443")))
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        default=os.getenv("OVERMIND_RELOAD", "false").strip().lower() in {"1", "true", "yes", "on"},
+    )
+    parser.add_argument("--ssl-keyfile", default=None)
+    parser.add_argument("--ssl-certfile", default=None)
+    args = parser.parse_args()
+
+    ssl_keyfile = args.ssl_keyfile
+    ssl_certfile = args.ssl_certfile
+
+    if not ssl_keyfile and not ssl_certfile:
+        generated_keyfile, generated_certfile = ensure_self_signed_cert()
+        ssl_keyfile = str(generated_keyfile) if generated_keyfile else None
+        ssl_certfile = str(generated_certfile) if generated_certfile else None
+
+        if ssl_keyfile and ssl_certfile:
+            print(f"Using self-signed TLS certificate: {ssl_certfile}")
+
+    elif not ssl_keyfile or not ssl_certfile:
+        raise RuntimeError("Both --ssl-keyfile and --ssl-certfile must be specified together.")
+
+    if not ssl_keyfile or not ssl_certfile:
+        raise RuntimeError("HTTPS is required, but no TLS certificate/key could be loaded or generated.")
+
+    uvicorn.run(
+        "overmind.main:app" if args.reload else app,
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        ssl_keyfile=ssl_keyfile,
+        ssl_certfile=ssl_certfile,
+    )
 
 # Add CORS middleware
 app.add_middleware(
@@ -3146,31 +3189,4 @@ async def startup_event():
 
 
 if __name__ == "__main__":
-    import uvicorn
-
-    host = os.getenv("OVERMIND_HOST", "0.0.0.0")
-    port = int(os.getenv("OVERMIND_PORT", os.getenv("PORT", "8000")))
-    cert_file = os.getenv("TLS_CERT_FILE")
-    key_file = os.getenv("TLS_KEY_FILE")
-
-    if cert_file and key_file:
-        cert_path = Path(cert_file).expanduser()
-        key_path = Path(key_file).expanduser()
-    else:
-        key_path, cert_path = ensure_self_signed_cert()
-
-    uvicorn_kwargs = {
-        "app": app,
-        "host": host,
-        "port": port,
-    }
-
-    if key_path and cert_path:
-        uvicorn_kwargs["ssl_keyfile"] = str(key_path)
-        uvicorn_kwargs["ssl_certfile"] = str(cert_path)
-        print(f"🔐 Starting Batocera Overmind over HTTPS on https://{host}:{port}")
-        print(f"🔐 TLS cert: {cert_path}")
-    else:
-        print("⚠️  Starting Batocera Overmind over HTTP because TLS certificate setup failed")
-
-    uvicorn.run(**uvicorn_kwargs)
+    run_https_app()
