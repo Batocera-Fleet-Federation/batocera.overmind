@@ -897,12 +897,57 @@ async def get_device_roms(
 
 
 @app.get("/api/devices/{device_id}/master-roms")
-async def get_device_master_roms(device_id: str, authorization: Optional[str] = Header(default=None)):
+async def get_device_master_roms(
+    device_id: str,
+    q: Optional[str] = None,
+    system: Optional[str] = None,
+    status: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 100,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Return master ROMs for the device, with optional server-side filters and pagination.
+
+    Query params:
+    - q: search string (system name or rom path/name)
+    - system: exact system name filter
+    - status: 'missing' or 'present'
+    - page: page number starting at 1
+    - per_page: number of rows per page
+    """
     user = get_current_user(authorization)
     rows = db.get_master_roms_for_device(user["id"], device_id)
     if rows is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    return {"roms": rows}
+
+    filtered = rows
+    if q:
+        q_low = q.strip().lower()
+        filtered = [r for r in filtered if q_low in (str(r.get('system_name') or '').lower() or '') or q_low in (str(r.get('file_path') or r.get('rom_name') or '').lower() or '')]
+    if system:
+        s_low = system.strip().lower()
+        filtered = [r for r in filtered if (str(r.get('system_name') or '').lower() == s_low)]
+    if status:
+        stat = status.strip().lower()
+        if stat == 'missing':
+            filtered = [r for r in filtered if not r.get('present_on_selected')]
+        elif stat == 'present':
+            filtered = [r for r in filtered if r.get('present_on_selected')]
+
+    if page < 1:
+        page = 1
+    per_page = max(1, min(per_page, 500))
+    total = len(filtered)
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_rows = filtered[start:end]
+
+    return {
+        "roms": page_rows,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
 
 
 @app.post("/api/devices/{device_id}/sync-rom")
@@ -2004,9 +2049,26 @@ def get_ui_html() -> str:
                                     <div id="drone-speed-panel" class="mb-3"></div>
                                     <div id="drone-auto-sync-panel" class="mb-3"></div>
                                     <div id="drone-sync-activity-panel" class="mb-3"></div>
-                                    <div class="mb-3 rom-browser-toolbar">
-                                        <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
-                                        <input id="device-rom-search" class="form-control" type="search" placeholder="Type to filter systems and ROMs" oninput="handleDeviceRomSearch(event)">
+                                    <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
+                                        <div style="flex:1;min-width:220px">
+                                            <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
+                                            <input id="device-rom-search" class="form-control" type="search" placeholder="Type to filter systems and ROMs" oninput="handleDeviceRomSearch(event)">
+                                        </div>
+                                        <div style="min-width:180px">
+                                            <label class="form-label" for="device-rom-system-filter">System</label>
+                                            <select id="device-rom-system-filter" class="form-select" onchange="handleDeviceRomFilterChange()">
+                                                <option value="">All systems</option>
+                                            </select>
+                                        </div>
+                                        <div style="min-width:160px">
+                                            <label class="form-label" for="device-rom-status-filter">Status</label>
+                                            <select id="device-rom-status-filter" class="form-select" onchange="handleDeviceRomFilterChange()">
+                                                <option value="">All</option>
+                                                <option value="missing">Missing</option>
+                                                <option value="present">Present</option>
+                                            </select>
+                                        </div>
+                                        <div id="sync-system-buttons" class="ms-auto d-flex gap-2" style="align-self:flex-end"></div>
                                     </div>
                                     <div id="swarm-rom-availability-panel" class="mb-3"></div>
                                     <div id="systems-list"></div>
@@ -2126,9 +2188,11 @@ def get_ui_html() -> str:
             let currentDeviceView = 'systems';
             let currentDeviceSystems = {};
             let deviceRomSearchQuery = '';
+            let masterRomPage = 1;
             let systemPageState = {};
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
+            const MASTER_ROM_PAGE_SIZE = 100;
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
                 auth: ['Overlord Login', 'Access the Overmind'],
@@ -2646,15 +2710,69 @@ def get_ui_html() -> str:
                 }
             }
 
+            let deviceRomSearchDebounce = null;
             function handleDeviceRomSearch(event) {
-                deviceRomSearchQuery = (event.target.value || '').trim().toLowerCase();
-                systemPageState = {};
-                displaySystemsTree();
+                const val = (event.target.value || '').trim();
+                deviceRomSearchQuery = val;
+                masterRomPage = 1;
+                // debounce server-side filtering
+                if (deviceRomSearchDebounce) clearTimeout(deviceRomSearchDebounce);
+                deviceRomSearchDebounce = setTimeout(() => {
+                    deviceRomSearchDebounce = null;
+                    loadSwarmRomAvailabilityPanel();
+                }, 300);
+            }
+
+            function setMasterRomPage(page) {
+                masterRomPage = Math.max(1, page);
+                loadSwarmRomAvailabilityPanel();
             }
 
             function setSystemPage(systemName, page) {
                 systemPageState[systemName] = Math.max(1, page);
                 displaySystemsTree();
+            }
+
+            function handleDeviceRomFilterChange() {
+                // Trigger server-side reload of the master table when filters change
+                masterRomPage = 1;
+                loadSwarmRomAvailabilityPanel();
+            }
+
+            async function populateSystemFilterOptions() {
+                // populate systems dropdown from currentDeviceSystems or from server summary
+                const select = document.getElementById('device-rom-system-filter');
+                if (!select) return;
+                select.innerHTML = '<option value="">All systems</option>';
+                try {
+                    const resp = await apiGet('/api/systems');
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    const systems = data.systems || [];
+                    systems.forEach(s => {
+                        const opt = document.createElement('option');
+                        opt.value = s.system_name;
+                        opt.text = `${s.system_name} (${s.rom_count})`;
+                        select.appendChild(opt);
+                    });
+                } catch (e) {
+                    // ignore
+                }
+            }
+
+            async function syncSystemFromFilter(systemParam) {
+                const system = systemParam || document.getElementById('device-rom-system-filter')?.value || '';
+                if (!system) return alert('Select a system to sync');
+                if (!selectedDeviceId) return;
+                if (!confirm(`Queue sync for system ${system} on this Drone?`)) return;
+                try {
+                    await syncSystem(system);
+                    await loadSyncActivityPanel();
+                    await loadSwarmRomAvailabilityPanel();
+                } catch (err) {
+                    console.error('Error syncing system:', err);
+                    showMessage('Failed to queue system sync.', 'error');
+                }
             }
 
             function filteredSystemEntries() {
@@ -2848,27 +2966,62 @@ def get_ui_html() -> str:
                 const container = document.getElementById('swarm-rom-availability-panel');
                 if (!container || !selectedDeviceId) return;
                 try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/master-roms`);
+                    // prepare server-side filter params
+                    const params = new URLSearchParams();
+                    const q = (deviceRomSearchQuery || '').trim();
+                    const system = document.getElementById('device-rom-system-filter')?.value || '';
+                    const status = document.getElementById('device-rom-status-filter')?.value || '';
+                    if (q) params.set('q', q);
+                    if (system) params.set('system', system);
+                    if (status) params.set('status', status);
+                    params.set('page', String(masterRomPage));
+                    params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
+                    const url = `/api/devices/${selectedDeviceId}/master-roms` + (params.toString() ? `?${params.toString()}` : '');
+                    const response = await apiGet(url);
                     if (!response.ok) throw new Error('Failed to load swarm ROM availability');
-                    const rows = (await response.json()).roms || [];
+                    const payload = await response.json();
+                    const filtered = payload.roms || [];
+                    const total = payload.total || filtered.length;
+                    const page = payload.page || masterRomPage;
+                    const perPage = payload.per_page || MASTER_ROM_PAGE_SIZE;
+                    const pageCount = Math.max(1, Math.ceil(total / perPage));
+                    masterRomPage = page;
 
-                    // Apply client-side search/filter by system or rom name
-                    const query = (deviceRomSearchQuery || '').trim().toLowerCase();
-                    const filtered = !query ? rows : rows.filter(r => {
-                        const system = String(r.system_name || '').toLowerCase();
-                        const file = String(r.file_path || r.rom_name || '').toLowerCase();
-                        return system.includes(query) || file.includes(query);
-                    });
-
-                    // Build table rows: present (local) or missing (available_on_drones)
-                    const total = filtered.length;
                     const missingCount = filtered.filter(r => !r.present_on_selected).length;
+                    const renderPageButton = (pageNumber) => {
+                        return `<button class="btn btn-sm ${pageNumber === page ? 'btn-primary' : 'btn-outline-secondary'}" onclick="setMasterRomPage(${pageNumber})">${pageNumber}</button>`;
+                    };
+                    const paginationButtons = [];
+                    if (pageCount <= 7) {
+                        for (let i = 1; i <= pageCount; i += 1) paginationButtons.push(renderPageButton(i));
+                    } else {
+                        const start = Math.max(1, page - 2);
+                        const end = Math.min(pageCount, page + 2);
+                        if (start > 1) paginationButtons.push(renderPageButton(1));
+                        if (start > 2) paginationButtons.push('<span class="px-2">&hellip;</span>');
+                        for (let i = start; i <= end; i += 1) paginationButtons.push(renderPageButton(i));
+                        if (end < pageCount - 1) paginationButtons.push('<span class="px-2">&hellip;</span>');
+                        if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
+                    }
 
                     container.innerHTML = `
                         <div class="card"><div class="card-body py-2">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <strong>ROMs (Master)</strong>
-                                <span class="small text-muted">${total} ROMs · ${missingCount} missing here</span>
+                                <div class="d-flex gap-2 align-items-center">
+                                    <strong>ROMs (Master List)</strong>
+                                    <div class="small text-muted">${total} ROMs · ${missingCount} missing here</div>
+                                </div>
+                                <div class="d-flex gap-2">
+                                    <button class="btn btn-outline-secondary btn-sm" onclick="populateSystemFilterOptions()">Refresh systems</button>
+                                </div>
+                            </div>
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <div class="small text-muted">Page ${page} of ${pageCount} · ${perPage} per page</div>
+                                <div class="btn-group" role="group" aria-label="Master ROM pagination">
+                                    <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterRomPage(${Math.max(1, page - 1)})">Previous</button>
+                                    ${paginationButtons.join('')}
+                                    <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterRomPage(${Math.min(pageCount, page + 1)})">Next</button>
+                                </div>
                             </div>
                             <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
                                 <th>System</th>
@@ -2903,6 +3056,31 @@ def get_ui_html() -> str:
                             ${total ? '' : '<div class="small text-muted">No ROMs found for this filter.</div>'}
                         </div></div>
                     `;
+                    // populate per-system Sync buttons for missing systems
+                    try {
+                        const btnContainer = document.getElementById('sync-system-buttons');
+                        if (btnContainer) {
+                            btnContainer.innerHTML = '';
+                            const missingBySystem = filtered.reduce((acc, r) => {
+                                if (!r.present_on_selected) {
+                                    const s = r.system_name || 'Unknown';
+                                    acc[s] = (acc[s] || 0) + 1;
+                                }
+                                return acc;
+                            }, {});
+                            Object.keys(missingBySystem).sort().forEach(s => {
+                                const btn = document.createElement('button');
+                                btn.className = 'btn btn-outline-primary btn-sm';
+                                btn.textContent = `Sync ${s} (${missingBySystem[s]})`;
+                                btn.onclick = () => syncSystemFromFilter(s);
+                                btnContainer.appendChild(btn);
+                            });
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
+                    // ensure system filter has options
+                    populateSystemFilterOptions();
                 } catch (error) {
                     console.error('Error loading master ROM table:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load ROMs.</div>';
