@@ -24,7 +24,6 @@ from overmind.drone_security import generate_drone_token
 from overmind.postgres_store import postgres_store
 
 SUPPORTED_DEVICE_ACTIONS = {
-    "shutdown",
     "restart",
     "update",
     "collect_rom_metadata",
@@ -687,10 +686,10 @@ async def create_device_action(
 
 @app.post("/api/devices/{device_id}/actions/claim")
 async def claim_device_action(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
-    """Claim the next pending action for a polling drone."""
+    """Claim all currently pending actions for a polling drone."""
     get_current_drone(device_id, authorization)
-    action = db.claim_next_device_action(device_id)
-    return {"action": action}
+    actions = db.claim_pending_device_actions(device_id)
+    return {"actions": actions, "action": actions[0] if actions else None}
 
 
 @app.post("/api/devices/{device_id}/alive")
@@ -709,10 +708,10 @@ async def drone_alive(device_id: str, payload: dict, authorization: Optional[str
     )
     if isinstance(payload.get("rom_metadata"), dict):
         db.store_rom_metadata(device_id, payload["rom_metadata"])
-    action = db.claim_next_device_action(device_id)
+    actions = db.claim_pending_device_actions(device_id)
     updated = db.get_device(device["id"])
     swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
-    return {"status": "ok", "action": action, "device": device_response(updated), "swarm": swarm}
+    return {"status": "ok", "actions": actions, "action": actions[0] if actions else None, "device": device_response(updated), "swarm": swarm}
 
 
 @app.post("/api/devices/{device_id}/events")
@@ -2088,6 +2087,9 @@ def get_ui_html() -> str:
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="gamelogs" onclick="switchDeviceView('gamelogs', this)">
                                                 <i class="bi bi-clock-history me-1"></i>Logs
                                             </button>
+                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="configs" onclick="switchDeviceView('configs', this)">
+                                                <i class="bi bi-file-earmark-code me-1"></i>Configs
+                                            </button>
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="actions" onclick="switchDeviceView('actions', this)">
                                                 <i class="bi bi-lightning-charge me-1"></i>Actions
                                             </button>
@@ -2124,12 +2126,14 @@ def get_ui_html() -> str:
                                 <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">
                                     <div id="gamelogs-list"></div>
                                 </div>
+                                <div id="device-configs-panel" class="device-subpanel" style="display:none;">
+                                    <div id="configs-list"></div>
+                                </div>
                                 <div id="device-actions-panel" class="device-subpanel" style="display:none;">
                                     <div class="d-flex flex-wrap gap-2 mb-3">
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Logs</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Game Logs</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')"><i class="bi bi-file-earmark-code me-1"></i>Emulator Configs</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_log_sources')"><i class="bi bi-journal-text me-1"></i>Log Sources</button>
-                                        <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('shutdown')"><i class="bi bi-power me-1"></i>Shutdown</button>
                                         <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Restart</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('update')"><i class="bi bi-download me-1"></i>Update</button>
                                         <button class="btn btn-outline-secondary btn-sm" onclick="loadDeviceActions()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
@@ -2890,30 +2894,145 @@ def get_ui_html() -> str:
 
             function displayCombinedLogs({gamelogs, emulator_configs, log_sources}) {
                 const container = document.getElementById('gamelogs-list');
-                const parts = [];
-                if (Array.isArray(emulator_configs) && emulator_configs.length) {
-                    parts.push(`<div class="mb-3"><h6>Emulator Configs (${emulator_configs.length})</h6><ul class="small">${emulator_configs.slice(0,50).map(c=>`<li>${escapeHtml(typeof c === 'string' ? c : (c.path||c.name||JSON.stringify(c)) )}</li>`).join('')}</ul></div>`);
-                }
-                if (Array.isArray(log_sources) && log_sources.length) {
-                    parts.push(`<div class="mb-3"><h6>Log Sources (${log_sources.length})</h6><ul class="small">${log_sources.slice(0,50).map(s=>`<li>${escapeHtml(typeof s === 'string' ? s : (s.path||s.source||JSON.stringify(s)))}</li>`).join('')}</ul></div>`);
-                }
-                if (!Array.isArray(gamelogs) || !gamelogs.length) {
-                    parts.push('<div class="empty-state">No games played yet</div>');
-                    container.innerHTML = parts.join('');
-                    return;
-                }
-                gamelogs.sort((a, b) => new Date(b.played_at) - new Date(a.played_at));
-                const logsHtml = gamelogs.map(log => `
-                    <div class="card mb-2 border-left-info shadow-sm">
-                        <div class="card-body py-2">
-                            <strong>${escapeHtml(log.game_name)}</strong>
-                            <div class="small text-muted mt-1">System: ${escapeHtml(log.system_name)}</div>
-                            <div class="small text-secondary">${new Date(log.played_at).toLocaleString()}${log.duration_seconds ? ` • ${(log.duration_seconds / 60).toFixed(1)} minutes` : ''}</div>
+                const sources = [];
+                const logPayload = log_sources && !Array.isArray(log_sources) ? log_sources : {};
+                const sourceRows = Array.isArray(logPayload.logs) ? logPayload.logs : (Array.isArray(log_sources) ? log_sources : []);
+                sourceRows.forEach(row => {
+                    const label = row.source || row.name || row.path || 'log_source';
+                    const content = (row.files || []).map(file => {
+                        if (typeof file === 'string') return file;
+                        return file.content || file.path || JSON.stringify(file, null, 2);
+                    }).join('\\n\\n');
+                    sources.push({id: label, label: label.replaceAll('_', ' '), path: (row.files || []).map(f => f.path || f.name).filter(Boolean).join(', '), content});
+                });
+                const gameLines = (Array.isArray(gamelogs) ? gamelogs : []).map(log => {
+                    const when = log.played_at ? new Date(log.played_at).toLocaleString() : '';
+                    return `${when} ${log.system_name || ''} ${log.game_name || ''}`.trim();
+                });
+                sources.unshift({id: 'game_logs', label: 'Game Logs', path: 'Overmind gameplay history', content: gameLines.join('\\n') || 'No game logs reported yet.'});
+                const first = sources[0];
+                container.innerHTML = `
+                    <div class="row">
+                        <div class="col-md-3 mb-3">
+                            <div class="card log-card">
+                                <div class="card-header">Log Sources</div>
+                                <div class="list-group list-group-flush" id="overmindLogSources">
+                                    ${sources.map((source, index) => `
+                                        <button type="button" class="list-group-item list-group-item-action text-start ${index === 0 ? 'active' : ''}" onclick="selectOvermindLogSource(${index})">
+                                            <i class="bi bi-journal-text me-2"></i>${escapeHtml(source.label)}
+                                        </button>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-9">
+                            <div class="card log-card">
+                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                    <span id="overmindLogTitle">${escapeHtml(first.label)}</span>
+                                    <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs()">Refresh</button>
+                                </div>
+                                <div class="card-body">
+                                    <div id="overmindLogPath" class="small text-muted mb-2">${escapeHtml(first.path || '')}</div>
+                                    <pre id="overmindLogContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">${escapeHtml(first.content || '')}</pre>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                `).join('');
-                parts.push(`<div><h6>Recent Game Logs (${gamelogs.length})</h6>${logsHtml}</div>`);
-                container.innerHTML = parts.join('');
+                `;
+                window.overmindLogSources = sources;
+            }
+
+            function selectOvermindLogSource(index) {
+                const sources = window.overmindLogSources || [];
+                const source = sources[index];
+                if (!source) return;
+                document.querySelectorAll('#overmindLogSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
+                const title = document.getElementById('overmindLogTitle');
+                const path = document.getElementById('overmindLogPath');
+                const content = document.getElementById('overmindLogContent');
+                if (title) title.textContent = source.label;
+                if (path) path.textContent = source.path || '';
+                if (content) content.textContent = source.content || '';
+            }
+
+            async function loadDeviceConfigs() {
+                const container = document.getElementById('configs-list');
+                if (!selectedDeviceId || !container) return;
+                try {
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}`);
+                    if (!response.ok) throw new Error('Failed to load config data');
+                    const device = await response.json();
+                    displayDeviceConfigs(device.emulator_configs || null);
+                } catch (error) {
+                    container.innerHTML = '<div class="empty-state">Unable to load emulator configs.</div>';
+                }
+            }
+
+            function displayDeviceConfigs(configPayload) {
+                const container = document.getElementById('configs-list');
+                const configs = configPayload && Array.isArray(configPayload.configs) ? configPayload.configs : [];
+                if (!configs.length) {
+                    container.innerHTML = `<div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <div>
+                                <strong>Emulator Configs</strong>
+                                <div class="small text-muted">No config snapshot has been collected from this Drone yet.</div>
+                            </div>
+                            <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')">Collect Configs</button>
+                        </div>
+                    </div></div>`;
+                    return;
+                }
+                const rows = configs.map((item, index) => {
+                    const label = item.relative_path || item.path || item.name || `config-${index + 1}`;
+                    const content = item.content || item.text || JSON.stringify(item, null, 2);
+                    return {label, root: item.root || '', content};
+                });
+                const first = rows[0];
+                container.innerHTML = `
+                    <div class="row">
+                        <div class="col-md-3 mb-3">
+                            <div class="card log-card">
+                                <div class="card-header">Emulators</div>
+                                <div class="list-group list-group-flush" id="overmindConfigSources">
+                                    ${rows.map((row, index) => `
+                                        <button type="button" class="list-group-item list-group-item-action text-start ${index === 0 ? 'active' : ''}" onclick="selectOvermindConfig(${index})">
+                                            <i class="bi bi-file-earmark-code me-2"></i>${escapeHtml(row.label)}
+                                        </button>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-9">
+                            <div class="card log-card">
+                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                    <span id="overmindConfigTitle">${escapeHtml(first.label)}</span>
+                                    <div class="d-flex gap-2">
+                                        <button class="btn btn-sm btn-outline-primary" onclick="queueDeviceAction('collect_emulator_configs')">Refresh Snapshot</button>
+                                    </div>
+                                </div>
+                                <div class="card-body">
+                                    <div id="overmindConfigPath" class="small text-muted mb-2">${escapeHtml(first.root || '')}</div>
+                                    <pre id="overmindConfigContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">${escapeHtml(first.content || '')}</pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                window.overmindConfigRows = rows;
+            }
+
+            function selectOvermindConfig(index) {
+                const rows = window.overmindConfigRows || [];
+                const row = rows[index];
+                if (!row) return;
+                document.querySelectorAll('#overmindConfigSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
+                const title = document.getElementById('overmindConfigTitle');
+                const path = document.getElementById('overmindConfigPath');
+                const content = document.getElementById('overmindConfigContent');
+                if (title) title.textContent = row.label;
+                if (path) path.textContent = row.root || '';
+                if (content) content.textContent = row.content || '';
             }
 
             async function loadDeviceSystems() {
@@ -3466,22 +3585,25 @@ def get_ui_html() -> str:
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['gamelogs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
+                currentDeviceView = ['gamelogs', 'configs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
                 if (activeBtn) activeBtn.classList.add('active');
 
                 const systemsPanel = document.getElementById('device-systems-panel');
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
+                const configsPanel = document.getElementById('device-configs-panel');
                 const actionsPanel = document.getElementById('device-actions-panel');
                 const metadataPanel = document.getElementById('device-metadata-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
+                if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
                 if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
                 if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
 
                 if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
+                if (currentDeviceView === 'configs') loadDeviceConfigs();
                 if (currentDeviceView === 'metadata') {
                     renderDroneMetadataPanel();
                 }
@@ -3505,12 +3627,12 @@ def get_ui_html() -> str:
                 const clean = raw.replace(/^#\\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
                 const allowed = ['devices', 'profile', 'help', 'notifications'];
-                if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
+                if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
-                const deviceView = tab === 'devices' && ['gamelogs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
+                const deviceView = tab === 'devices' && ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
                 return { tab, deviceId, deviceView };
             }
 
@@ -3573,11 +3695,10 @@ def get_ui_html() -> str:
             async function queueDeviceAction(actionName) {
                 if (!selectedDeviceId) return;
                 const labels = {
-                    shutdown: 'shutdown',
                     restart: 'restart',
                     update: 'update',
                     collect_rom_metadata: 'collect ROM and system metadata',
-                    collect_game_logs: 'collect game logs',
+                    collect_game_logs: 'collect Game Logs',
                     collect_emulator_configs: 'collect emulator configs',
                     collect_log_sources: 'collect log sources',
                 };
@@ -3605,7 +3726,13 @@ def get_ui_html() -> str:
             }
 
             function formatActionName(actionName) {
-                return String(actionName || 'n/a').replaceAll('_', ' ');
+                const labels = {
+                    collect_game_logs: 'Game Logs',
+                    collect_emulator_configs: 'Emulator Configs',
+                    collect_log_sources: 'Log Sources',
+                    collect_rom_metadata: 'ROM Metadata',
+                };
+                return labels[actionName] || String(actionName || 'n/a').replaceAll('_', ' ');
             }
 
             function summarizeActionResult(result) {

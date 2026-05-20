@@ -648,6 +648,60 @@ def test_device_action_lifecycle(client):
     assert complete_response.json()["action"]["status"] == "completed"
 
 
+def test_action_claim_returns_all_pending_actions_in_order(client):
+    db.populate_fake_data()
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    )
+    token = login_response.json()["access_token"]
+    first = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "collect_game_logs"},
+    ).json()["action"]
+    second = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "collect_emulator_configs"},
+    ).json()["action"]
+
+    claim_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions/claim",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={},
+    )
+
+    assert claim_response.status_code == 200
+    actions = claim_response.json()["actions"]
+    assert [action["id"] for action in actions] == [first["id"], second["id"]]
+    assert all(action["status"] == "in_progress" for action in actions)
+    assert claim_response.json()["action"]["id"] == first["id"]
+
+
+def test_shutdown_action_is_rejected_by_api(client):
+    db.populate_fake_data()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "shutdown"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_selected_drone_actions_ui_omits_shutdown_and_uses_game_logs_label():
+    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/main.py").read_text(encoding="utf-8")
+    assert "queueDeviceAction('shutdown')" not in html
+    assert ">Shutdown<" not in html
+    assert ">Game Logs<" in html
+
+
 def test_drone_alive_claims_data_action_and_stores_result(client):
     db.populate_fake_data()
     login_response = client.post(

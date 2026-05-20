@@ -548,6 +548,21 @@ class FakeDatabase:
                 return action
         return None
 
+    def claim_pending_device_actions(self, device_id: str, limit: int = 25) -> List[dict]:
+        """Claim all currently pending actions for a device, bounded for one poll."""
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return []
+        claimed = []
+        for action in self.device_actions.get(device["id"], []):
+            if len(claimed) >= max(1, int(limit)):
+                break
+            if action.get("status") == "pending":
+                action["status"] = "in_progress"
+                action["claimed_at"] = datetime.utcnow()
+                claimed.append(action)
+        return claimed
+
     def complete_device_action(
         self,
         device_id: str,
