@@ -3452,7 +3452,10 @@ def get_ui_html() -> str:
                                     return `
                                         <tr>
                                             <td>${escapeHtml(row.system_name || '')}</td>
-                                            <td style="min-width:240px">${escapeHtml(row.file_path || row.rom_name || '')}</td>
+                                            <td style="min-width:240px">
+                                                <div>${escapeHtml(row.file_path || row.rom_name || '')}</div>
+                                                ${row.rom_md5 ? `<div class="small fst-italic text-muted mono">md5: ${escapeHtml(row.rom_md5)}</div>` : ''}
+                                            </td>
                                             <td class="text-muted">${escapeHtml(sizeText)}</td>
                                             <td class="text-muted">${escapeHtml(sources || preferred)}</td>
                                             <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${escapeHtml(statusLabel)}</span></td>
