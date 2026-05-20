@@ -20,7 +20,7 @@ from overmind.models import (
 )
 from overmind.db import db
 from overmind import auth
-from overmind.drone_security import generate_drone_token
+from overmind.drone_security import generate_drone_token, hash_drone_token
 from overmind.postgres_store import postgres_store
 
 SUPPORTED_DEVICE_ACTIONS = {
@@ -464,7 +464,13 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
 
     existing_device = db.get_device_by_device_id(device_data.device_id)
     if existing_device and existing_device.get("user_id") == user["id"] and existing_device.get("approval_status", "approved") != "approved":
-        db.create_pending_drone_connection(device_data.device_id, device_data.device_name, batocera_info, user_id=user["id"])
+        db.create_pending_drone_connection(
+            device_data.device_id,
+            device_data.device_name,
+            batocera_info,
+            user_id=user["id"],
+            authorization_token_id=integration_token.get("id"),
+        )
         return {
             "message": "Psionic connection detected. Awaiting Overlord approval.",
             "status": "pending",
@@ -472,10 +478,11 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
         }
 
     if db.device_exists(user["id"], device_data.device_id):
-        rotated = db.rotate_device_token(user["id"], device_data.device_id)
-        if not rotated:
+        device = db.get_device_by_device_id(device_data.device_id)
+        if not device:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-        device = rotated["device"]
+        if device.get("authorization_token_id") != integration_token.get("id"):
+            device["drone_token_hash"] = hash_drone_token(raw_auth_token)
         db.set_device_authorization_token(user["id"], device_data.device_id, integration_token.get("id"))
         device["device_name"] = device_data.device_name
         db.update_device_last_seen(
@@ -488,13 +495,19 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
             system_info=batocera_info.get("system_info") if isinstance(batocera_info.get("system_info"), dict) else None,
         )
         return {
-            "message": "Drone already registered. Token rotated for this Drone.",
+            "message": "Drone already registered. Existing bound credential accepted.",
             "status": "approved",
             "device_id": device_data.device_id,
-            "drone_token": rotated["token"],
+            "drone_token": raw_auth_token,
         }
 
-    db.create_pending_drone_connection(device_data.device_id, device_data.device_name, batocera_info, user_id=user["id"])
+    db.create_pending_drone_connection(
+        device_data.device_id,
+        device_data.device_name,
+        batocera_info,
+        user_id=user["id"],
+        authorization_token_id=integration_token.get("id"),
+    )
     return {
         "message": "Psionic connection detected. Awaiting Overlord approval.",
         "status": "pending",
@@ -2828,7 +2841,7 @@ def get_ui_html() -> str:
                         </div>
                         <div class="small text-muted mb-2">${payload.total || rows.length} unique ROMs across approved Drones</div>
                         <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
-                            <th>System</th><th>ROM</th><th>MD5</th><th>Size</th><th>Drones</th><th>Metadata</th>
+                            <th>System</th><th>ROM</th><th>Size</th><th>Drones</th>
                         </tr></thead><tbody>
                             ${rows.map(row => {
                                 const devices = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
@@ -2836,11 +2849,9 @@ def get_ui_html() -> str:
                                 const sizeText = row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '';
                                 return `<tr>
                                     <td>${escapeHtml(row.system_name || '')}</td>
-                                    <td>${escapeHtml(row.rom_name || row.file_path || '')}${filenames}</td>
-                                    <td class="small mono">${escapeHtml(row.rom_md5 || '')}</td>
+                                    <td>${escapeHtml(row.rom_name || row.file_path || '')}${row.rom_md5 ? `<div class="small fst-italic text-muted mono">md5: ${escapeHtml(row.rom_md5)}</div>` : ''}${filenames}</td>
                                     <td class="small text-muted">${escapeHtml(sizeText)}</td>
                                     <td class="small">${escapeHtml(devices)}</td>
-                                    <td class="small text-muted">${escapeHtml(row.metadata_source || row.source || '')}</td>
                                 </tr>`;
                             }).join('')}
                         </tbody></table></div>
@@ -2914,11 +2925,11 @@ def get_ui_html() -> str:
                 container.innerHTML = `
                     <div class="row">
                         <div class="col-md-3 mb-3">
-                            <div class="card log-card">
-                                <div class="card-header">Log Sources</div>
-                                <div class="list-group list-group-flush" id="overmindLogSources">
-                                    ${sources.map((source, index) => `
-                                        <button type="button" class="list-group-item list-group-item-action text-start ${index === 0 ? 'active' : ''}" onclick="selectOvermindLogSource(${index})">
+                                <div class="card log-card">
+                                    <div class="card-header">Log Sources</div>
+                                    <div class="list-group list-group-flush" id="overmindLogSources">
+                                        ${sources.map((source, index) => `
+                                        <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindLogSource(${index})">
                                             <i class="bi bi-journal-text me-2"></i>${escapeHtml(source.label)}
                                         </button>
                                     `).join('')}
@@ -2928,12 +2939,12 @@ def get_ui_html() -> str:
                         <div class="col-md-9">
                             <div class="card log-card">
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <span id="overmindLogTitle">${escapeHtml(first.label)}</span>
+                                    <span id="overmindLogTitle">Select a log source</span>
                                     <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs()">Refresh</button>
                                 </div>
                                 <div class="card-body">
-                                    <div id="overmindLogPath" class="small text-muted mb-2">${escapeHtml(first.path || '')}</div>
-                                    <pre id="overmindLogContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">${escapeHtml(first.content || '')}</pre>
+                                    <div id="overmindLogPath" class="small text-muted mb-2"></div>
+                                    <pre id="overmindLogContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a source from the left panel to view logs.</pre>
                                 </div>
                             </div>
                         </div>
@@ -2992,11 +3003,11 @@ def get_ui_html() -> str:
                 container.innerHTML = `
                     <div class="row">
                         <div class="col-md-3 mb-3">
-                            <div class="card log-card">
-                                <div class="card-header">Emulators</div>
-                                <div class="list-group list-group-flush" id="overmindConfigSources">
-                                    ${rows.map((row, index) => `
-                                        <button type="button" class="list-group-item list-group-item-action text-start ${index === 0 ? 'active' : ''}" onclick="selectOvermindConfig(${index})">
+                                <div class="card log-card">
+                                    <div class="card-header">Emulators</div>
+                                    <div class="list-group list-group-flush" id="overmindConfigSources">
+                                        ${rows.map((row, index) => `
+                                        <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindConfig(${index})">
                                             <i class="bi bi-file-earmark-code me-2"></i>${escapeHtml(row.label)}
                                         </button>
                                     `).join('')}
@@ -3006,14 +3017,14 @@ def get_ui_html() -> str:
                         <div class="col-md-9">
                             <div class="card log-card">
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <span id="overmindConfigTitle">${escapeHtml(first.label)}</span>
+                                    <span id="overmindConfigTitle">Select a config</span>
                                     <div class="d-flex gap-2">
                                         <button class="btn btn-sm btn-outline-primary" onclick="queueDeviceAction('collect_emulator_configs')">Refresh Snapshot</button>
                                     </div>
                                 </div>
                                 <div class="card-body">
-                                    <div id="overmindConfigPath" class="small text-muted mb-2">${escapeHtml(first.root || '')}</div>
-                                    <pre id="overmindConfigContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">${escapeHtml(first.content || '')}</pre>
+                                    <div id="overmindConfigPath" class="small text-muted mb-2"></div>
+                                    <pre id="overmindConfigContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a config from the left panel to view its contents.</pre>
                                 </div>
                             </div>
                         </div>

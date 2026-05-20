@@ -333,7 +333,7 @@ def test_integration_token_cannot_register_different_drone(client):
     assert db.get_device_by_device_id("drone-b") is None
 
 
-def test_re_register_same_drone_rotates_bearer_and_old_token_fails(client):
+def test_approval_preserves_bound_token_and_heartbeat_succeeds(client):
     client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
     user_token = client.post(
         "/api/auth/login",
@@ -350,7 +350,17 @@ def test_re_register_same_drone_rotates_bearer_and_old_token_fails(client):
         json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
     )
     assert first.json()["status"] == "pending"
-    client.post("/api/drone-connections/drone-a/accept", headers={"Authorization": f"Bearer {user_token}"})
+    accept = client.post("/api/drone-connections/drone-a/accept", headers={"Authorization": f"Bearer {user_token}"})
+    assert accept.status_code == 200
+    assert accept.json()["drone_token"] is None
+
+    immediate_heartbeat = client.post(
+        "/api/devices/drone-a/alive",
+        headers={"Authorization": f"Bearer {auth_token}"},
+        json={"network": {"ipv4": ["192.168.1.50"]}},
+    )
+    assert immediate_heartbeat.status_code == 200
+
     first_claim = client.post(
         "/api/devices/register",
         json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
@@ -362,14 +372,7 @@ def test_re_register_same_drone_rotates_bearer_and_old_token_fails(client):
     )
     assert second.status_code == 200
     new_drone_token = second.json()["drone_token"]
-    assert new_drone_token != old_drone_token
-
-    obsolete = client.post(
-        "/api/devices/drone-a/alive",
-        headers={"Authorization": f"Bearer {old_drone_token}"},
-        json={"network": {"ipv4": ["192.168.1.50"]}},
-    )
-    assert obsolete.status_code == 401
+    assert new_drone_token == old_drone_token == auth_token
 
     current = client.post(
         "/api/devices/drone-a/alive",

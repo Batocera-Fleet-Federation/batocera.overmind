@@ -186,6 +186,7 @@ class FakeDatabase:
         device_name: str,
         batocera_info: dict,
         user_id: Optional[str] = None,
+        authorization_token_id: Optional[str] = None,
     ) -> dict:
         """Record that a drone is attempting to connect to Overmind."""
         now = datetime.utcnow()
@@ -195,6 +196,7 @@ class FakeDatabase:
                 "device_name": device_name,
                 "batocera_info": batocera_info,
                 "user_id": user_id,
+                "authorization_token_id": authorization_token_id or existing.get("authorization_token_id"),
                 "last_seen": now,
                 "status": "pending",
             })
@@ -209,6 +211,7 @@ class FakeDatabase:
             "detected_at": now,
             "last_seen": now,
             "status": "pending",
+            "authorization_token_id": authorization_token_id,
         }
         self.pending_drone_connections[device_id] = connection
         return connection
@@ -241,18 +244,37 @@ class FakeDatabase:
             self.pending_drone_connections.pop(device_id, None)
             return self.get_device_by_device_id(device_id)
 
-        raw_token = generate_drone_token()
+        raw_token = None
+        token_hash = None
+        authorization_token_id = connection.get("authorization_token_id")
+        if authorization_token_id:
+            backing = next(
+                (
+                    row for row in self.integration_tokens.get(user_id, [])
+                    if row.get("id") == authorization_token_id and not row.get("revoked_at")
+                ),
+                None,
+            )
+            if backing:
+                token_hash = backing.get("token_hash")
+                print(f"Approving Drone {device_id}: preserving bound onboarding credential id={authorization_token_id}")
+        if not token_hash:
+            raw_token = generate_drone_token()
+            print(f"Approving Drone {device_id}: generated replacement Drone credential")
         internal_id = self.create_device(
             user_id,
             connection["device_id"],
             connection["device_name"],
             connection["batocera_info"],
             raw_token=raw_token,
+            token_hash=token_hash,
+            authorization_token_id=authorization_token_id,
         )
         self.pending_drone_connections.pop(device_id, None)
         device = self.get_device(internal_id)
-        device["raw_token_once"] = raw_token
-        self.approved_drone_tokens[device_id] = raw_token
+        if raw_token:
+            device["raw_token_once"] = raw_token
+            self.approved_drone_tokens[device_id] = raw_token
         return device
 
     def deny_pending_drone_connection(self, user_id: str, device_id: str) -> bool:
@@ -270,6 +292,7 @@ class FakeDatabase:
         device_name: str,
         batocera_info: dict,
         raw_token: Optional[str] = None,
+        token_hash: Optional[str] = None,
         authorization_token_id: Optional[str] = None,
     ) -> str:
         """Register a new device."""
@@ -291,7 +314,7 @@ class FakeDatabase:
             "swarm_connected": network_state["swarm_connected"],
             "rom_systems": [],
             "auto_sync_policy": {"enabled": False, "systems": []},
-            "drone_token_hash": hash_drone_token(raw_token or generate_drone_token()),
+            "drone_token_hash": token_hash or hash_drone_token(raw_token or generate_drone_token()),
             "authorization_token_id": authorization_token_id,
             "api_port": batocera_info.get("api_port") if isinstance(batocera_info, dict) else None,
             "scheme": (batocera_info.get("scheme") if isinstance(batocera_info, dict) else None) or "https",
