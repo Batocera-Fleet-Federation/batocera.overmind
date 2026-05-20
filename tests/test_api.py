@@ -163,8 +163,8 @@ def test_register_device_requires_authorization_token(client):
     assert db.devices == {}
 
 
-def test_register_device_with_valid_token_returns_drone_token_and_alive_works(client):
-    """A valid integration token registers the Drone and authorizes alive."""
+def test_register_device_with_valid_token_requires_approval_then_alive_works(client):
+    """A valid integration token creates a pending Drone until the Overlord approves it."""
     client.post(
         "/api/auth/register",
         json={"email": "test@example.com", "password": "testpass123"},
@@ -212,8 +212,23 @@ def test_register_device_with_valid_token_returns_drone_token_and_alive_works(cl
         ),
     )
     assert register_response.status_code == 200
-    drone_token = register_response.json()["drone_token"]
-    assert register_response.json()["status"] == "approved"
+    assert register_response.json()["status"] == "pending"
+
+    pending_response = client.get("/api/drone-connections", headers={"Authorization": f"Bearer {token}"})
+    assert pending_response.status_code == 200
+    assert pending_response.json()["connections"][0]["device_id"] == "drone-123"
+
+    accept_response = client.post("/api/drone-connections/drone-123/accept", headers={"Authorization": f"Bearer {token}"})
+    assert accept_response.status_code == 200
+
+    claim_response = client.post(
+        "/api/devices/register",
+        headers={"Authorization": f"Bearer {auth_token}"},
+        json=_device_registration_payload(authorization_token=auth_token, device_id="drone-123", device_name="Test Drone"),
+    )
+    assert claim_response.status_code == 200
+    assert claim_response.json()["status"] == "approved"
+    drone_token = claim_response.json()["drone_token"]
 
     devices_response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
     assert devices_response.status_code == 200
@@ -278,8 +293,10 @@ def test_integration_token_onboarding_and_approved_token_claim(client):
         json=_device_registration_payload(authorization_token=auth_token, device_id="token-drone", device_name="Token Drone"),
     )
     assert register_response.status_code == 200
-    assert register_response.json()["status"] == "approved"
-    assert register_response.json()["drone_token"]
+    assert register_response.json()["status"] == "pending"
+
+    accept_response = client.post("/api/drone-connections/token-drone/accept", headers={"Authorization": f"Bearer {token}"})
+    assert accept_response.status_code == 200
 
     claim_response = client.post(
         "/api/devices/register",
@@ -332,7 +349,13 @@ def test_re_register_same_drone_rotates_bearer_and_old_token_fails(client):
         "/api/devices/register",
         json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
     )
-    old_drone_token = first.json()["drone_token"]
+    assert first.json()["status"] == "pending"
+    client.post("/api/drone-connections/drone-a/accept", headers={"Authorization": f"Bearer {user_token}"})
+    first_claim = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
+    )
+    old_drone_token = first_claim.json()["drone_token"]
     second = client.post(
         "/api/devices/register",
         json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
@@ -368,6 +391,12 @@ def test_revoked_integration_token_invalidates_backed_drone_token(client):
         json={"label": "revocable"},
     ).json()["token"]
     auth_token = token_payload["authorization_token"]
+    first = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
+    )
+    assert first.json()["status"] == "pending"
+    client.post("/api/drone-connections/drone-a/accept", headers={"Authorization": f"Bearer {user_token}"})
     drone_token = client.post(
         "/api/devices/register",
         json=_device_registration_payload(authorization_token=auth_token, device_id="drone-a"),
@@ -547,6 +576,39 @@ def test_delete_device_removes_device_and_related_data(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert detail_response.status_code == 404
+    pending_response = client.get("/api/drone-connections", headers={"Authorization": f"Bearer {token}"})
+    assert any(conn["device_id"] == "arcade-cabinet-001" for conn in pending_response.json()["connections"])
+
+
+def test_swarm_master_list_deduplicates_by_md5_and_activity_search(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("test@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "drone-b", "Drone B", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.add_roms("drone-a", "snes", [{"rom_name": "Same Game.zip", "file_path": "Same Game.zip", "rom_md5": "abc", "file_size": 3}])
+    db.add_roms("drone-b", "snes", [{"rom_name": "Renamed Game.zip", "file_path": "Renamed Game.zip", "rom_md5": "abc", "file_size": 3}])
+    db.add_rom_sync_activity("drone-b", {
+        "source_drone_id": "drone-a",
+        "target_drone_id": "drone-b",
+        "system": "snes",
+        "rom_name": "Renamed Game.zip",
+        "rom_md5": "abc",
+        "status": "completed",
+        "duration_ms": 2400,
+    })
+
+    master = client.get("/api/master-roms?q=abc", headers={"Authorization": f"Bearer {token}"})
+    assert master.status_code == 200
+    assert master.json()["total"] == 1
+    assert {device["device_id"] for device in master.json()["roms"][0]["devices"]} == {"drone-a", "drone-b"}
+
+    activity = client.get("/api/sync-activity?q=Renamed", headers={"Authorization": f"Bearer {token}"})
+    assert activity.status_code == 200
+    assert activity.json()["activity"][0]["duration_ms"] == 2400
 
 
 def test_device_action_lifecycle(client):

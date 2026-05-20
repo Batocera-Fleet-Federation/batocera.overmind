@@ -463,6 +463,15 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
     if device_data.reachable_url:
         batocera_info["reachable_url"] = device_data.reachable_url
 
+    existing_device = db.get_device_by_device_id(device_data.device_id)
+    if existing_device and existing_device.get("user_id") == user["id"] and existing_device.get("approval_status", "approved") != "approved":
+        db.create_pending_drone_connection(device_data.device_id, device_data.device_name, batocera_info, user_id=user["id"])
+        return {
+            "message": "Psionic connection detected. Awaiting Overlord approval.",
+            "status": "pending",
+            "device_id": device_data.device_id,
+        }
+
     if db.device_exists(user["id"], device_data.device_id):
         rotated = db.rotate_device_token(user["id"], device_data.device_id)
         if not rotated:
@@ -486,22 +495,11 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
             "drone_token": rotated["token"],
         }
 
-    raw_drone_token = generate_drone_token()
-    internal_id = db.create_device(
-        user["id"],
-        device_data.device_id,
-        device_data.device_name,
-        batocera_info,
-        raw_token=raw_drone_token,
-        authorization_token_id=integration_token.get("id"),
-    )
-    device = db.get_device(internal_id)
+    db.create_pending_drone_connection(device_data.device_id, device_data.device_name, batocera_info, user_id=user["id"])
     return {
-        "message": "Drone registered to the Overlord.",
-        "status": "approved",
+        "message": "Psionic connection detected. Awaiting Overlord approval.",
+        "status": "pending",
         "device_id": device_data.device_id,
-        "device": device_response(device),
-        "drone_token": raw_drone_token,
     }
 
 
@@ -577,7 +575,7 @@ async def get_device(device_id: str, authorization: Optional[str] = Header(defau
     user = get_current_user(authorization)
     
     device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
+    if not device or device["user_id"] != user["id"] or device.get("approval_status", "approved") != "approved":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
@@ -950,6 +948,38 @@ async def get_device_master_roms(
     }
 
 
+@app.get("/api/master-roms")
+async def get_swarm_master_roms(
+    q: Optional[str] = None,
+    system: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 100,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Return a swarm-wide approved-Drone ROM master list deduplicated by md5 when available."""
+    user = get_current_user(authorization)
+    rows = db.get_swarm_master_roms(user["id"])
+    filtered = rows
+    if q:
+        q_low = q.strip().lower()
+        filtered = [
+            r for r in filtered
+            if q_low in " ".join(str(value or "") for value in [
+                r.get("system_name"), r.get("rom_name"), r.get("file_path"), r.get("rom_md5"),
+                " ".join(r.get("filenames") or []),
+                " ".join((d.get("device_name") or d.get("device_id") or "") for d in (r.get("devices") or [])),
+            ]).lower()
+        ]
+    if system:
+        s_low = system.strip().lower()
+        filtered = [r for r in filtered if str(r.get("system_name") or "").lower() == s_low]
+    page = max(1, page)
+    per_page = max(1, min(per_page, 500))
+    total = len(filtered)
+    start = (page - 1) * per_page
+    return {"roms": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
+
+
 @app.post("/api/devices/{device_id}/sync-rom")
 async def sync_device_rom(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
@@ -1020,6 +1050,16 @@ async def get_device_sync_activity(device_id: str, authorization: Optional[str] 
     if rows is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"activity": rows}
+
+
+@app.get("/api/sync-activity")
+async def search_sync_activity(
+    q: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = get_current_user(authorization)
+    return {"activity": db.search_rom_sync_activity(user["id"], query=q, status=status_filter)}
 
 
 @app.get("/api/devices/{device_id}/systems")
@@ -2014,7 +2054,15 @@ def get_ui_html() -> str:
                                         <button class="btn btn-outline-primary btn-sm" onclick="generateIntegrationToken()"><i class="bi bi-key me-1"></i>Generate Token</button>
                                     </div>
                                 </div>
-                                <h3>Drone Swarm</h3>
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                                    <h3 class="mb-0">Drone Swarm</h3>
+                                    <div class="btn-group" role="group" aria-label="Swarm views">
+                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmHome()"><i class="bi bi-hdd-network me-1"></i>Drones</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmSyncActivity()"><i class="bi bi-clock-history me-1"></i>Sync Activity</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmMasterList()"><i class="bi bi-list-stars me-1"></i>Master List</button>
+                                    </div>
+                                </div>
+                                <div id="swarm-global-panel" class="mb-3" style="display:none;"></div>
                                 <div id="devices-list"></div>
                             </div>
                             <div id="selected-device-workspace" class="device-card device-detail-view" style="display: none;">
@@ -2561,7 +2609,10 @@ def get_ui_html() -> str:
                                         <div>
                                             <strong>${conn.device_name}</strong>
                                             <div class="small text-muted">Drone ID: <code>${conn.device_id}</code></div>
+                                            <div class="small text-muted">Reachable URL: ${escapeHtml((conn.batocera_info || {}).reachable_url || 'n/a')}</div>
+                                            <div class="small text-muted">IP: ${escapeHtml((conn.batocera_info || {}).ip_address || 'n/a')}</div>
                                             <div class="small text-muted">Detected: ${conn.detected_at ? new Date(conn.detected_at).toLocaleString() : 'now'}</div>
+                                            <div class="small text-muted">Last heartbeat: ${conn.last_seen ? new Date(conn.last_seen).toLocaleString() : 'n/a'}</div>
                                         </div>
                                         <div class="d-flex gap-2">
                                             <button class="btn btn-primary btn-sm" onclick="acceptDroneConnection('${conn.device_id}')"><i class="bi bi-check2-circle me-1"></i>Accept</button>
@@ -2637,6 +2688,8 @@ def get_ui_html() -> str:
 
             function displayDevices() {
                 const container = document.getElementById('devices-list');
+                const globalPanel = document.getElementById('swarm-global-panel');
+                if (globalPanel && globalPanel.style.display !== 'none') return;
                 if (currentDevices.length === 0) {
                     container.innerHTML = '<div class="empty-state">No Drones registered yet</div>';
                     return;
@@ -2662,6 +2715,139 @@ def get_ui_html() -> str:
                         `).join('')}
                     </div>
                 `;
+            }
+
+            function showSwarmHome() {
+                const panel = document.getElementById('swarm-global-panel');
+                const list = document.getElementById('devices-list');
+                if (panel) {
+                    panel.style.display = 'none';
+                    panel.innerHTML = '';
+                }
+                if (list) list.style.display = 'block';
+                displayDevices();
+            }
+
+            function formatDuration(row) {
+                const ms = Number(row.duration_ms ?? '');
+                if (Number.isFinite(ms) && ms >= 0) {
+                    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+                }
+                const seconds = Number(row.duration_seconds ?? '');
+                if (Number.isFinite(seconds) && seconds >= 0) return `${seconds.toFixed(1)}s`;
+                return '';
+            }
+
+            async function showSwarmSyncActivity() {
+                const panel = document.getElementById('swarm-global-panel');
+                const list = document.getElementById('devices-list');
+                if (!panel) return;
+                if (list) list.style.display = 'none';
+                panel.style.display = 'block';
+                const q = document.getElementById('swarm-sync-search')?.value || '';
+                const statusValue = document.getElementById('swarm-sync-status')?.value || '';
+                const params = new URLSearchParams();
+                if (q.trim()) params.set('q', q.trim());
+                if (statusValue) params.set('status_filter', statusValue);
+                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading swarm sync activity...</div></div>`;
+                try {
+                    const response = await apiGet('/api/sync-activity' + (params.toString() ? `?${params.toString()}` : ''));
+                    if (!response.ok) throw new Error('Failed to load sync activity');
+                    const rows = (await response.json()).activity || [];
+                    panel.innerHTML = `<div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
+                            <div style="flex:1;min-width:240px">
+                                <label class="form-label" for="swarm-sync-search">Search Sync Activity</label>
+                                <input id="swarm-sync-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="Drone, file, md5, status, date, error">
+                            </div>
+                            <div style="min-width:160px">
+                                <label class="form-label" for="swarm-sync-status">Status</label>
+                                <select id="swarm-sync-status" class="form-select">
+                                    <option value="">All</option>
+                                    <option value="pending" ${statusValue === 'pending' ? 'selected' : ''}>Pending</option>
+                                    <option value="completed" ${statusValue === 'completed' ? 'selected' : ''}>Completed</option>
+                                    <option value="failed" ${statusValue === 'failed' ? 'selected' : ''}>Failed</option>
+                                    <option value="skipped" ${statusValue === 'skipped' ? 'selected' : ''}>Skipped</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-primary" onclick="showSwarmSyncActivity()">Search</button>
+                        </div>
+                        <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                            <th>Status</th><th>Transfer</th><th>ROM</th><th>MD5</th><th>Duration</th><th>Time</th>
+                        </tr></thead><tbody>
+                            ${rows.map(row => {
+                                const duration = formatDuration(row);
+                                const statusClass = row.status === 'completed' ? 'text-bg-success' : row.status === 'failed' ? 'text-bg-danger' : 'text-bg-secondary';
+                                return `<tr>
+                                    <td><span class="badge ${statusClass}">${escapeHtml(row.status || 'pending')}</span></td>
+                                    <td class="small">${escapeHtml(row.source_drone_id || 'source n/a')} &rarr; ${escapeHtml(row.target_drone_id || 'target n/a')}</td>
+                                    <td class="small">${escapeHtml(row.system || '')} / ${escapeHtml(row.relative_path || row.rom_name || '')}${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}</td>
+                                    <td class="small mono">${escapeHtml(row.rom_md5 || '')}</td>
+                                    <td class="small">${duration ? escapeHtml(row.status === 'failed' ? `Failed after ${duration}` : row.status === 'completed' ? `Completed in ${duration}` : duration) : ''}</td>
+                                    <td class="small text-muted">${escapeHtml(row.completed_at || row.started_at || row.received_at || '')}</td>
+                                </tr>`;
+                            }).join('')}
+                        </tbody></table></div>
+                        ${rows.length ? '' : '<div class="small text-muted">No swarm sync activity matched.</div>'}
+                    </div></div>`;
+                    document.getElementById('swarm-sync-search')?.addEventListener('keydown', event => {
+                        if (event.key === 'Enter') showSwarmSyncActivity();
+                    });
+                } catch (error) {
+                    panel.innerHTML = '<div class="empty-state">Unable to load swarm sync activity.</div>';
+                }
+            }
+
+            async function showSwarmMasterList() {
+                const panel = document.getElementById('swarm-global-panel');
+                const list = document.getElementById('devices-list');
+                if (!panel) return;
+                if (list) list.style.display = 'none';
+                panel.style.display = 'block';
+                const q = document.getElementById('swarm-master-search')?.value || '';
+                const params = new URLSearchParams();
+                if (q.trim()) params.set('q', q.trim());
+                params.set('per_page', '250');
+                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading swarm master list...</div></div>`;
+                try {
+                    const response = await apiGet('/api/master-roms' + (params.toString() ? `?${params.toString()}` : ''));
+                    if (!response.ok) throw new Error('Failed to load master list');
+                    const payload = await response.json();
+                    const rows = payload.roms || [];
+                    panel.innerHTML = `<div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
+                            <div style="flex:1;min-width:240px">
+                                <label class="form-label" for="swarm-master-search">Search Master List</label>
+                                <input id="swarm-master-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="System, ROM, md5, Drone">
+                            </div>
+                            <button class="btn btn-primary" onclick="showSwarmMasterList()">Search</button>
+                        </div>
+                        <div class="small text-muted mb-2">${payload.total || rows.length} unique ROMs across approved Drones</div>
+                        <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                            <th>System</th><th>ROM</th><th>MD5</th><th>Size</th><th>Drones</th><th>Metadata</th>
+                        </tr></thead><tbody>
+                            ${rows.map(row => {
+                                const devices = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
+                                const filenames = (row.filenames || []).length > 1 ? `<div class="small text-muted">${(row.filenames || []).map(escapeHtml).join('<br>')}</div>` : '';
+                                const sizeText = row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '';
+                                return `<tr>
+                                    <td>${escapeHtml(row.system_name || '')}</td>
+                                    <td>${escapeHtml(row.rom_name || row.file_path || '')}${filenames}</td>
+                                    <td class="small mono">${escapeHtml(row.rom_md5 || '')}</td>
+                                    <td class="small text-muted">${escapeHtml(sizeText)}</td>
+                                    <td class="small">${escapeHtml(devices)}</td>
+                                    <td class="small text-muted">${escapeHtml(row.metadata_source || row.source || '')}</td>
+                                </tr>`;
+                            }).join('')}
+                        </tbody></table></div>
+                        ${rows.length ? '' : '<div class="small text-muted">No ROMs matched.</div>'}
+                    </div></div>`;
+                    document.getElementById('swarm-master-search')?.addEventListener('keydown', event => {
+                        if (event.key === 'Enter') showSwarmMasterList();
+                    });
+                } catch (error) {
+                    panel.innerHTML = '<div class="empty-state">Unable to load swarm master list.</div>';
+                }
             }
 
             function selectDevice(deviceId) {
@@ -3218,12 +3404,19 @@ def get_ui_html() -> str:
                     if (!response.ok) throw new Error('Failed to load sync activity');
                     const rows = ((await response.json()).activity || []).slice(0, 20);
                     container.innerHTML = `<div class="card"><div class="card-body py-2"><strong>ROM Sync Activity</strong>
-                        ${rows.length ? rows.map(row => `<div class="mt-2 small">
+                        ${rows.length ? rows.map(row => {
+                            const duration = formatDuration(row);
+                            const durationText = duration ? (row.status === 'failed' ? `Failed after ${duration}` : row.status === 'completed' ? `Completed in ${duration}` : duration) : '';
+                            const refreshText = row.inventory_refresh_status ? `Inventory ${row.inventory_refresh_status}${row.inventory_refresh_duration_ms !== undefined && row.inventory_refresh_duration_ms !== null ? ` in ${row.inventory_refresh_duration_ms}ms` : ''}` : '';
+                            return `<div class="mt-2 small">
                             <span class="badge ${row.status === 'completed' ? 'text-bg-success' : row.status === 'failed' ? 'text-bg-danger' : 'text-bg-secondary'}">${escapeHtml(row.status || 'pending')}</span>
                             ${escapeHtml(row.system || '')} / ${escapeHtml(row.rom_name || '')}
                             ${row.source_drone_id ? `from ${escapeHtml(row.source_drone_id)}` : ''}
+                            ${durationText ? `<span class="text-muted ms-1">${escapeHtml(durationText)}</span>` : ''}
+                            ${refreshText ? `<div class="text-muted">${escapeHtml(refreshText)}</div>` : ''}
                             ${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}
-                        </div>`).join('') : '<div class="small text-muted mt-1">No ROM sync activity yet.</div>'}
+                        </div>`;
+                        }).join('') : '<div class="small text-muted mt-1">No ROM sync activity yet.</div>'}
                     </div></div>`;
                 } catch (error) {
                     container.innerHTML = '<div class="empty-state">Unable to load ROM sync activity.</div>';

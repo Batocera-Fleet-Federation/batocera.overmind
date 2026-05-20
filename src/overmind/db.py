@@ -229,6 +229,14 @@ class FakeDatabase:
             return None
         if connection.get("user_id") not in (None, user_id):
             return None
+        existing = self.get_device_by_device_id(device_id)
+        if existing and existing.get("user_id") == user_id:
+            existing["approval_status"] = "approved"
+            existing["last_seen"] = datetime.utcnow()
+            if existing["id"] not in self.user_devices.get(user_id, []):
+                self.user_devices.setdefault(user_id, []).append(existing["id"])
+            self.pending_drone_connections.pop(device_id, None)
+            return existing
         if self.device_exists(user_id, device_id):
             self.pending_drone_connections.pop(device_id, None)
             return self.get_device_by_device_id(device_id)
@@ -290,6 +298,7 @@ class FakeDatabase:
             "reachable_url": batocera_info.get("reachable_url") if isinstance(batocera_info, dict) else None,
             "certificate": certificate,
             "peer_checks": [],
+            "approval_status": "approved",
         }
         self.user_devices[user_id].append(internal_id)
         self.roms[internal_id] = []
@@ -325,7 +334,10 @@ class FakeDatabase:
     def get_user_devices(self, user_id: str) -> List[dict]:
         """Get all devices for a user."""
         device_ids = self.user_devices.get(user_id, [])
-        return [self.devices[did] for did in device_ids if did in self.devices]
+        return [
+            self.devices[did] for did in device_ids
+            if did in self.devices and self.devices[did].get("approval_status", "approved") == "approved"
+        ]
     
     def update_device_last_seen(
         self,
@@ -418,6 +430,8 @@ class FakeDatabase:
         device = self.get_device_by_device_id(device_id)
         if not device:
             return None
+        if device.get("approval_status", "approved") != "approved":
+            return None
         if not verify_drone_token(raw_token, device.get("drone_token_hash") or ""):
             return None
         auth_token_id = device.get("authorization_token_id")
@@ -465,24 +479,25 @@ class FakeDatabase:
         return True
 
     def delete_device(self, user_id: str, device_id: str) -> bool:
-        """Delete a user's device and associated local data."""
+        """Remove a user's device from the active swarm without deleting its identity."""
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
             return False
 
         internal_id = device["id"]
-        self.devices.pop(internal_id, None)
-        self.roms.pop(internal_id, None)
-        self.gamelogs.pop(internal_id, None)
-        self.device_actions.pop(internal_id, None)
-        self.speed_samples.pop(internal_id, None)
-        self.device_events.pop(internal_id, None)
-        self.peer_checks.pop(internal_id, None)
-        self.rom_sync_activity.pop(internal_id, None)
+        device["approval_status"] = "removed"
+        device["removed_at"] = datetime.utcnow()
+        self.device_actions[internal_id] = []
         self.user_devices[user_id] = [
             did for did in self.user_devices.get(user_id, [])
             if did != internal_id
         ]
+        self.create_pending_drone_connection(
+            device_id,
+            device.get("device_name") or device_id,
+            device.get("batocera_info") or {},
+            user_id=user_id,
+        )
         return True
 
     def create_device_action(
@@ -588,12 +603,15 @@ class FakeDatabase:
             if not system_name:
                 continue
             rom_name = str(item.get("rom_name") or item.get("name") or item.get("title") or "").strip()
-            file_path = str(item.get("file_path") or item.get("rom_file") or item.get("rom_path") or rom_name).strip()
+            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("rom_path") or item.get("rom_file") or rom_name).strip()
             grouped.setdefault(system_name, []).append({
                 "rom_name": rom_name or file_path,
                 "rom_md5": item.get("rom_md5") or item.get("md5") or item.get("hash"),
                 "file_path": file_path,
                 "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
+                "metadata_source": item.get("metadata_source"),
+                "source": item.get("source"),
+                "modified_time": item.get("modified_time") or item.get("mtime"),
             })
         for system_name, roms in grouped.items():
             self.add_roms(device_id, system_name, roms)
@@ -694,9 +712,9 @@ class FakeDatabase:
     
     def device_exists(self, user_id: str, device_id: str) -> bool:
         """Check if device exists for user."""
-        for device in self.get_user_devices(user_id):
+        for device in self.devices.values():
             if device["device_id"] == device_id:
-                return True
+                return device["user_id"] == user_id and device.get("approval_status", "approved") == "approved"
         return False
     
     # ROM operations
@@ -728,6 +746,9 @@ class FakeDatabase:
                 "rom_md5": rom.get("rom_md5"),
                 "file_path": rom.get("file_path"),
                 "file_size": rom.get("file_size"),
+                "metadata_source": rom.get("metadata_source"),
+                "source": rom.get("source"),
+                "modified_time": rom.get("modified_time"),
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             }
@@ -738,6 +759,9 @@ class FakeDatabase:
 
     def _rom_key(self, rom: dict) -> tuple:
         system = str(rom.get("system_name") or "").strip().lower()
+        md5 = str(rom.get("rom_md5") or "").strip().lower()
+        if md5:
+            return ("md5", md5)
         path = str(rom.get("file_path") or rom.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
         return (system, path)
 
@@ -776,6 +800,41 @@ class FakeDatabase:
         rows.sort(key=lambda row: (str(row.get("system_name") or "").lower(), str(row.get("file_path") or "").lower()))
         return rows
 
+    def get_swarm_master_roms(self, user_id: str) -> List[dict]:
+        master: Dict[tuple, dict] = {}
+        for device in self.get_user_devices(user_id):
+            for rom in self.roms.get(device["id"], []):
+                key = self._rom_key(rom)
+                if not key[1]:
+                    continue
+                row = master.setdefault(key, {
+                    "system_name": rom.get("system_name"),
+                    "rom_name": rom.get("rom_name") or rom.get("file_path"),
+                    "file_path": rom.get("file_path") or rom.get("rom_name"),
+                    "filenames": [],
+                    "rom_md5": rom.get("rom_md5"),
+                    "file_size": rom.get("file_size"),
+                    "metadata_source": rom.get("metadata_source"),
+                    "source": rom.get("source"),
+                    "last_seen": rom.get("last_seen") or rom.get("added_at"),
+                    "devices": [],
+                })
+                filename = rom.get("file_path") or rom.get("rom_name")
+                if filename and filename not in row["filenames"]:
+                    row["filenames"].append(filename)
+                info = device.get("system_info") or {}
+                row["devices"].append({
+                    "device_id": device["device_id"],
+                    "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
+                })
+                if not row.get("rom_md5") and rom.get("rom_md5"):
+                    row["rom_md5"] = rom.get("rom_md5")
+                if not row.get("file_size") and rom.get("file_size"):
+                    row["file_size"] = rom.get("file_size")
+        rows = list(master.values())
+        rows.sort(key=lambda row: (str(row.get("system_name") or "").lower(), str(row.get("file_path") or "").lower()))
+        return rows
+
     def add_rom_sync_activity(self, device_id: str, payload: dict) -> Optional[dict]:
         if not self.get_device_by_device_id(device_id):
             return None
@@ -785,14 +844,22 @@ class FakeDatabase:
             "target_drone_id": payload.get("target_drone_id") or device_id,
             "system": payload.get("system"),
             "rom_name": payload.get("rom_name") or payload.get("rom_path"),
+            "relative_path": payload.get("relative_path") or payload.get("rom_path"),
             "action": payload.get("action") or "download",
             "status": payload.get("status") or "pending",
             "selected_peer_reason": payload.get("selected_peer_reason"),
             "bytes_transferred": payload.get("bytes_transferred"),
             "file_size": payload.get("file_size"),
-            "rom_md5": payload.get("rom_md5"),
-            "started_at": payload.get("started_at") or datetime.utcnow(),
-            "completed_at": payload.get("completed_at"),
+            "rom_md5": payload.get("rom_md5") or payload.get("md5"),
+            "download_started_at": payload.get("download_started_at") or payload.get("started_at"),
+            "download_completed_at": payload.get("download_completed_at") or payload.get("completed_at"),
+            "started_at": payload.get("started_at") or payload.get("download_started_at") or datetime.utcnow(),
+            "completed_at": payload.get("completed_at") or payload.get("download_completed_at"),
+            "duration_ms": payload.get("duration_ms"),
+            "duration_seconds": payload.get("duration_seconds"),
+            "inventory_refresh_status": payload.get("inventory_refresh_status"),
+            "inventory_refresh_duration_ms": payload.get("inventory_refresh_duration_ms"),
+            "inventory_refresh_error": payload.get("inventory_refresh_error"),
             "failure_reason": payload.get("failure_reason"),
             "received_at": datetime.utcnow(),
         }
@@ -812,6 +879,32 @@ class FakeDatabase:
         if not device or device["user_id"] != user_id:
             return None
         return list(reversed(self.rom_sync_activity.get(device["id"], [])))[:100]
+
+    def search_rom_sync_activity(self, user_id: str, query: Optional[str] = None, status: Optional[str] = None) -> List[dict]:
+        rows = []
+        seen = set()
+        for device in self.get_user_devices(user_id):
+            for row in self.rom_sync_activity.get(device["id"], []):
+                row_id = row.get("id")
+                key = row_id or id(row)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+        if status:
+            wanted = status.strip().lower()
+            rows = [row for row in rows if str(row.get("status") or "").lower() == wanted]
+        if query:
+            q = query.strip().lower()
+            def haystack(row: dict) -> str:
+                return " ".join(str(row.get(field) or "") for field in (
+                    "source_drone_id", "target_drone_id", "system", "rom_name", "relative_path",
+                    "rom_md5", "status", "failure_reason", "duration_ms", "duration_seconds",
+                    "started_at", "completed_at", "download_started_at", "download_completed_at",
+                )).lower()
+            rows = [row for row in rows if q in haystack(row)]
+        rows.sort(key=lambda row: str(row.get("completed_at") or row.get("started_at") or row.get("received_at") or ""), reverse=True)
+        return rows[:500]
     
     def get_device_roms(self, device_id: str) -> List[dict]:
         """Get all ROMs for a device."""
