@@ -2068,7 +2068,6 @@ def get_ui_html() -> str:
                                                 <option value="present">Present</option>
                                             </select>
                                         </div>
-                                        <div id="sync-system-buttons" class="ms-auto d-flex gap-2" style="align-self:flex-end"></div>
                                     </div>
                                     <div id="swarm-rom-availability-panel" class="mb-3"></div>
                                     <div id="systems-list"></div>
@@ -3015,6 +3014,7 @@ def get_ui_html() -> str:
                                     <button class="btn btn-outline-secondary btn-sm" onclick="populateSystemFilterOptions()">Refresh systems</button>
                                 </div>
                             </div>
+                            <div id="sync-system-buttons" class="d-flex flex-wrap gap-2 mb-3"></div>
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                                 <div class="small text-muted">Page ${page} of ${pageCount} · ${perPage} per page</div>
                                 <div class="btn-group" role="group" aria-label="Master ROM pagination">
