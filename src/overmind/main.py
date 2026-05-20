@@ -2014,7 +2014,7 @@ def get_ui_html() -> str:
                                         <button class="btn btn-outline-primary btn-sm" onclick="generateIntegrationToken()"><i class="bi bi-key me-1"></i>Generate Token</button>
                                     </div>
                                 </div>
-                                <h3>Your Drones</h3>
+                                <h3>Drone Swarm</h3>
                                 <div id="devices-list"></div>
                             </div>
                             <div id="selected-device-workspace" class="device-card device-detail-view" style="display: none;">
@@ -2034,8 +2034,11 @@ def get_ui_html() -> str:
                                             <button class="btn btn-outline-primary btn-sm device-view-btn active" data-device-view="systems" onclick="switchDeviceView('systems', this)">
                                                 <i class="bi bi-grid me-1"></i>Systems
                                             </button>
+                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="metadata" onclick="switchDeviceView('metadata', this)">
+                                                <i class="bi bi-info-circle me-1"></i>Metadata
+                                            </button>
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="gamelogs" onclick="switchDeviceView('gamelogs', this)">
-                                                <i class="bi bi-clock-history me-1"></i>Game Logs
+                                                <i class="bi bi-clock-history me-1"></i>Logs
                                             </button>
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="actions" onclick="switchDeviceView('actions', this)">
                                                 <i class="bi bi-lightning-charge me-1"></i>Actions
@@ -2044,9 +2047,6 @@ def get_ui_html() -> str:
                                     </div>
                                 </div>
                                 <div id="device-systems-panel" class="device-subpanel">
-                                    <div id="drone-network-panel" class="mb-3"></div>
-                                    <div id="drone-token-panel" class="mb-3"></div>
-                                    <div id="drone-speed-panel" class="mb-3"></div>
                                     <div id="drone-auto-sync-panel" class="mb-3"></div>
                                     <div id="drone-sync-activity-panel" class="mb-3"></div>
                                     <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
@@ -2072,13 +2072,13 @@ def get_ui_html() -> str:
                                     <div id="swarm-rom-availability-panel" class="mb-3"></div>
                                     <div id="systems-list"></div>
                                 </div>
+                                <div id="device-metadata-panel" class="device-subpanel" style="display:none;"></div>
                                 <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">
                                     <div id="gamelogs-list"></div>
                                 </div>
                                 <div id="device-actions-panel" class="device-subpanel" style="display:none;">
                                     <div class="d-flex flex-wrap gap-2 mb-3">
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_rom_metadata')"><i class="bi bi-list-stars me-1"></i>ROM & System Metadata</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Game Logs</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Logs</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')"><i class="bi bi-file-earmark-code me-1"></i>Emulator Configs</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_log_sources')"><i class="bi bi-journal-text me-1"></i>Log Sources</button>
                                         <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('shutdown')"><i class="bi bi-power me-1"></i>Shutdown</button>
@@ -2191,6 +2191,7 @@ def get_ui_html() -> str:
             let systemPageState = {};
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
+            let devicesRefreshTimer = null;
             const MASTER_ROM_PAGE_SIZE = 100;
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
@@ -2365,8 +2366,10 @@ def get_ui_html() -> str:
                 currentDeviceView = 'systems';
                 if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
+                if (devicesRefreshTimer) clearInterval(devicesRefreshTimer);
                 pendingConnectionTimer = null;
                 actionRefreshTimer = null;
+                devicesRefreshTimer = null;
                 localStorage.removeItem('auth_token');
                 document.body.classList.remove('is-authenticated');
                 document.getElementById('auth-section').classList.add('active');
@@ -2392,6 +2395,21 @@ def get_ui_html() -> str:
             function startPendingConnectionPolling() {
                 if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
                 pendingConnectionTimer = setInterval(loadPendingConnections, 10000);
+            }
+
+            function startDevicesPolling() {
+                if (devicesRefreshTimer) return;
+                devicesRefreshTimer = setInterval(() => {
+                    // only poll when on devices tab
+                    if (currentTab === 'devices' && document.getElementById('devices-tab')?.style.display !== 'none') {
+                        loadDevices();
+                    }
+                }, 30000);
+            }
+
+            function stopDevicesPolling() {
+                if (devicesRefreshTimer) clearInterval(devicesRefreshTimer);
+                devicesRefreshTimer = null;
             }
 
             function toggleAuthForm() {
@@ -2610,7 +2628,7 @@ def get_ui_html() -> str:
                 if (!summary) return;
                 summary.style.display = selectedDeviceId ? 'none' : 'block';
                 if (!selectedDeviceId) {
-                    summary.textContent = 'Select a Drone to view systems, ROMs, and game logs.';
+                    summary.textContent = 'Select a Drone to view systems, ROMs, and logs.';
                     return;
                 }
                 const device = currentDevices.find(d => d.device_id === selectedDeviceId);
@@ -2662,35 +2680,54 @@ def get_ui_html() -> str:
 
             async function loadGameLogs() {
                 if (!selectedDeviceId) {
-                    document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a Drone to view game logs.</div>';
+                    document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a Drone to view logs.</div>';
                     return;
                 }
                 try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/gamelogs`);
-                    if (!response.ok) throw new Error('Failed to load game logs');
-                    const data = await response.json();
-                    displayGameLogs(data.gamelogs || []);
+                    const [logsResp, deviceResp] = await Promise.all([
+                        apiGet(`/api/devices/${selectedDeviceId}/gamelogs`),
+                        apiGet(`/api/devices/${selectedDeviceId}`)
+                    ]);
+                    if (!logsResp.ok) throw new Error('Failed to load game logs');
+                    if (!deviceResp.ok) throw new Error('Failed to load device details');
+                    const logsData = await logsResp.json();
+                    const deviceData = await deviceResp.json();
+                    displayCombinedLogs({
+                        gamelogs: logsData.gamelogs || [],
+                        emulator_configs: deviceData.emulator_configs || [],
+                        log_sources: deviceData.log_sources || []
+                    });
                 } catch (error) {
-                    console.error('Error loading game logs:', error);
+                    console.error('Error loading logs:', error);
                 }
             }
 
-            function displayGameLogs(logs) {
+            function displayCombinedLogs({gamelogs, emulator_configs, log_sources}) {
                 const container = document.getElementById('gamelogs-list');
-                if (!logs.length) {
-                    container.innerHTML = '<div class="empty-state">No games played yet</div>';
+                const parts = [];
+                if (Array.isArray(emulator_configs) && emulator_configs.length) {
+                    parts.push(`<div class="mb-3"><h6>Emulator Configs (${emulator_configs.length})</h6><ul class="small">${emulator_configs.slice(0,50).map(c=>`<li>${escapeHtml(typeof c === 'string' ? c : (c.path||c.name||JSON.stringify(c)) )}</li>`).join('')}</ul></div>`);
+                }
+                if (Array.isArray(log_sources) && log_sources.length) {
+                    parts.push(`<div class="mb-3"><h6>Log Sources (${log_sources.length})</h6><ul class="small">${log_sources.slice(0,50).map(s=>`<li>${escapeHtml(typeof s === 'string' ? s : (s.path||s.source||JSON.stringify(s)))}</li>`).join('')}</ul></div>`);
+                }
+                if (!Array.isArray(gamelogs) || !gamelogs.length) {
+                    parts.push('<div class="empty-state">No games played yet</div>');
+                    container.innerHTML = parts.join('');
                     return;
                 }
-                logs.sort((a, b) => new Date(b.played_at) - new Date(a.played_at));
-                container.innerHTML = logs.map(log => `
+                gamelogs.sort((a, b) => new Date(b.played_at) - new Date(a.played_at));
+                const logsHtml = gamelogs.map(log => `
                     <div class="card mb-2 border-left-info shadow-sm">
                         <div class="card-body py-2">
-                            <strong>${log.game_name}</strong>
-                            <div class="small text-muted mt-1">System: ${log.system_name}</div>
+                            <strong>${escapeHtml(log.game_name)}</strong>
+                            <div class="small text-muted mt-1">System: ${escapeHtml(log.system_name)}</div>
                             <div class="small text-secondary">${new Date(log.played_at).toLocaleString()}${log.duration_seconds ? ` • ${(log.duration_seconds / 60).toFixed(1)} minutes` : ''}</div>
                         </div>
                     </div>
                 `).join('');
+                parts.push(`<div><h6>Recent Game Logs (${gamelogs.length})</h6>${logsHtml}</div>`);
+                container.innerHTML = parts.join('');
             }
 
             async function loadDeviceSystems() {
@@ -2943,8 +2980,65 @@ def get_ui_html() -> str:
                                     ${escapeHtml(system)}
                                 </label>
                             `).join('') : '<span class="small text-muted">Queue ROM & System Metadata to populate system checkboxes.</span>'}
+                            ${systems.length ? systems.map(system => `
+                                <label class="badge text-bg-secondary">
+                                    <input class="drone-auto-sync-system me-1" type="checkbox" value="${escapeHtml(system)}" ${policy.systems.includes(system) ? 'checked' : ''}>
+                                    ${escapeHtml(system)}
+                                </label>
+                            `).join('') : '<span class="small text-muted">Device has not reported system metadata yet.</span>'}
                         </div>
                         <button class="btn btn-primary btn-sm" onclick="saveDroneAutoSyncPolicy()">Save Policy</button>
+                    </div></div>
+                `;
+            }
+
+            function renderDroneMetadataPanel() {
+                const container = document.getElementById('device-metadata-panel');
+                const device = selectedDrone();
+                if (!container || !device) return;
+                const resolved = device.resolved_network || {};
+                const ipv4 = resolved.ipv4 || [];
+                const ipv6 = resolved.ipv6 || [];
+                const cert = device.certificate || {};
+                const info = device.system_info || {};
+                const sample = device.last_speed_sample;
+                const systemRows = [
+                    ['Hostname', info.hostname || device.device_name],
+                    ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
+                    ['Batocera', info.batocera_version],
+                    ['Drone App', info.drone_app_version],
+                    ['Architecture', info.architecture],
+                    ['CPU', info.cpu ? `${info.cpu.model || 'CPU'} ${info.cpu.count ? `(${info.cpu.count} cores)` : ''}` : ''],
+                    ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
+                    ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
+                    ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
+                    ['Updated', info.last_system_info_update || info.updated_at],
+                ].filter(row => row[1]);
+                container.innerHTML = `
+                    <div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                            <strong>Connection Information</strong>
+                            <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
+                        </div>
+                        <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
+                        <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
+                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
+                        <hr>
+                        <strong>Certificate</strong>
+                        <div class="small text-muted">Status: ${escapeHtml(cert.status || 'unknown')}</div>
+                        <div class="small text-muted">Fingerprint: ${escapeHtml(cert.fingerprint || 'n/a')}</div>
+                        <div class="small text-muted">Subject: ${escapeHtml(cert.subject || 'n/a')}</div>
+                        <div class="small text-muted">Issuer: ${escapeHtml(cert.issuer || 'n/a')}</div>
+                        <div class="small text-muted">SAN: ${(cert.san || []).map(escapeHtml).join(', ') || 'n/a'}</div>
+                        <div class="small text-muted">Valid: ${escapeHtml(cert.valid_from || 'n/a')} - ${escapeHtml(cert.valid_until || 'n/a')}</div>
+                        <hr>
+                        <strong>System Information</strong>
+                        ${systemRows.length ? `<div class="row g-2 mt-1">${systemRows.map(([label, value]) => `
+                            <div class="col-12 col-md-6"><div class="small text-muted">${escapeHtml(label)}</div><div class="small">${escapeHtml(String(value || ''))}</div></div>
+                        `).join('')}</div>` : '<div class="small text-muted mt-1">No system information reported yet.</div>'}
+                        <hr>
+                        <strong>Speed Sample</strong>
+                        ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
                     </div></div>
                 `;
             }
@@ -3179,7 +3273,7 @@ def get_ui_html() -> str:
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['gamelogs', 'actions'].includes(viewName) ? viewName : 'systems';
+                currentDeviceView = ['gamelogs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
                 if (activeBtn) activeBtn.classList.add('active');
@@ -3187,12 +3281,17 @@ def get_ui_html() -> str:
                 const systemsPanel = document.getElementById('device-systems-panel');
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
                 const actionsPanel = document.getElementById('device-actions-panel');
+                const metadataPanel = document.getElementById('device-metadata-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
                 if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
+                if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
 
                 if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
+                if (currentDeviceView === 'metadata') {
+                    renderDroneMetadataPanel();
+                }
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
                 actionRefreshTimer = null;
                 if (currentDeviceView === 'actions') {
@@ -3213,12 +3312,12 @@ def get_ui_html() -> str:
                 const clean = raw.replace(/^#\\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
                 const allowed = ['devices', 'profile', 'help', 'notifications'];
-                if ((parts[0] === 'systems' || parts[0] === 'gamelogs') && parts[1]) {
+                if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
-                const deviceView = tab === 'devices' && ['gamelogs', 'actions'].includes(parts[2]) ? parts[2] : 'systems';
+                const deviceView = tab === 'devices' && ['gamelogs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
                 return { tab, deviceId, deviceView };
             }
 
@@ -3392,7 +3491,12 @@ def get_ui_html() -> str:
                 const tabElement = document.getElementById(tabMap[tabName]);
                 if (tabElement) tabElement.style.display = 'block';
                 currentTab = tabName;
-                if (tabName === 'devices') updateSelectedDeviceWorkspace();
+                if (tabName === 'devices') {
+                    updateSelectedDeviceWorkspace();
+                    startDevicesPolling();
+                } else {
+                    stopDevicesPolling();
+                }
                 if (tabName === 'profile' || tabName === 'notifications') renderProfileUI();
                 setPageChrome(tabName);
                 if (updateUrl) setRoute(tabName);
