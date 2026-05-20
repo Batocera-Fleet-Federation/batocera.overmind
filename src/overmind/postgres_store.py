@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from typing import Optional
 
 
@@ -57,6 +58,15 @@ class PostgresMetadataStore:
                     )
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS overmind_app_state (
+                        id TEXT PRIMARY KEY,
+                        state JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
         self._ready = True
 
     def store_action_result(self, device_id: str, action_id: str, result: dict) -> None:
@@ -75,6 +85,64 @@ class PostgresMetadataStore:
                     """,
                     (device_id, action_id, result.get("type"), json.dumps(result)),
                 )
+
+    def load_app_state(self) -> Optional[dict]:
+        if not self.url:
+            return None
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT state FROM overmind_app_state WHERE id = %s", ("default",))
+                row = cur.fetchone()
+        if not row:
+            return None
+        return _decode_state(row[0])
+
+    def store_app_state(self, state: dict) -> None:
+        if not self.url:
+            return
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return
+        encoded = json.dumps(_encode_state(state))
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO overmind_app_state (id, state, updated_at)
+                    VALUES (%s, %s::jsonb, now())
+                    ON CONFLICT (id)
+                    DO UPDATE SET state = EXCLUDED.state, updated_at = now()
+                    """,
+                    ("default", encoded),
+                )
+
+
+def _encode_state(value):
+    if isinstance(value, datetime):
+        return {"__overmind_type": "datetime", "value": value.isoformat()}
+    if isinstance(value, dict):
+        return {str(key): _encode_state(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_encode_state(item) for item in value]
+    return value
+
+
+def _decode_state(value):
+    if isinstance(value, dict):
+        if value.get("__overmind_type") == "datetime" and isinstance(value.get("value"), str):
+            try:
+                return datetime.fromisoformat(value["value"])
+            except ValueError:
+                return value["value"]
+        return {key: _decode_state(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_decode_state(item) for item in value]
+    return value
 
 
 postgres_store = PostgresMetadataStore()

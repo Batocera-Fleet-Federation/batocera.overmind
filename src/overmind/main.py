@@ -21,7 +21,7 @@ from overmind.models import (
 from overmind.db import db
 from overmind import auth
 from overmind.drone_security import generate_drone_token, hash_drone_token
-from overmind.postgres_store import postgres_store
+from overmind.postgres_store import database_url, postgres_store
 
 SUPPORTED_DEVICE_ACTIONS = {
     "restart",
@@ -3939,6 +3939,9 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Print startup message and load fake data if requested."""
+    environment = (os.getenv("OVERMIND_ENVIRONMENT") or os.getenv("ENVIRONMENT") or "").lower()
+    if environment in {"prod", "production"} and not database_url():
+        raise RuntimeError("OVERMIND_DATABASE_URL or PostgreSQL environment variables are required in production mode")
     key_file, cert_file = ensure_self_signed_cert()
     print("🎮 Batocera Overmind API started")
     print("📖 API Documentation: http://localhost:8000/docs")

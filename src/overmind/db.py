@@ -12,6 +12,67 @@ from overmind.models import User, Device, RomMetadata, GamePlay
 
 class FakeDatabase:
     """In-memory database using dictionaries."""
+    _PERSISTED_FIELDS = (
+        "users",
+        "user_by_email",
+        "devices",
+        "user_devices",
+        "roms",
+        "gamelogs",
+        "device_actions",
+        "speed_samples",
+        "device_events",
+        "peer_checks",
+        "integration_tokens",
+        "approved_drone_tokens",
+        "rom_sync_activity",
+        "pending_drone_connections",
+    )
+    _PERSIST_AFTER_METHODS = {
+        "create_user",
+        "get_or_create_social_user",
+        "update_user_profile",
+        "update_user_fleet_settings",
+        "update_user_notification_settings",
+        "create_integration_token",
+        "claim_integration_token",
+        "verify_integration_token",
+        "revoke_integration_token",
+        "create_pending_drone_connection",
+        "accept_pending_drone_connection",
+        "deny_pending_drone_connection",
+        "create_device",
+        "update_device_last_seen",
+        "verify_device_token",
+        "rotate_device_token",
+        "set_device_authorization_token",
+        "update_device_auto_sync_policy",
+        "update_device_name",
+        "delete_device",
+        "create_device_action",
+        "claim_next_device_action",
+        "claim_pending_device_actions",
+        "complete_device_action",
+        "store_action_result",
+        "store_rom_metadata",
+        "add_speed_sample",
+        "add_device_event",
+        "add_peer_checks",
+        "add_roms",
+        "add_rom_sync_activity",
+        "log_gameplay",
+        "populate_fake_data",
+    }
+
+    def __getattribute__(self, name):
+        attr = object.__getattribute__(self, name)
+        if name in object.__getattribute__(self, "_PERSIST_AFTER_METHODS") and callable(attr):
+            def persisted_method(*args, **kwargs):
+                result = attr(*args, **kwargs)
+                object.__getattribute__(self, "_persist_state")()
+                return result
+            return persisted_method
+        return attr
     
     def __init__(self):
         # Storage
@@ -29,6 +90,25 @@ class FakeDatabase:
         self.approved_drone_tokens: Dict[str, str] = {}
         self.rom_sync_activity: Dict[str, list] = {}
         self.pending_drone_connections: Dict[str, dict] = {}
+        self._load_persistent_state()
+
+    def _state_snapshot(self) -> dict:
+        return {field: getattr(self, field) for field in self._PERSISTED_FIELDS}
+
+    def _load_persistent_state(self) -> None:
+        state = postgres_store.load_app_state()
+        if not isinstance(state, dict):
+            return
+        for field in self._PERSISTED_FIELDS:
+            value = state.get(field)
+            if isinstance(value, dict):
+                setattr(self, field, value)
+
+    def _persist_state(self) -> None:
+        try:
+            postgres_store.store_app_state(self._state_snapshot())
+        except Exception as error:
+            print(f"Overmind PostgreSQL state persistence failed: {error}")
     
     # User operations
     def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None) -> str:

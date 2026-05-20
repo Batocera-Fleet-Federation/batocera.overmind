@@ -2,6 +2,7 @@
 
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
+import os
 from typing import Optional
 from jose import JWTError, jwt
 
@@ -11,7 +12,7 @@ from jose import JWTError, jwt
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # JWT settings
-SECRET_KEY = "overmind-secret-key-change-in-production"  # CHANGE IN PRODUCTION
+SECRET_KEY = os.getenv("SECRET_KEY", "overmind-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
