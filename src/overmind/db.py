@@ -232,10 +232,28 @@ class FakeDatabase:
             return None
         if connection.get("user_id") not in (None, user_id):
             return None
+        authorization_token_id = connection.get("authorization_token_id")
+        backing_token_hash = None
+        if authorization_token_id:
+            backing = next(
+                (
+                    row for row in self.integration_tokens.get(user_id, [])
+                    if row.get("id") == authorization_token_id and not row.get("revoked_at")
+                ),
+                None,
+            )
+            if backing:
+                backing_token_hash = backing.get("token_hash")
         existing = self.get_device_by_device_id(device_id)
         if existing and existing.get("user_id") == user_id:
+            if backing_token_hash:
+                existing["drone_token_hash"] = backing_token_hash
+                existing["authorization_token_id"] = authorization_token_id
+                print(f"Approving existing Drone {device_id}: preserved bound onboarding credential id={authorization_token_id}")
             existing["approval_status"] = "approved"
             existing["last_seen"] = datetime.utcnow()
+            existing["device_name"] = connection.get("device_name") or existing.get("device_name")
+            existing["batocera_info"] = connection.get("batocera_info") or existing.get("batocera_info")
             if existing["id"] not in self.user_devices.get(user_id, []):
                 self.user_devices.setdefault(user_id, []).append(existing["id"])
             self.pending_drone_connections.pop(device_id, None)
@@ -246,18 +264,9 @@ class FakeDatabase:
 
         raw_token = None
         token_hash = None
-        authorization_token_id = connection.get("authorization_token_id")
-        if authorization_token_id:
-            backing = next(
-                (
-                    row for row in self.integration_tokens.get(user_id, [])
-                    if row.get("id") == authorization_token_id and not row.get("revoked_at")
-                ),
-                None,
-            )
-            if backing:
-                token_hash = backing.get("token_hash")
-                print(f"Approving Drone {device_id}: preserving bound onboarding credential id={authorization_token_id}")
+        if backing_token_hash:
+            token_hash = backing_token_hash
+            print(f"Approving Drone {device_id}: preserving bound onboarding credential id={authorization_token_id}")
         if not token_hash:
             raw_token = generate_drone_token()
             print(f"Approving Drone {device_id}: generated replacement Drone credential")

@@ -382,6 +382,54 @@ def test_approval_preserves_bound_token_and_heartbeat_succeeds(client):
     assert current.status_code == 200
 
 
+def test_approval_updates_existing_removed_drone_to_new_bound_token(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    user_token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    first_auth = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"label": "old token"},
+    ).json()["token"]["authorization_token"]
+    first = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=first_auth, device_id="drone-a"),
+    )
+    assert first.json()["status"] == "pending"
+    client.post("/api/drone-connections/drone-a/accept", headers={"Authorization": f"Bearer {user_token}"})
+    assert client.post(
+        "/api/devices/drone-a/alive",
+        headers={"Authorization": f"Bearer {first_auth}"},
+        json={"network": {"ipv4": ["192.168.1.50"]}},
+    ).status_code == 200
+    client.delete("/api/devices/drone-a", headers={"Authorization": f"Bearer {user_token}"})
+
+    second_auth = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"label": "new token"},
+    ).json()["token"]["authorization_token"]
+    pending = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token=second_auth, device_id="drone-a"),
+    )
+    assert pending.json()["status"] == "pending"
+    client.post("/api/drone-connections/drone-a/accept", headers={"Authorization": f"Bearer {user_token}"})
+
+    assert client.post(
+        "/api/devices/drone-a/alive",
+        headers={"Authorization": f"Bearer {second_auth}"},
+        json={"network": {"ipv4": ["192.168.1.50"]}},
+    ).status_code == 200
+    assert client.post(
+        "/api/devices/drone-a/alive",
+        headers={"Authorization": f"Bearer {first_auth}"},
+        json={"network": {"ipv4": ["192.168.1.50"]}},
+    ).status_code == 401
+
+
 def test_revoked_integration_token_invalidates_backed_drone_token(client):
     client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
     user_token = client.post(
