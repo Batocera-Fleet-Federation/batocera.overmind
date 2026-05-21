@@ -12,6 +12,7 @@ RUN apt-get update \
 COPY requirements.txt pyproject.toml ./
 COPY src ./src
 COPY app ./app
+COPY content ./content
 RUN pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8443

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
@@ -42,6 +43,7 @@ TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+CONTENT_DIR = Path(__file__).resolve().parent.parent.parent / "content"
 OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
 
@@ -155,6 +157,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount the content directory for static assets like main.jpeg
+if CONTENT_DIR.exists():
+    app.mount("/content", StaticFiles(directory=str(CONTENT_DIR)), name="content")
 
 OAUTH_PROVIDERS = {
     "google": {
