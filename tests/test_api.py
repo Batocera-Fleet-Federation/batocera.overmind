@@ -7,13 +7,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from overmind.main import app, ensure_self_signed_cert
+from overmind.main import app, ensure_self_signed_cert, TOKEN_HASH_SECRET
 from overmind.db import db
+from overmind import auth as auth_utils
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """Create a test client."""
+    monkeypatch.setenv("OVERMIND_AUTO_VERIFY_REGISTRATION", "1")
     db.users.clear()
     db.user_by_email.clear()
     db.devices.clear()
@@ -120,6 +122,79 @@ def test_social_auth_buttons_disabled_without_env(client, monkeypatch):
     response = client.get("/api/auth/providers")
     assert response.status_code == 200
     assert response.json()["providers"] == {"google": False, "github": False}
+
+
+def test_email_registration_requires_verification(client, monkeypatch):
+    monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
+    response = client.post(
+        "/api/auth/register",
+        json={"email": "verify@example.com", "password": "testpass123"},
+    )
+    assert response.status_code == 200
+    assert db.get_user_by_email("verify@example.com")["is_active"] is False
+    assert client.post("/api/auth/login", json={"email": "verify@example.com", "password": "testpass123"}).status_code == 403
+
+    code = db.email_verifications[db.get_user_by_email("verify@example.com")["id"]]["code"]
+    verify = client.post("/api/auth/verify-email", json={"email": "verify@example.com", "code": code})
+    assert verify.status_code == 200
+    assert client.post("/api/auth/login", json={"email": "verify@example.com", "password": "testpass123"}).status_code == 200
+
+
+def test_expired_verification_code_fails(client, monkeypatch):
+    from datetime import datetime, timedelta
+
+    monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
+    client.post("/api/auth/register", json={"email": "expired@example.com", "password": "testpass123"})
+    user = db.get_user_by_email("expired@example.com")
+    db.email_verifications[user["id"]]["expires_at"] = datetime.utcnow() - timedelta(seconds=1)
+    code = db.email_verifications[user["id"]]["code"]
+    response = client.post("/api/auth/verify-email", json={"email": "expired@example.com", "code": code})
+    assert response.status_code == 400
+
+
+def test_forgot_password_token_resets_password(client, monkeypatch):
+    from datetime import datetime, timedelta
+
+    monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
+    client.post("/api/auth/register", json={"email": "reset@example.com", "password": "oldpass123"})
+    user = db.get_user_by_email("reset@example.com")
+    db.set_user_verified(user["id"])
+
+    response = client.post("/api/auth/forgot-password", json={"email": "reset@example.com"})
+    assert response.status_code == 200
+    raw_token = "manual-reset-token"
+    db.create_password_reset(user["id"], auth_utils.hash_password(f"{TOKEN_HASH_SECRET}:{raw_token}"), datetime.utcnow() + timedelta(minutes=30))
+    reset = client.post("/api/auth/reset-password", json={"token": raw_token, "password": "newpass123"})
+    assert reset.status_code == 200
+    assert client.post("/api/auth/login", json={"email": "reset@example.com", "password": "newpass123"}).status_code == 200
+
+
+def test_swarm_roles_gate_invites_and_mutations(client):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {owner_token}"}).json()["swarms"][0]["id"]
+
+    invite = client.post(
+        f"/api/swarms/{swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "viewer@example.com", "role": "overseer"},
+    )
+    assert invite.status_code == 200
+
+    client.post("/api/auth/register", json={"email": "viewer@example.com", "password": "testpass123"})
+    viewer_token = client.post("/api/auth/login", json={"email": "viewer@example.com", "password": "testpass123"}).json()["access_token"]
+    denied = client.post(
+        f"/api/swarms/{swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+        json={"email": "other@example.com", "role": "overseer"},
+    )
+    assert denied.status_code == 403
+
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(owner["id"], "swarm-drone", "Swarm Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token", swarm_id=swarm_id)
+    assert client.get("/api/devices?swarm_id=" + swarm_id, headers={"Authorization": f"Bearer {viewer_token}"}).status_code == 200
+    mutate = client.post("/api/devices/swarm-drone/actions", headers={"Authorization": f"Bearer {viewer_token}"}, json={"action": "restart"})
+    assert mutate.status_code == 403
 
 
 def _device_registration_payload(**overrides):
@@ -747,7 +822,7 @@ def test_shutdown_action_is_rejected_by_api(client):
 
 
 def test_selected_drone_actions_ui_omits_shutdown_and_uses_game_logs_label():
-    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/main.py").read_text(encoding="utf-8")
+    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     assert "queueDeviceAction('shutdown')" not in html
     assert ">Shutdown<" not in html
     assert ">Game Logs<" in html

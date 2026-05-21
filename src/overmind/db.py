@@ -27,6 +27,11 @@ class FakeDatabase:
         "approved_drone_tokens",
         "rom_sync_activity",
         "pending_drone_connections",
+        "email_verifications",
+        "password_resets",
+        "swarms",
+        "swarm_memberships",
+        "invitations",
     )
     _PERSIST_AFTER_METHODS = {
         "create_user",
@@ -62,6 +67,15 @@ class FakeDatabase:
         "add_rom_sync_activity",
         "log_gameplay",
         "populate_fake_data",
+        "create_email_verification",
+        "verify_email_code",
+        "create_password_reset",
+        "consume_password_reset",
+        "create_swarm",
+        "invite_to_swarm",
+        "accept_invitation",
+        "remove_swarm_member",
+        "update_swarm_member_role",
     }
 
     def __getattribute__(self, name):
@@ -90,6 +104,11 @@ class FakeDatabase:
         self.approved_drone_tokens: Dict[str, str] = {}
         self.rom_sync_activity: Dict[str, list] = {}
         self.pending_drone_connections: Dict[str, dict] = {}
+        self.email_verifications: Dict[str, dict] = {}
+        self.password_resets: Dict[str, dict] = {}
+        self.swarms: Dict[str, dict] = {}
+        self.swarm_memberships: Dict[str, Dict[str, dict]] = {}
+        self.invitations: Dict[str, dict] = {}
         self._load_persistent_state()
 
     def _state_snapshot(self) -> dict:
@@ -111,13 +130,16 @@ class FakeDatabase:
             print(f"Overmind PostgreSQL state persistence failed: {error}")
     
     # User operations
-    def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None) -> str:
+    def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None, verified: bool = False, auth_provider: str = "password") -> str:
         """Create a new user."""
         user_id = str(uuid.uuid4())
         self.users[user_id] = {
             "id": user_id,
             "email": email,
             "password": hashed_password,
+            "email_verified": bool(verified),
+            "is_active": bool(verified),
+            "auth_provider": auth_provider,
             "full_name": full_name,
             "avatar_data_url": None,
             "fleet_settings": {
@@ -140,6 +162,9 @@ class FakeDatabase:
         }
         self.user_by_email[email] = user_id
         self.user_devices[user_id] = []
+        if verified:
+            self.ensure_personal_swarm(user_id)
+            self.accept_invitations_for_email(email, user_id)
         return user_id
 
     def get_or_create_social_user(self, email: str, full_name: Optional[str], provider: str) -> dict:
@@ -151,10 +176,156 @@ class FakeDatabase:
                 existing["full_name"] = full_name
             return existing
 
-        user_id = self.create_user(email, auth.hash_password(str(uuid.uuid4())), full_name)
+        user_id = self.create_user(email, auth.hash_password(str(uuid.uuid4())), full_name, verified=True, auth_provider=provider)
         user = self.users[user_id]
         user["auth_provider"] = provider
+        user["email_verified"] = True
+        user["is_active"] = True
+        self.ensure_personal_swarm(user_id)
+        self.accept_invitations_for_email(email, user_id)
         return user
+
+    def set_user_verified(self, user_id: str) -> Optional[dict]:
+        user = self.get_user(user_id)
+        if not user:
+            return None
+        user["email_verified"] = True
+        user["is_active"] = True
+        self.ensure_personal_swarm(user_id)
+        self.accept_invitations_for_email(user["email"], user_id)
+        return user
+
+    def create_email_verification(self, user_id: str, code: str, token_hash: str, expires_at: datetime) -> dict:
+        entry = {"user_id": user_id, "code": code, "token_hash": token_hash, "expires_at": expires_at, "created_at": datetime.utcnow(), "used_at": None}
+        self.email_verifications[user_id] = entry
+        return entry
+
+    def verify_email_code(self, email: str, code: str) -> bool:
+        user = self.get_user_by_email(email)
+        if not user:
+            return False
+        entry = self.email_verifications.get(user["id"])
+        if not entry or entry.get("used_at") or datetime.utcnow() > entry.get("expires_at"):
+            return False
+        if str(entry.get("code")) != str(code).strip():
+            return False
+        entry["used_at"] = datetime.utcnow()
+        self.set_user_verified(user["id"])
+        return True
+
+    def verify_email_token(self, token: str, verifier) -> Optional[dict]:
+        for user_id, entry in self.email_verifications.items():
+            if entry.get("used_at") or datetime.utcnow() > entry.get("expires_at"):
+                continue
+            if verifier(token, entry.get("token_hash") or ""):
+                entry["used_at"] = datetime.utcnow()
+                return self.set_user_verified(user_id)
+        return None
+
+    def create_password_reset(self, user_id: str, token_hash: str, expires_at: datetime) -> dict:
+        reset_id = str(uuid.uuid4())
+        entry = {"id": reset_id, "user_id": user_id, "token_hash": token_hash, "expires_at": expires_at, "created_at": datetime.utcnow(), "used_at": None}
+        self.password_resets[reset_id] = entry
+        return entry
+
+    def consume_password_reset(self, token: str, new_password_hash: str, verifier) -> bool:
+        for entry in self.password_resets.values():
+            if entry.get("used_at") or datetime.utcnow() > entry.get("expires_at"):
+                continue
+            if verifier(token, entry.get("token_hash") or ""):
+                user = self.get_user(entry["user_id"])
+                if not user:
+                    return False
+                user["password"] = new_password_hash
+                entry["used_at"] = datetime.utcnow()
+                return True
+        return False
+
+    def create_swarm(self, owner_id: str, name: str) -> dict:
+        swarm_id = str(uuid.uuid4())
+        swarm = {"id": swarm_id, "name": name.strip(), "owner_id": owner_id, "created_at": datetime.utcnow()}
+        self.swarms[swarm_id] = swarm
+        self.swarm_memberships.setdefault(swarm_id, {})[owner_id] = {"user_id": owner_id, "role": "mastermind_overlord", "created_at": datetime.utcnow()}
+        return swarm
+
+    def ensure_personal_swarm(self, user_id: str) -> dict:
+        existing = self.get_user_swarms(user_id)
+        if existing:
+            return existing[0]
+        user = self.get_user(user_id) or {}
+        return self.create_swarm(user_id, f"{user.get('full_name') or user.get('email') or 'Overlord'}'s Swarm")
+
+    def get_user_swarms(self, user_id: str) -> List[dict]:
+        rows = []
+        for swarm_id, members in self.swarm_memberships.items():
+            member = members.get(user_id)
+            swarm = self.swarms.get(swarm_id)
+            if member and swarm:
+                rows.append({**swarm, "role": member["role"]})
+        rows.sort(key=lambda row: str(row.get("created_at") or ""))
+        return rows
+
+    def get_swarm_member(self, swarm_id: str, user_id: str) -> Optional[dict]:
+        return self.swarm_memberships.get(swarm_id, {}).get(user_id)
+
+    def require_swarm_role(self, swarm_id: str, user_id: str, allowed: set[str]) -> Optional[dict]:
+        member = self.get_swarm_member(swarm_id, user_id)
+        if not member or member.get("role") not in allowed:
+            return None
+        return member
+
+    def default_swarm_id(self, user_id: str) -> Optional[str]:
+        swarms = self.get_user_swarms(user_id)
+        return swarms[0]["id"] if swarms else None
+
+    def invite_to_swarm(self, swarm_id: str, email: str, role: str, token_hash: str, expires_at: datetime, invited_by: str) -> dict:
+        invite_id = str(uuid.uuid4())
+        invite = {"id": invite_id, "swarm_id": swarm_id, "email": email.lower(), "role": role, "token_hash": token_hash, "status": "pending", "created_at": datetime.utcnow(), "expires_at": expires_at, "invited_by": invited_by}
+        self.invitations[invite_id] = invite
+        return invite
+
+    def list_swarm_access(self, swarm_id: str) -> dict:
+        members = []
+        for user_id, member in self.swarm_memberships.get(swarm_id, {}).items():
+            user = self.get_user(user_id) or {}
+            members.append({**member, "email": user.get("email"), "full_name": user.get("full_name")})
+        invites = [{k: v for k, v in invite.items() if k != "token_hash"} for invite in self.invitations.values() if invite.get("swarm_id") == swarm_id]
+        return {"members": members, "invitations": invites}
+
+    def accept_invitation(self, token: str, user_id: str, verifier) -> Optional[dict]:
+        user = self.get_user(user_id)
+        if not user:
+            return None
+        for invite in self.invitations.values():
+            if invite.get("status") != "pending" or datetime.utcnow() > invite.get("expires_at"):
+                continue
+            if invite.get("email") != str(user.get("email") or "").lower():
+                continue
+            if verifier(token, invite.get("token_hash") or ""):
+                self.swarm_memberships.setdefault(invite["swarm_id"], {})[user_id] = {"user_id": user_id, "role": invite["role"], "created_at": datetime.utcnow()}
+                invite["status"] = "accepted"
+                invite["accepted_at"] = datetime.utcnow()
+                return invite
+        return None
+
+    def accept_invitations_for_email(self, email: str, user_id: str) -> None:
+        for invite in self.invitations.values():
+            if invite.get("status") == "pending" and invite.get("email") == email.lower() and datetime.utcnow() <= invite.get("expires_at"):
+                self.swarm_memberships.setdefault(invite["swarm_id"], {})[user_id] = {"user_id": user_id, "role": invite["role"], "created_at": datetime.utcnow()}
+
+    def remove_swarm_member(self, swarm_id: str, target_user_id: str) -> bool:
+        swarm = self.swarms.get(swarm_id)
+        if not swarm or swarm.get("owner_id") == target_user_id:
+            return False
+        return self.swarm_memberships.get(swarm_id, {}).pop(target_user_id, None) is not None
+
+    def update_swarm_member_role(self, swarm_id: str, target_user_id: str, role: str) -> bool:
+        member = self.swarm_memberships.get(swarm_id, {}).get(target_user_id)
+        swarm = self.swarms.get(swarm_id)
+        if not member or not swarm or swarm.get("owner_id") == target_user_id:
+            return False
+        member["role"] = role
+        return True
     
     def get_user_by_email(self, email: str) -> Optional[dict]:
         """Get user by email."""
@@ -383,9 +554,11 @@ class FakeDatabase:
         raw_token: Optional[str] = None,
         token_hash: Optional[str] = None,
         authorization_token_id: Optional[str] = None,
+        swarm_id: Optional[str] = None,
     ) -> str:
         """Register a new device."""
         internal_id = str(uuid.uuid4())
+        selected_swarm_id = swarm_id or self.default_swarm_id(user_id) or self.ensure_personal_swarm(user_id)["id"]
         network_state = resolve_reported_network(batocera_info.get("network") if isinstance(batocera_info, dict) else None)
         certificate = self._clean_device_certificate(
             batocera_info.get("certificate") if isinstance(batocera_info, dict) else None
@@ -393,6 +566,7 @@ class FakeDatabase:
         self.devices[internal_id] = {
             "id": internal_id,
             "user_id": user_id,
+            "swarm_id": selected_swarm_id,
             "device_id": device_id,
             "device_name": device_name,
             "batocera_info": batocera_info,
@@ -443,13 +617,23 @@ class FakeDatabase:
                 return device
         return None
     
-    def get_user_devices(self, user_id: str) -> List[dict]:
+    def get_user_devices(self, user_id: str, swarm_id: Optional[str] = None) -> List[dict]:
         """Get all devices for a user."""
-        device_ids = self.user_devices.get(user_id, [])
+        visible_swarm_ids = {swarm_id} if swarm_id else {row["id"] for row in self.get_user_swarms(user_id)}
         return [
-            self.devices[did] for did in device_ids
-            if did in self.devices and self.devices[did].get("approval_status", "approved") == "approved"
+            device for device in self.devices.values()
+            if device.get("swarm_id") in visible_swarm_ids and device.get("approval_status", "approved") == "approved"
         ]
+
+    def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device.get("approval_status", "approved") != "approved":
+            return None
+        if swarm_id and device.get("swarm_id") != swarm_id:
+            return None
+        if not self.get_swarm_member(device.get("swarm_id"), user_id):
+            return None
+        return device
     
     def update_device_last_seen(
         self,
@@ -1158,12 +1342,14 @@ class FakeDatabase:
         user1_id = self.create_user(
             "demo@example.com",
             hash_password("DemoPass123"),
-            "Demo User"
+            "Demo User",
+            verified=True,
         )
         user2_id = self.create_user(
             "arcade@example.com",
             hash_password("ArcadePass123"),
-            "Arcade Enthusiast"
+            "Arcade Enthusiast",
+            verified=True,
         )
         
         # Create sample devices for user1. A local demo Drone also uses this

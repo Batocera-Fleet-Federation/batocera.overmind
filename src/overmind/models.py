@@ -43,6 +43,29 @@ class UserLogin(BaseModel):
     password: str
 
 
+class EmailVerificationRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str = Field(..., min_length=8)
+
+
+class SwarmCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+
+
+class SwarmInviteRequest(BaseModel):
+    email: EmailStr
+    role: str = Field(..., pattern="^(overlord|overseer|Overlord|Overseer)$")
+
+
 class User(BaseModel):
     """User model."""
     id: str

@@ -11,15 +11,18 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 from overmind.models import (
     UserRegister, UserLogin, User, DeviceRegister,
-    RomListUpdate, GamePlayLog, SocialAuthRequest
+    RomListUpdate, GamePlayLog, SocialAuthRequest,
+    EmailVerificationRequest, ForgotPasswordRequest, ResetPasswordRequest,
+    SwarmCreateRequest, SwarmInviteRequest,
 )
 from overmind.db import db
 from overmind import auth
+from overmind import emailer
 from overmind.drone_security import generate_drone_token, hash_drone_token
 from overmind.postgres_store import database_url, postgres_store
 
@@ -34,6 +37,10 @@ SUPPORTED_DEVICE_ACTIONS = {
     "sync_system",
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
+TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
+VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
+PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 app = FastAPI(
     title="Batocera Overmind API",
@@ -195,8 +202,78 @@ def build_login_response(user: dict) -> dict:
             "id": user["id"],
             "email": user["email"],
             "full_name": user["full_name"]
-        }
+        },
+        "swarms": db.get_user_swarms(user["id"]),
     }
+
+
+def hash_secret_token(token: str) -> str:
+    return auth.hash_password(f"{TOKEN_HASH_SECRET}:{token}")
+
+
+def verify_secret_token(token: str, stored_hash: str) -> bool:
+    return auth.verify_password(f"{TOKEN_HASH_SECRET}:{token}", stored_hash)
+
+
+def send_verification_email(user: dict, code: str, token: str) -> None:
+    link = f"{emailer.base_url()}/api/auth/verify-email?token={urllib.parse.quote(token)}"
+    body_html = emailer.render_email_template(
+        "registration_verification.html",
+        {"code": code, "verification_link": link, "ttl_minutes": VERIFICATION_TTL_MINUTES},
+    )
+    html_body, text_body = emailer.themed_email(
+        "Verify your Overmind account",
+        body_html,
+        f"Your Overmind validation code is {code}.\nVerify here: {link}\nThis code expires in {VERIFICATION_TTL_MINUTES} minutes.",
+    )
+    emailer.send_email(user["email"], "Verify your Batocera Overmind account", html_body, text_body)
+
+
+def send_password_reset_email(user: dict, token: str) -> None:
+    link = f"{emailer.base_url()}/#reset-password={urllib.parse.quote(token)}"
+    body_html = emailer.render_email_template(
+        "password_reset.html",
+        {"reset_link": link, "ttl_minutes": PASSWORD_RESET_TTL_MINUTES},
+    )
+    html_body, text_body = emailer.themed_email(
+        "Reset your Overmind password",
+        body_html,
+        f"Reset your Overmind password: {link}\nThis link expires in {PASSWORD_RESET_TTL_MINUTES} minutes.",
+    )
+    emailer.send_email(user["email"], "Reset your Batocera Overmind password", html_body, text_body)
+
+
+def send_invitation_email(email: str, swarm: dict, role: str, token: str) -> None:
+    link = f"{emailer.base_url()}/#invite={urllib.parse.quote(token)}"
+    body_html = emailer.render_email_template(
+        "swarm_invitation.html",
+        {"swarm_name": swarm.get("name"), "role": role, "invitation_link": link},
+    )
+    html_body, text_body = emailer.themed_email(
+        "You were invited to a Batocera swarm",
+        body_html,
+        f"You were invited to {swarm.get('name')} as {role}.\nAccept: {link}",
+    )
+    emailer.send_email(email, "Batocera Overmind swarm invitation", html_body, text_body)
+
+
+def ensure_active_user(user: dict) -> None:
+    if not user.get("is_active") or not user.get("email_verified"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email verification required")
+
+
+def selected_swarm_id(user: dict, swarm_id: Optional[str] = None) -> str:
+    candidate = swarm_id or db.default_swarm_id(user["id"])
+    if not candidate or not db.get_swarm_member(candidate, user["id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Swarm access denied")
+    return candidate
+
+
+def require_swarm_role(user: dict, swarm_id: str, roles: set[str]) -> dict:
+    member = db.require_swarm_role(swarm_id, user["id"], roles)
+    if not member:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient swarm permission")
+    return member
 
 
 def device_response(device: dict) -> dict:
@@ -250,8 +327,19 @@ async def register(user_data: UserRegister):
         )
     
     hashed_password = auth.hash_password(user_data.password)
-    user_id = db.create_user(user_data.email, hashed_password, user_data.full_name)
+    auto_verify = os.getenv("OVERMIND_AUTO_VERIFY_REGISTRATION", "").strip().lower() in {"1", "true", "yes", "on"}
+    user_id = db.create_user(user_data.email, hashed_password, user_data.full_name, verified=auto_verify, auth_provider="password")
     user = db.get_user(user_id)
+    if not auto_verify:
+        code = f"{secrets.randbelow(1000000):06d}"
+        raw_token = secrets.token_urlsafe(32)
+        db.create_email_verification(
+            user_id,
+            code,
+            hash_secret_token(raw_token),
+            datetime.utcnow() + timedelta(minutes=VERIFICATION_TTL_MINUTES),
+        )
+        send_verification_email(user, code, raw_token)
     
     return User(
         id=user["id"],
@@ -271,8 +359,40 @@ async def login(credentials: UserLogin):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
-    
+    ensure_active_user(user)
     return build_login_response(user)
+
+
+@app.post("/api/auth/verify-email")
+async def verify_email_code(payload: EmailVerificationRequest):
+    if not db.verify_email_code(str(payload.email), payload.code):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code")
+    return {"status": "verified"}
+
+
+@app.get("/api/auth/verify-email")
+async def verify_email_link(token: str):
+    user = db.verify_email_token(token, verify_secret_token)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification link")
+    return RedirectResponse(f"{emailer.base_url()}/#verified=1")
+
+
+@app.post("/api/auth/forgot-password")
+async def forgot_password(payload: ForgotPasswordRequest):
+    user = db.get_user_by_email(str(payload.email))
+    if user and user.get("auth_provider") in (None, "password") and user.get("password"):
+        raw_token = secrets.token_urlsafe(32)
+        db.create_password_reset(user["id"], hash_secret_token(raw_token), datetime.utcnow() + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES))
+        send_password_reset_email(user, raw_token)
+    return {"message": "If an eligible account exists, a password reset email has been sent."}
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(payload: ResetPasswordRequest):
+    if not db.consume_password_reset(payload.token, auth.hash_password(payload.password), verify_secret_token):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired password reset token")
+    return {"status": "password_updated"}
 
 
 @app.get("/api/auth/providers")
@@ -421,6 +541,7 @@ def get_current_user(authorization: Optional[str]) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found"
         )
+    ensure_active_user(user)
     
     return user
 
@@ -440,6 +561,86 @@ def get_current_drone(device_id: str, authorization: Optional[str]) -> dict:
     if not device:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Drone token")
     return device
+
+
+# ==================== Swarms ====================
+
+@app.get("/api/swarms")
+async def list_swarms(authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    return {"swarms": db.get_user_swarms(user["id"])}
+
+
+@app.post("/api/swarms")
+async def create_swarm(payload: SwarmCreateRequest, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    swarm = db.create_swarm(user["id"], payload.name)
+    return {"swarm": {**swarm, "role": "mastermind_overlord"}}
+
+
+@app.get("/api/swarms/{swarm_id}/access")
+async def get_swarm_access(swarm_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    selected_swarm_id(user, swarm_id)
+    access = db.list_swarm_access(swarm_id)
+    member = db.get_swarm_member(swarm_id, user["id"])
+    return {"access": access, "role": member.get("role") if member else None}
+
+
+@app.post("/api/swarms/{swarm_id}/invitations")
+async def invite_swarm_member(swarm_id: str, payload: SwarmInviteRequest, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    selected_swarm_id(user, swarm_id)
+    require_swarm_role(user, swarm_id, {"mastermind_overlord"})
+    role = payload.role.lower()
+    raw_token = secrets.token_urlsafe(32)
+    invite = db.invite_to_swarm(
+        swarm_id,
+        str(payload.email),
+        role,
+        hash_secret_token(raw_token),
+        datetime.utcnow() + timedelta(days=int(os.getenv("INVITATION_EXPIRE_DAYS", "7"))),
+        user["id"],
+    )
+    invited = db.get_user_by_email(str(payload.email))
+    if invited and invited.get("is_active"):
+        db.accept_invitations_for_email(str(payload.email), invited["id"])
+    swarm = db.swarms.get(swarm_id) or {}
+    send_invitation_email(str(payload.email), swarm, role, raw_token)
+    return {"invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
+
+
+@app.post("/api/invitations/accept")
+async def accept_invitation(payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    token = str(payload.get("token") or "")
+    invite = db.accept_invitation(token, user["id"], verify_secret_token)
+    if not invite:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired invitation")
+    return {"status": "accepted", "swarm_id": invite["swarm_id"]}
+
+
+@app.delete("/api/swarms/{swarm_id}/members/{target_user_id}")
+async def remove_swarm_member(swarm_id: str, target_user_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    selected_swarm_id(user, swarm_id)
+    require_swarm_role(user, swarm_id, {"mastermind_overlord"})
+    if not db.remove_swarm_member(swarm_id, target_user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swarm member not found")
+    return {"status": "removed"}
+
+
+@app.patch("/api/swarms/{swarm_id}/members/{target_user_id}")
+async def update_swarm_member(swarm_id: str, target_user_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    selected_swarm_id(user, swarm_id)
+    require_swarm_role(user, swarm_id, {"mastermind_overlord"})
+    role = str(payload.get("role") or "").lower()
+    if role not in {"overlord", "overseer"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="role must be overlord or overseer")
+    if not db.update_swarm_member_role(swarm_id, target_user_id, role):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swarm member not found")
+    return {"status": "updated", "role": role}
 
 
 # ==================== Device Management ====================
@@ -539,9 +740,11 @@ async def revoke_integration_token(token_id: str, authorization: Optional[str] =
 
 
 @app.get("/api/drone-connections")
-async def list_drone_connections(authorization: Optional[str] = Header(default=None)):
+async def list_drone_connections(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List pending drone connection attempts for the Overlord."""
     user = get_current_user(authorization)
+    sid = selected_swarm_id(user, swarm_id)
+    require_swarm_role(user, sid, {"mastermind_overlord", "overlord"})
     return {"connections": db.get_pending_drone_connections(user["id"])}
 
 
@@ -549,6 +752,8 @@ async def list_drone_connections(authorization: Optional[str] = Header(default=N
 async def accept_drone_connection(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Accept a pending drone connection."""
     user = get_current_user(authorization)
+    sid = selected_swarm_id(user)
+    require_swarm_role(user, sid, {"mastermind_overlord", "overlord"})
     device = db.accept_pending_drone_connection(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drone connection not found")
@@ -563,16 +768,19 @@ async def accept_drone_connection(device_id: str, authorization: Optional[str] =
 async def deny_drone_connection(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Deny a pending drone connection."""
     user = get_current_user(authorization)
+    sid = selected_swarm_id(user)
+    require_swarm_role(user, sid, {"mastermind_overlord", "overlord"})
     if not db.deny_pending_drone_connection(user["id"], device_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drone connection not found")
     return {"message": "Drone connection denied.", "device_id": device_id}
 
 
 @app.get("/api/devices")
-async def list_devices(authorization: Optional[str] = Header(default=None)):
+async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List all devices for the authenticated user."""
     user = get_current_user(authorization)
-    devices = db.get_user_devices(user["id"])
+    sid = selected_swarm_id(user, swarm_id)
+    devices = db.get_user_devices(user["id"], sid)
     
     return {
         "devices": [
@@ -585,9 +793,8 @@ async def list_devices(authorization: Optional[str] = Header(default=None)):
 async def get_device(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Get device details."""
     user = get_current_user(authorization)
-    
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"] or device.get("approval_status", "approved") != "approved":
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
@@ -617,7 +824,11 @@ async def get_peer_certificate(device_id: str, peer_id: str, authorization: Opti
 async def rotate_device_token(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Rotate a Drone bearer token. The raw value is returned once."""
     user = get_current_user(authorization)
-    rotated = db.rotate_device_token(user["id"], device_id)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    rotated = db.rotate_device_token(device["user_id"], device_id)
     if not rotated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"device": device_response(rotated["device"]), "drone_token": rotated["token"]}
@@ -631,9 +842,10 @@ async def rename_device(
 ):
     """Rename a device from the UI."""
     user = get_current_user(authorization)
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
 
     new_name = (payload.get("device_name") or "").strip()
     if not new_name:
@@ -652,8 +864,12 @@ async def update_device_auto_sync(
 ):
     """Update per-Drone ROM metadata sync policy."""
     user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
     systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
-    policy = db.update_device_auto_sync_policy(user["id"], device_id, bool(payload.get("enabled")), systems)
+    policy = db.update_device_auto_sync_policy(device["user_id"], device_id, bool(payload.get("enabled")), systems)
     if policy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"auto_sync_policy": policy}
@@ -663,6 +879,10 @@ async def update_device_auto_sync(
 async def delete_device(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Delete a device and its associated ROM/gameplay data."""
     user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord"})
     if not db.delete_device(user["id"], device_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"message": "Device deleted successfully", "device_id": device_id}
@@ -672,7 +892,10 @@ async def delete_device(device_id: str, authorization: Optional[str] = Header(de
 async def list_device_actions(device_id: str, authorization: Optional[str] = Header(default=None)):
     """List actions for a device."""
     user = get_current_user(authorization)
-    actions = db.get_device_actions(user["id"], device_id)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    actions = db.get_device_actions(device["user_id"], device_id)
     if actions is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"actions": actions}
@@ -686,12 +909,16 @@ async def create_device_action(
 ):
     """Queue a remote action for a device."""
     user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
     action_type = str(payload.get("action") or "").strip().lower()
     if action_type == "reboot":
         action_type = "restart"
     if action_type not in SUPPORTED_DEVICE_ACTIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported action")
-    action = db.create_device_action(user["id"], device_id, action_type, payload.get("payload") if isinstance(payload.get("payload"), dict) else {})
+    action = db.create_device_action(device["user_id"], device_id, action_type, payload.get("payload") if isinstance(payload.get("payload"), dict) else {})
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"action": action}
@@ -854,13 +1081,13 @@ async def update_device_roms(
 ):
     """Update ROM list for a device."""
     user = get_current_user(authorization)
-    
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
     
     rom_ids = db.add_roms(device_id, rom_data.system_name, rom_data.roms)
     
@@ -880,9 +1107,8 @@ async def get_device_roms(
 ):
     """Get ROMs for a device."""
     user = get_current_user(authorization)
-    
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
@@ -926,7 +1152,10 @@ async def get_device_master_roms(
     - per_page: number of rows per page
     """
     user = get_current_user(authorization)
-    rows = db.get_master_roms_for_device(user["id"], device_id)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    rows = db.get_master_roms_for_device(device["user_id"], device_id)
     if rows is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
 
@@ -995,11 +1224,15 @@ async def get_swarm_master_roms(
 @app.post("/api/devices/{device_id}/sync-rom")
 async def sync_device_rom(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
     system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
     rom_path = str(payload.get("file_path") or payload.get("rom_name") or "").strip()
     if not system_name or not rom_path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name and rom path are required")
-    action = db.create_device_action(user["id"], device_id, "sync_rom", {
+    action = db.create_device_action(device["user_id"], device_id, "sync_rom", {
         "system_name": system_name,
         "rom_name": payload.get("rom_name") or rom_path,
         "file_path": rom_path,
@@ -1024,15 +1257,19 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
 @app.post("/api/devices/{device_id}/sync-system")
 async def sync_device_system(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
     system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
     if not system_name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name is required")
-    master_rows = db.get_master_roms_for_device(user["id"], device_id) or []
+    master_rows = db.get_master_roms_for_device(device["user_id"], device_id) or []
     missing = [
         row for row in master_rows
         if str(row.get("system_name") or "").lower() == system_name.lower() and not row.get("present_on_selected")
     ]
-    action = db.create_device_action(user["id"], device_id, "sync_system", {"system_name": system_name, "roms": missing})
+    action = db.create_device_action(device["user_id"], device_id, "sync_system", {"system_name": system_name, "roms": missing})
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     db.add_rom_sync_activity(device_id, {
@@ -1058,7 +1295,10 @@ async def add_device_sync_activity(device_id: str, payload: dict, authorization:
 @app.get("/api/devices/{device_id}/sync-activity")
 async def get_device_sync_activity(device_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
-    rows = db.get_rom_sync_activity(user["id"], device_id)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    rows = db.get_rom_sync_activity(device["user_id"], device_id)
     if rows is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"activity": rows}
@@ -1081,8 +1321,8 @@ async def get_device_systems(
 ):
     """Get systems for a selected device."""
     user = get_current_user(authorization)
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found",
@@ -1100,14 +1340,14 @@ async def log_gameplay(
 ):
     """Log a game play session."""
     user = get_current_user(authorization)
-    
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
     
+    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
     gamelog_id = db.log_gameplay(
         device_id,
         gameplay_data.system_name,
@@ -1135,9 +1375,8 @@ async def get_device_gamelogs(
 ):
     """Get game play logs for a device."""
     user = get_current_user(authorization)
-    
-    device = db.get_device_by_device_id(device_id)
-    if not device or device["user_id"] != user["id"]:
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
@@ -1174,2756 +1413,7 @@ async def favicon() -> Response:
 
 def get_ui_html() -> str:
     """Get the HTML for the web UI."""
-    return """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Batocera Overmind</title>
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-        <style>
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }
-            
-            body {
-                font-family: "Nunito", -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-                background: #f8f9fc;
-                min-height: 100vh;
-            }
-            
-            .container {
-                width: 100%;
-                max-width: 100%;
-                min-height: 100vh;
-                background: #f8f9fc;
-            }
-            
-            header {
-                background: #4e73df;
-                color: white;
-                padding: 0;
-            }
-            
-            header h1 {
-                font-size: 1.2rem;
-                margin: 0;
-            }
-            
-            header p {
-                font-size: 1.1em;
-                opacity: 0.9;
-            }
-            
-            main {
-                padding: 1rem;
-            }
-            
-            .nav-tabs {
-                display: flex;
-                gap: 10px;
-                margin-bottom: 12px;
-                border-bottom: none;
-                flex-wrap: wrap;
-            }
-            
-            .nav-tabs button {
-                background: none;
-                border: none;
-                padding: 10px 20px;
-                cursor: pointer;
-                font-size: 1em;
-                color: #666;
-                border-bottom: 3px solid transparent;
-                transition: all 0.3s ease;
-            }
-            
-            .nav-tabs button.active {
-                color: #fff;
-                background: #4e73df;
-                border-bottom-color: transparent;
-            }
-
-            .sub-nav-btn {
-                background: #f8f9fa;
-                color: #1f2937;
-                border: 1px solid #dee2e6;
-                border-radius: 6px;
-                margin-bottom: 8px;
-                width: 100%;
-                text-align: left;
-            }
-
-            .sub-nav-btn.active {
-                background: #1e3a8a;
-                color: #ffffff;
-                border-color: #1e3a8a;
-            }
-
-            .app-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                gap: 16px;
-                margin-bottom: 12px;
-                padding: .75rem 1rem;
-                background: #4e73df;
-                border: 1px solid #4e73df;
-                border-radius: .5rem;
-                box-shadow: 0 .15rem 1rem 0 rgba(58,59,69,.05);
-            }
-
-            .top-nav {
-                display: flex;
-                gap: 8px;
-                flex-wrap: wrap;
-            }
-
-            .top-actions {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-
-            .top-nav .nav-btn {
-                color: #ffffff !important;
-                border-color: rgba(255,255,255,.55) !important;
-                background: transparent !important;
-            }
-
-            .top-nav .nav-btn:hover {
-                color: #ffffff !important;
-                border-color: #ffffff !important;
-                background: rgba(255,255,255,.12) !important;
-            }
-
-            .top-nav .nav-btn.active {
-                color: #4e73df !important;
-                background: #ffffff !important;
-                border-color: #ffffff !important;
-            }
-
-            .profile-chip {
-                background: transparent;
-                border: none;
-                padding: 0;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                width: 42px;
-                height: 42px;
-                border-radius: 9999px;
-                overflow: hidden;
-                cursor: pointer;
-            }
-
-            .avatar-top-right {
-                width: 42px;
-                height: 42px;
-                object-fit: cover;
-                display: none;
-            }
-
-            .avatar-fallback {
-                width: 42px;
-                height: 42px;
-                border-radius: 9999px;
-                background: #e5e7eb;
-                color: #111827;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 20px;
-            }
-            
-            .nav-tabs button:hover {
-                color: #667eea;
-            }
-            
-            .content-section {
-                display: none;
-            }
-            
-            .content-section.active {
-                display: block;
-            }
-            
-            .form-group {
-                margin-bottom: 20px;
-            }
-            
-            label {
-                display: block;
-                margin-bottom: 8px;
-                font-weight: 500;
-                color: #333;
-            }
-            
-            input[type="text"],
-            input[type="email"],
-            input[type="password"],
-            textarea {
-                width: 100%;
-                padding: 10px;
-                border: 1px solid #ddd;
-                border-radius: 5px;
-                font-size: 1em;
-                font-family: inherit;
-            }
-            
-            input[type="text"]:focus,
-            input[type="email"]:focus,
-            input[type="password"]:focus,
-            textarea:focus {
-                outline: none;
-                border-color: #667eea;
-                box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-            }
-            
-            button {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 12px 24px;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                font-size: 1em;
-                font-weight: 500;
-                transition: transform 0.2s ease, box-shadow 0.2s ease;
-            }
-            
-            button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-            }
-            
-            button:active {
-                transform: translateY(0);
-            }
-            
-            .message {
-                padding: 15px;
-                border-radius: 5px;
-                margin-bottom: 20px;
-                display: none;
-            }
-            
-            .message.success {
-                background: #d4edda;
-                color: #155724;
-                border: 1px solid #c3e6cb;
-                display: block;
-            }
-            
-            .message.error {
-                background: #f8d7da;
-                color: #721c24;
-                border: 1px solid #f5c6cb;
-                display: block;
-            }
-            
-            .device-card {
-                background: #f8f9fa;
-                border: 1px solid #dee2e6;
-                border-radius: 8px;
-                padding: 20px;
-                margin-bottom: 15px;
-            }
-            
-            .device-card h3 {
-                color: #667eea;
-                margin-bottom: 10px;
-            }
-            
-            .device-info {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 15px;
-                margin: 15px 0;
-            }
-            
-            .info-item {
-                background: white;
-                padding: 10px;
-                border-radius: 5px;
-                border-left: 3px solid #667eea;
-            }
-            
-            .info-label {
-                font-weight: 600;
-                color: #666;
-                font-size: 0.9em;
-            }
-            
-            .info-value {
-                color: #333;
-                word-break: break-all;
-            }
-            
-            .logout-btn {
-                background: #dc3545;
-                margin-top: 20px;
-            }
-            
-            .logout-btn:hover {
-                box-shadow: 0 5px 15px rgba(220, 53, 69, 0.4);
-            }
-            
-            .form-row {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-                gap: 20px;
-            }
-            
-            .auth-form {
-                max-width: 400px;
-                margin: 0 auto;
-            }
-            
-            .auth-form h2 {
-                margin-bottom: 20px;
-                color: #333;
-            }
-            
-            .toggle-form {
-                text-align: center;
-                margin-top: 20px;
-                color: #666;
-            }
-            
-            .toggle-form button {
-                background: none;
-                color: #667eea;
-                padding: 0;
-                text-decoration: underline;
-            }
-            
-            .toggle-form button:hover {
-                transform: none;
-                box-shadow: none;
-            }
-            
-            .loading {
-                display: inline-block;
-                width: 20px;
-                height: 20px;
-                border: 3px solid rgba(255,255,255,.3);
-                border-radius: 50%;
-                border-top-color: white;
-                animation: spin 1s ease-in-out infinite;
-            }
-            
-            @keyframes spin {
-                to { transform: rotate(360deg); }
-            }
-            
-            .roms-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-                gap: 15px;
-                margin-top: 20px;
-            }
-            
-            .rom-item {
-                background: white;
-                border: 1px solid #dee2e6;
-                border-radius: 5px;
-                padding: 15px;
-            }
-            
-            .rom-item strong {
-                color: #667eea;
-            }
-            
-            .empty-state {
-                text-align: center;
-                padding: 40px;
-                color: #999;
-            }
-            
-            .empty-state svg {
-                width: 64px;
-                height: 64px;
-                margin-bottom: 20px;
-                opacity: 0.5;
-            }
-
-            .tree-view details {
-                background: #fff;
-                border: 1px solid #e3e6f0;
-                border-radius: 6px;
-                padding: 10px 12px;
-                margin-bottom: 10px;
-                box-shadow: 0 .15rem .5rem 0 rgba(58,59,69,.08);
-            }
-
-            .tree-view summary {
-                cursor: pointer;
-                font-weight: 600;
-                color: #4e73df;
-            }
-
-            .tree-view ul {
-                margin: 10px 0 0 20px;
-                padding: 0;
-            }
-
-            .dashboard-layout {
-                display: grid;
-                grid-template-columns: 280px 1fr;
-                gap: 24px;
-                align-items: start;
-            }
-
-            .dashboard-sidebar {
-                position: sticky;
-                top: 10px;
-            }
-
-            .dashboard-content {
-                min-height: 320px;
-                background: #fff;
-                border: 1px solid #e3e6f0;
-                border-radius: .5rem;
-                box-shadow: 0 .15rem 1rem 0 rgba(58,59,69,.05);
-                padding: 1rem;
-            }
-
-            @media (max-width: 900px) {
-                .dashboard-layout {
-                    grid-template-columns: 1fr;
-                }
-            }
-
-            :root {
-                --admin-bg: #101828;
-                --admin-surface: #151f32;
-                --admin-surface-muted: #1f2a44;
-                --admin-border: #31405f;
-                --admin-sidebar: #0b1020;
-                --admin-sidebar-accent: #00c2ff;
-                --admin-accent-hot: #ff3ea5;
-                --admin-accent-coin: #ffbf3f;
-                --admin-accent-green: #34d399;
-                --admin-text: #ecf6ff;
-                --admin-muted: #9fb0c9;
-            }
-
-            body {
-                background:
-                    linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
-                    linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px),
-                    #101828;
-                background-attachment: fixed;
-                background-size: 42px 42px, 42px 42px, cover;
-                color: var(--admin-text);
-                font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            }
-            body::before {
-                content: "";
-                position: fixed;
-                inset: 0;
-                pointer-events: none;
-                z-index: 0;
-                background: repeating-linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.035) 1px, transparent 1px, transparent 4px);
-                opacity: 0.35;
-            }
-
-            .layout-shell {
-                min-height: 100vh;
-                position: relative;
-                z-index: 1;
-            }
-            .layout-shell > .row { flex-direction: column; }
-            .layout-shell aside,
-            .layout-shell main {
-                width: 100%;
-                max-width: 100%;
-                flex: 0 0 auto;
-            }
-
-            .sidebar {
-                background: linear-gradient(90deg, #111936 0%, var(--admin-sidebar) 100%);
-                color: #fff;
-                min-height: auto;
-                border: 1px solid rgba(255, 255, 255, 0.14);
-                box-shadow: 0 0.15rem 1rem rgba(0, 0, 0, 0.14);
-            }
-
-            .brand-block { border-bottom: 1px solid rgba(255, 255, 255, 0.18); }
-
-            .brand-mark {
-                width: 2rem;
-                height: 2rem;
-                border-radius: 50%;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                background: rgba(0, 194, 255, 0.15);
-                border: 1px solid rgba(0, 194, 255, 0.55);
-                box-shadow: 0 0 18px rgba(0, 194, 255, 0.24);
-            }
-
-            .menu-label {
-                font-size: 0.72rem;
-                letter-spacing: 0.07em;
-                text-transform: uppercase;
-                color: rgba(255, 255, 255, 0.64);
-                font-weight: 700;
-            }
-
-            .sidebar .btn {
-                border: 0;
-                text-align: left;
-                color: rgba(255, 255, 255, 0.92) !important;
-                background: transparent !important;
-                padding: 0.62rem 0.8rem;
-                border-radius: 0.45rem;
-                font-weight: 700;
-                font-size: 0.92rem;
-                transform: none !important;
-                box-shadow: none !important;
-            }
-
-            .sidebar .btn:hover,
-            .sidebar .btn:focus,
-            .sidebar .btn.active {
-                background: rgba(255, 255, 255, 0.14) !important;
-                color: #fff !important;
-            }
-
-            .topbar {
-                background: rgba(21, 31, 50, 0.86);
-                border: 1px solid var(--admin-border);
-                border-radius: 0.75rem;
-                box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
-                min-height: 4.1rem;
-                backdrop-filter: blur(10px);
-            }
-
-            .app-shell {
-                background: rgba(21, 31, 50, 0.84);
-                border: 1px solid var(--admin-border);
-                border-radius: 0.75rem;
-                box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
-                backdrop-filter: blur(10px);
-            }
-
-            .app-container {
-                width: 100%;
-                max-width: 100%;
-                min-height: auto;
-                background: transparent;
-            }
-
-            .app-main { padding: 0; }
-            header, .app-header { display: none !important; }
-            .dashboard-content {
-                min-height: 320px;
-                background: transparent;
-                border: 0;
-                border-radius: 0;
-                box-shadow: none;
-                padding: 0;
-            }
-
-            .content-section.active { display: block; }
-            .requires-auth { display: none; }
-            body.is-authenticated .requires-auth { display: flex; }
-            body.is-authenticated .sidebar .requires-auth { display: inline-flex; }
-            .sidebar .requires-auth { display: none; }
-            .device-view-btn.active {
-                color: #fff !important;
-                background: var(--admin-sidebar-accent) !important;
-                border-color: var(--admin-sidebar-accent) !important;
-            }
-            .profile-nav-btn {
-                align-items: center;
-                justify-content: flex-start;
-            }
-            .profile-nav-btn .profile-chip {
-                flex: 0 0 auto;
-                border-color: rgba(255,255,255,.35);
-            }
-            .device-grid {
-                display: grid;
-                grid-template-columns: repeat(3, minmax(0, 1fr));
-                gap: 1rem;
-                margin-bottom: 1rem;
-            }
-            .device-tile {
-                height: 100%;
-                cursor: pointer;
-                padding: 0;
-                color: var(--admin-text);
-                background: rgba(21, 31, 50, 0.9) !important;
-                border: 1px solid var(--admin-border) !important;
-                border-radius: 0.5rem;
-                transition: border-color 0.15s ease, box-shadow 0.15s ease;
-            }
-            .device-tile:hover,
-            .device-tile.active {
-                border-color: var(--admin-sidebar-accent) !important;
-                box-shadow: 0 0.2rem 1rem rgba(0, 194, 255, 0.18) !important;
-                transform: none !important;
-            }
-            .device-tile.active {
-                background: rgba(0, 194, 255, 0.12) !important;
-            }
-            .device-detail-view {
-                margin-bottom: 0;
-            }
-
-            label { color: var(--admin-text); }
-            .text-muted { color: var(--admin-muted) !important; }
-            .card-title, .fw-semibold, h1, h2, h3, h4, h5 { color: var(--admin-text); }
-            .card, .device-card, .info-item, .tree-view details, input[type="text"], input[type="email"], input[type="password"], textarea {
-                background: rgba(21, 31, 50, 0.9);
-                border-color: var(--admin-border);
-                color: var(--admin-text);
-            }
-            input[type="text"]:focus,
-            input[type="email"]:focus,
-            input[type="password"]:focus,
-            textarea:focus {
-                background: rgba(21, 31, 50, 0.98);
-                color: var(--admin-text);
-                border-color: var(--admin-sidebar-accent);
-                box-shadow: 0 0 0 0.18rem rgba(0, 194, 255, 0.18);
-            }
-            input::placeholder { color: #73849e; }
-
-            .btn {
-                transform: none !important;
-                box-shadow: none !important;
-            }
-            .btn:hover {
-                transform: none !important;
-                box-shadow: none !important;
-            }
-            .btn-primary,
-            button.btn-primary {
-                background: var(--admin-sidebar-accent) !important;
-                border-color: var(--admin-sidebar-accent) !important;
-                color: #06111f !important;
-                font-weight: 800;
-            }
-            .btn-primary:hover,
-            button.btn-primary:hover {
-                background: var(--admin-accent-hot) !important;
-                border-color: var(--admin-accent-hot) !important;
-                color: #fff !important;
-            }
-            .btn-outline-secondary, .btn-outline-primary {
-                color: #c8d7ee;
-                border-color: var(--admin-border);
-                background: rgba(21, 31, 50, 0.9) !important;
-            }
-            .btn-outline-secondary:hover, .btn-outline-primary:hover {
-                background: rgba(0, 194, 255, 0.12) !important;
-                border-color: var(--admin-sidebar-accent) !important;
-                color: #fff !important;
-            }
-            .btn-outline-danger {
-                color: #b42318 !important;
-                border-color: #f1b7b2 !important;
-                background: rgba(21, 31, 50, 0.9) !important;
-            }
-            .btn-outline-danger:hover {
-                color: #fff !important;
-                background: #b42318 !important;
-                border-color: #b42318 !important;
-            }
-            button:not(.btn):not(.profile-chip) {
-                background: var(--admin-sidebar-accent);
-                color: #fff;
-            }
-
-            .auth-form {
-                max-width: 440px;
-                margin: 1rem auto;
-            }
-            .auth-form h2 {
-                color: var(--admin-text);
-                font-weight: 800;
-            }
-            .toggle-form button {
-                background: transparent !important;
-                color: var(--admin-sidebar-accent) !important;
-            }
-            .message.success, .message.error {
-                display: block;
-            }
-            .device-card {
-                border: 1px solid var(--admin-border);
-                border-radius: 0.5rem;
-            }
-            .rom-item {
-                background: rgba(31, 42, 68, 0.72);
-                border-color: var(--admin-border);
-                color: var(--admin-text);
-            }
-            .device-card h3, .tree-view summary, .rom-item strong {
-                color: var(--admin-sidebar-accent);
-            }
-            .table {
-                color: var(--admin-text);
-                --bs-table-color: var(--admin-text);
-                --bs-table-bg: transparent;
-                --bs-table-border-color: var(--admin-border);
-                --bs-table-striped-bg: rgba(255, 255, 255, 0.03);
-                --bs-table-hover-bg: rgba(0, 194, 255, 0.08);
-            }
-            .table thead th {
-                color: var(--admin-muted);
-                border-color: var(--admin-border);
-                font-size: 0.78rem;
-                text-transform: uppercase;
-            }
-            .table td {
-                border-color: var(--admin-border);
-            }
-            .tree-view details {
-                margin-bottom: 0.75rem;
-            }
-            .tree-view li {
-                border-color: rgba(255,255,255,0.08) !important;
-                color: var(--admin-text);
-            }
-            .rom-browser-toolbar {
-                background: rgba(31, 42, 68, 0.72);
-                border: 1px solid var(--admin-border);
-                border-radius: 0.5rem;
-                padding: 0.9rem;
-            }
-            .profile-chip {
-                background: transparent !important;
-                width: 2.25rem;
-                height: 2.25rem;
-                padding: 0;
-                border: 1px solid var(--admin-border);
-                border-radius: 50%;
-                color: var(--admin-muted);
-                transform: none !important;
-                box-shadow: none !important;
-            }
-            .profile-chip:hover {
-                transform: none !important;
-                box-shadow: none !important;
-            }
-            .avatar-top-right, .avatar-fallback {
-                width: 2.25rem;
-                height: 2.25rem;
-            }
-            .avatar-fallback {
-                background: transparent;
-                color: var(--admin-muted);
-                font-size: 1rem;
-            }
-            .empty-state {
-                background: rgba(31, 42, 68, 0.86);
-                border: 1px dashed var(--admin-border);
-                border-radius: 0.5rem;
-                color: var(--admin-muted);
-            }
-            footer {
-                background: transparent;
-                border-color: var(--admin-border);
-            }
-            .connection-panel {
-                background: rgba(0, 194, 255, 0.1);
-                border: 1px solid rgba(0, 194, 255, 0.36);
-                border-radius: 0.5rem;
-                padding: 1rem;
-                margin-bottom: 1rem;
-            }
-            .oauth-grid {
-                display: grid;
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: 0.6rem;
-                margin: 1rem 0;
-            }
-            .oauth-grid .btn:disabled {
-                opacity: 0.42;
-                cursor: not-allowed;
-            }
-
-            @media (max-width: 991.98px) {
-                .sidebar { min-height: auto; }
-                .sidebar .btn { width: 100%; }
-                .device-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-            }
-            @media (max-width: 575.98px) {
-                .device-grid { grid-template-columns: 1fr; }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container-fluid layout-shell py-3 py-lg-4">
-            <div class="row g-3">
-                <aside class="col-12 col-lg-3 col-xl-2">
-                    <div class="sidebar rounded-3 h-100 p-3 d-flex flex-column flex-lg-row align-items-lg-center gap-3">
-                        <div class="brand-block pb-3 mb-3 pb-lg-0 mb-lg-0 pe-lg-3">
-                            <div class="d-flex align-items-center gap-2 mb-1">
-                                <span class="brand-mark"><i class="bi bi-controller"></i></span>
-                                <div class="h5 mb-0 text-white">Batocera Overmind</div>
-                            </div>
-                            <div class="small text-white-50">Overlord command console</div>
-                        </div>
-                        <div class="menu-label mb-2 d-lg-none">Navigation</div>
-                        <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
-                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>Drones</a>
-                            <a href="#/help" role="button" class="btn nav-btn requires-auth" data-tab="help" onclick="event.preventDefault(); switchTab('help', this)"><i class="bi bi-question-circle me-2"></i>Help</a>
-                            <a href="#/notifications" role="button" class="btn nav-btn requires-auth" data-tab="notifications" onclick="event.preventDefault(); switchTab('notifications', this)"><i class="bi bi-bell me-2"></i>Notifications</a>
-                            <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-github me-2"></i>GitHub</a>
-                            <a href="/docs" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-braces me-2"></i>API Docs</a>
-                            <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i>Overlord</a>
-                            <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
-                        </div>
-                    </div>
-                </aside>
-                <main id="app" class="col-12 col-lg-9 col-xl-10 app-main">
-                    <div class="app-shell p-3 p-md-4">
-                <!-- Auth Section -->
-                <div id="auth-section" class="content-section active">
-                    <div class="auth-form">
-                        <div id="auth-message" class="message"></div>
-                        
-                        <!-- Login Form -->
-                        <div id="login-form">
-                            <h2>Overlord Login</h2>
-                            <div class="oauth-grid">
-                                <button id="google-login-btn" class="btn btn-outline-primary" type="button" onclick="startOAuth('google')" disabled><i class="bi bi-google me-1"></i>Google</button>
-                                <button id="github-login-btn" class="btn btn-outline-primary" type="button" onclick="startOAuth('github')" disabled><i class="bi bi-github me-1"></i>GitHub</button>
-                            </div>
-                            <form onsubmit="handleLogin(event)">
-                                <div class="form-group">
-                                    <label>Email</label>
-                                    <input type="email" id="login-email" required>
-                                </div>
-                                <div class="form-group">
-                                    <label>Password</label>
-                                    <input type="password" id="login-password" required>
-                                </div>
-                                <button class="btn btn-primary" type="submit">Log In</button>
-                            </form>
-                            <div class="toggle-form">
-                                Don't have an account?
-                                <button onclick="toggleAuthForm()">Sign up</button>
-                            </div>
-                        </div>
-                        
-                        <!-- Register Form -->
-                        <div id="register-form" style="display: none;">
-                            <h2>Overlord Sign Up</h2>
-                            <div class="oauth-grid">
-                                <button id="google-register-btn" class="btn btn-outline-primary" type="button" onclick="startOAuth('google')" disabled><i class="bi bi-google me-1"></i>Google</button>
-                                <button id="github-register-btn" class="btn btn-outline-primary" type="button" onclick="startOAuth('github')" disabled><i class="bi bi-github me-1"></i>GitHub</button>
-                            </div>
-                            <form onsubmit="handleRegister(event)">
-                                <div class="form-group">
-                                    <label>Email</label>
-                                    <input type="email" id="register-email" required>
-                                </div>
-                                <div class="form-group">
-                                    <label>Overlord Name (optional)</label>
-                                    <input type="text" id="register-name">
-                                </div>
-                                <div class="form-group">
-                                    <label>Password (min. 8 characters)</label>
-                                    <input type="password" id="register-password" minlength="8" required>
-                                </div>
-                                <button class="btn btn-primary" type="submit">Sign Up</button>
-                            </form>
-                            <div class="toggle-form">
-                                Already have an account?
-                                <button onclick="toggleAuthForm()">Log in</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Dashboard Section -->
-                <div id="dashboard-section" class="content-section" style="display: none;">
-                    <div id="selected-device-summary" class="mb-3 text-muted"></div>
-                    <section class="dashboard-content">
-                        <div id="devices-tab" class="content-section dashboard-tab active">
-                            <div id="device-list-view">
-                                <div id="pending-connections"></div>
-                                <div id="integration-token-panel" class="card mb-3">
-                                    <div class="card-body py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
-                                        <div>
-                                            <strong>Drone Authorization Token</strong>
-                                            <div class="small text-muted">Generate a token, paste it into Drone admin, then approve the Psionic connection.</div>
-                                        </div>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="generateIntegrationToken()"><i class="bi bi-key me-1"></i>Generate Token</button>
-                                    </div>
-                                </div>
-                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-                                    <h3 class="mb-0">Drone Swarm</h3>
-                                    <div class="btn-group" role="group" aria-label="Swarm views">
-                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmHome()"><i class="bi bi-hdd-network me-1"></i>Drones</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmSyncActivity()"><i class="bi bi-clock-history me-1"></i>Sync Activity</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmMasterList()"><i class="bi bi-list-stars me-1"></i>Master List</button>
-                                    </div>
-                                </div>
-                                <div id="swarm-global-panel" class="mb-3" style="display:none;"></div>
-                                <div id="devices-list"></div>
-                            </div>
-                            <div id="selected-device-workspace" class="device-card device-detail-view" style="display: none;">
-                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-                                    <div>
-                                        <h4 id="selected-device-title" class="h5 mb-1">Selected Drone</h4>
-                                        <div id="selected-device-id" class="small text-muted"></div>
-                                    </div>
-                                    <div class="d-flex flex-wrap align-items-center gap-2">
-                                        <button class="btn btn-outline-secondary btn-sm" onclick="renameDevicePrompt(selectedDeviceId)">
-                                            <i class="bi bi-pencil me-1"></i>Rename
-                                        </button>
-                                        <button class="btn btn-outline-danger btn-sm" onclick="deleteSelectedDevice()">
-                                            <i class="bi bi-plug-x me-1"></i>Disconnect
-                                        </button>
-                                        <div class="btn-group" role="group" aria-label="Drone views">
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn active" data-device-view="systems" onclick="switchDeviceView('systems', this)">
-                                                <i class="bi bi-grid me-1"></i>Systems
-                                            </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="metadata" onclick="switchDeviceView('metadata', this)">
-                                                <i class="bi bi-info-circle me-1"></i>Metadata
-                                            </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="gamelogs" onclick="switchDeviceView('gamelogs', this)">
-                                                <i class="bi bi-clock-history me-1"></i>Logs
-                                            </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="configs" onclick="switchDeviceView('configs', this)">
-                                                <i class="bi bi-file-earmark-code me-1"></i>Configs
-                                            </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="actions" onclick="switchDeviceView('actions', this)">
-                                                <i class="bi bi-lightning-charge me-1"></i>Actions
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div id="device-systems-panel" class="device-subpanel">
-                                    <div id="drone-auto-sync-panel" class="mb-3"></div>
-                                    <div id="drone-sync-activity-panel" class="mb-3"></div>
-                                    <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
-                                        <div style="flex:1;min-width:220px">
-                                            <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
-                                            <input id="device-rom-search" class="form-control" type="search" placeholder="Type to filter systems and ROMs" oninput="handleDeviceRomSearch(event)">
-                                        </div>
-                                        <div style="min-width:180px">
-                                            <label class="form-label" for="device-rom-system-filter">System</label>
-                                            <select id="device-rom-system-filter" class="form-select" onchange="handleDeviceRomFilterChange()">
-                                                <option value="">All systems</option>
-                                            </select>
-                                        </div>
-                                        <div style="min-width:160px">
-                                            <label class="form-label" for="device-rom-status-filter">Status</label>
-                                            <select id="device-rom-status-filter" class="form-select" onchange="handleDeviceRomFilterChange()">
-                                                <option value="">All</option>
-                                                <option value="missing">Missing</option>
-                                                <option value="present">Present</option>
-                                            </select>
-                                        </div>
-                                    </div>
-                                    <div id="swarm-rom-availability-panel" class="mb-3"></div>
-                                    <div id="systems-list"></div>
-                                </div>
-                                <div id="device-metadata-panel" class="device-subpanel" style="display:none;"></div>
-                                <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">
-                                    <div id="gamelogs-list"></div>
-                                </div>
-                                <div id="device-configs-panel" class="device-subpanel" style="display:none;">
-                                    <div id="configs-list"></div>
-                                </div>
-                                <div id="device-actions-panel" class="device-subpanel" style="display:none;">
-                                    <div class="d-flex flex-wrap gap-2 mb-3">
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Game Logs</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')"><i class="bi bi-file-earmark-code me-1"></i>Emulator Configs</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_log_sources')"><i class="bi bi-journal-text me-1"></i>Log Sources</button>
-                                        <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Restart</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('update')"><i class="bi bi-download me-1"></i>Update</button>
-                                        <button class="btn btn-outline-secondary btn-sm" onclick="loadDeviceActions()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-                                    </div>
-                                    <div id="actions-list"></div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="profile-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>Overlord Profile</h3>
-                            <div class="device-card">
-                                <div class="form-group">
-                                    <label>Avatar</label>
-                                    <input type="file" id="profile-avatar-input" accept="image/*" onchange="handleAvatarSelected(event)">
-                                </div>
-                                <div class="form-group">
-                                    <label>Overlord Name</label>
-                                    <input type="text" id="profile-name-input" placeholder="Your Overlord name">
-                                </div>
-                                <button class="btn btn-primary" onclick="saveProfile()">Save Profile</button>
-                            </div>
-                        </div>
-
-                        <div id="help-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>IPv4 Port Forwarding Help</h3>
-                            <div class="device-card">
-                                <p>Port forwarding is only needed for fleet management features that require one Drone to reach another Drone directly, such as syncing ROMs or settings across devices.</p>
-                                <div class="row g-3">
-                                    <div class="col-md-6"><strong>Router login IP</strong><div id="help-router-ip" class="text-muted">Usually your gateway IP, such as 192.168.1.1</div></div>
-                                    <div class="col-md-6"><strong>Internal Drone IP</strong><div id="help-internal-ip" class="text-muted">Open a Drone page after it reports alive.</div></div>
-                                    <div class="col-md-6"><strong>Internal port</strong><div class="text-muted">8443</div></div>
-                                    <div class="col-md-6"><strong>External port</strong><div class="text-muted">8443</div></div>
-                                    <div class="col-md-6"><strong>Protocol</strong><div class="text-muted">TCP</div></div>
-                                    <div class="col-md-6"><strong>Test URL</strong><div id="help-test-url" class="text-muted">https://&lt;public_ip&gt;:8443/health</div></div>
-                                </div>
-                                <hr>
-                                <p>Log in to your router, look for settings named Port Forwarding, NAT, Virtual Server, or Applications. Add a TCP rule from external port 8443 to internal port 8443 on the Drone internal IP.</p>
-                            </div>
-                        </div>
-
-                        <div id="notifications-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>Notification Settings</h3>
-                            <div class="device-card">
-                                <label style="display:flex; gap:10px; align-items:center;">
-                                    <input type="checkbox" id="notify-slack" onchange="toggleNotificationInputs()"> Notify Slack
-                                </label>
-                                <div class="form-group">
-                                    <label>Slack Webhook</label>
-                                    <input type="text" id="notify-slack-webhook" placeholder="https://hooks.slack.com/...">
-                                </div>
-
-                                <label style="display:flex; gap:10px; align-items:center;">
-                                    <input type="checkbox" id="notify-discord" onchange="toggleNotificationInputs()"> Notify Discord
-                                </label>
-                                <div class="form-group">
-                                    <label>Discord Webhook</label>
-                                    <input type="text" id="notify-discord-webhook" placeholder="https://discord.com/api/webhooks/...">
-                                </div>
-
-                                <label style="display:flex; gap:10px; align-items:center;">
-                                    <input type="checkbox" id="notify-email" onchange="toggleNotificationInputs()"> Notify Email
-                                </label>
-                                <div class="form-group">
-                                    <label>Email Address</label>
-                                    <input type="email" id="notify-email-address" placeholder="name@example.com" disabled readonly>
-                                    <div class="small text-muted mt-1">Uses the logged-in account email.</div>
-                                </div>
-
-                                <div class="form-group">
-                                    <label>Notify on</label>
-                                    <label style="display:flex; gap:10px; align-items:center;">
-                                        <input type="checkbox" id="notify-type-gamelist-update"> Gamelist update
-                                    </label>
-                                    <label style="display:flex; gap:10px; align-items:center;">
-                                        <input type="checkbox" id="notify-type-device-offline"> Drone offline
-                                    </label>
-                                    <label style="display:flex; gap:10px; align-items:center;">
-                                        <input type="checkbox" id="notify-type-sync-failure"> Sync failure
-                                    </label>
-                                </div>
-
-                                <button class="btn btn-primary" onclick="saveNotificationSettings()">Save Notification Settings</button>
-                            </div>
-                        </div>
-                    </section>
-                </div>
-                        <footer class="mt-4 pt-3 border-top text-muted small">
-                            Batocera Overmind centralized command console
-                        </footer>
-                    </div>
-                </main>
-            </div>
-        </div>
-        
-        <script>
-            let currentUser = null;
-            let currentProfile = null;
-            let currentDevices = [];
-            let pendingConnections = [];
-            let selectedDeviceId = null;
-            let currentTab = 'devices';
-            let currentDeviceView = 'systems';
-            let currentDeviceSystems = {};
-            let deviceRomSearchQuery = '';
-            let masterRomPage = 1;
-            let systemPageState = {};
-            let pendingConnectionTimer = null;
-            let actionRefreshTimer = null;
-            let devicesRefreshTimer = null;
-            const MASTER_ROM_PAGE_SIZE = 100;
-            const ROMS_PER_PAGE = 20;
-            const pageMeta = {
-                auth: ['Overlord Login', 'Access the Overmind'],
-                devices: ['Drones', 'Systems and ROMs'],
-                profile: ['Overlord', 'Account settings'],
-                help: ['Help', 'Port forwarding guide'],
-                notifications: ['Notifications', 'Delivery preferences'],
-            };
-
-            document.addEventListener('DOMContentLoaded', () => {
-                loadAuthProviders();
-                handleOAuthReturn();
-                const token = localStorage.getItem('auth_token');
-                if (token) {
-                    authToken = token;
-                    showDashboard();
-                    loadProfile();
-                    loadDevices();
-                    loadPendingConnections();
-                } else {
-                    setPageChrome('auth');
-                }
-            });
-
-            window.addEventListener('hashchange', () => {
-                if (!authToken) return;
-                applyRouteFromHash();
-            });
-
-            let authToken = localStorage.getItem('auth_token') || null;
-
-            async function apiGet(path) {
-                const response = await fetch(path, {
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                if (response.status === 401) {
-                    logout();
-                    showMessage('Session expired. Please log in again.', 'error');
-                    throw new Error('Unauthorized');
-                }
-                return response;
-            }
-
-            async function apiPatch(path, payload) {
-                const response = await fetch(path, {
-                    method: 'PATCH',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${authToken}`
-                    },
-                    body: JSON.stringify(payload)
-                });
-                if (response.status === 401) {
-                    logout();
-                    showMessage('Session expired. Please log in again.', 'error');
-                    throw new Error('Unauthorized');
-                }
-                return response;
-            }
-
-            async function apiDelete(path) {
-                const response = await fetch(path, {
-                    method: 'DELETE',
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                if (response.status === 401) {
-                    logout();
-                    showMessage('Session expired. Please log in again.', 'error');
-                    throw new Error('Unauthorized');
-                }
-                return response;
-            }
-
-            async function loadAuthProviders() {
-                try {
-                    const response = await fetch('/api/auth/providers');
-                    const data = await response.json();
-                    const providers = data.providers || {};
-                    ['google', 'github'].forEach(provider => {
-                        ['login', 'register'].forEach(form => {
-                            const btn = document.getElementById(`${provider}-${form}-btn`);
-                            if (!btn) return;
-                            btn.disabled = !providers[provider];
-                            btn.title = providers[provider]
-                                ? `Continue with ${provider}`
-                                : `Set ${provider.toUpperCase()}_CLIENT_ID and ${provider.toUpperCase()}_CLIENT_SECRET to enable`;
-                        });
-                    });
-                } catch (error) {
-                    console.error('Error loading auth providers:', error);
-                }
-            }
-
-            function startOAuth(provider) {
-                window.location.href = `/api/auth/${provider}/start`;
-            }
-
-            function handleOAuthReturn() {
-                const hash = window.location.hash || '';
-                if (!hash.startsWith('#oauth_token=')) return;
-                const params = new URLSearchParams(hash.slice(1));
-                const token = params.get('oauth_token');
-                if (!token) return;
-                authToken = token;
-                localStorage.setItem('auth_token', authToken);
-                window.location.hash = '#/devices';
-                showMessage('Overlord authenticated.', 'success');
-            }
-
-            async function handleLogin(e) {
-                e.preventDefault();
-                const email = document.getElementById('login-email').value;
-                const password = document.getElementById('login-password').value;
-                const btn = e.target.querySelector('button');
-                btn.disabled = true;
-                try {
-                    const response = await fetch('/api/auth/login', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email, password })
-                    });
-                    if (!response.ok) throw new Error('Login failed');
-                    const data = await response.json();
-                    authToken = data.access_token;
-                    currentUser = data.user;
-                    localStorage.setItem('auth_token', authToken);
-                    showDashboard();
-                    await loadProfile();
-                    await loadDevices();
-                    await loadPendingConnections();
-                    showMessage('Overlord authenticated.', 'success');
-                } catch (error) {
-                    showMessage('Login failed: ' + error.message, 'error');
-                } finally {
-                    btn.disabled = false;
-                }
-            }
-
-            async function handleRegister(e) {
-                e.preventDefault();
-                const email = document.getElementById('register-email').value;
-                const full_name = document.getElementById('register-name').value || null;
-                const password = document.getElementById('register-password').value;
-                const btn = e.target.querySelector('button');
-                btn.disabled = true;
-                try {
-                    const response = await fetch('/api/auth/register', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email, password, full_name })
-                    });
-                    if (!response.ok) {
-                        const error = await response.json();
-                        throw new Error(error.detail || 'Registration failed');
-                    }
-                    showMessage('Overlord created. Please log in.', 'success');
-                    setTimeout(() => toggleAuthForm(), 500);
-                } catch (error) {
-                    showMessage('Registration failed: ' + error.message, 'error');
-                } finally {
-                    btn.disabled = false;
-                }
-            }
-
-            function logout() {
-                authToken = null;
-                currentUser = null;
-                currentProfile = null;
-                pendingConnections = [];
-                selectedDeviceId = null;
-                currentDeviceView = 'systems';
-                if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
-                if (actionRefreshTimer) clearInterval(actionRefreshTimer);
-                if (devicesRefreshTimer) clearInterval(devicesRefreshTimer);
-                pendingConnectionTimer = null;
-                actionRefreshTimer = null;
-                devicesRefreshTimer = null;
-                localStorage.removeItem('auth_token');
-                document.body.classList.remove('is-authenticated');
-                document.getElementById('auth-section').classList.add('active');
-                document.getElementById('dashboard-section').classList.remove('active');
-                document.getElementById('auth-section').style.display = 'block';
-                document.getElementById('dashboard-section').style.display = 'none';
-                document.getElementById('login-form').style.display = 'block';
-                document.getElementById('register-form').style.display = 'none';
-                setPageChrome('auth');
-                window.location.hash = '#/devices';
-            }
-
-            function showDashboard() {
-                document.body.classList.add('is-authenticated');
-                document.getElementById('auth-section').classList.remove('active');
-                document.getElementById('dashboard-section').classList.add('active');
-                document.getElementById('auth-section').style.display = 'none';
-                document.getElementById('dashboard-section').style.display = 'block';
-                setPageChrome(currentTab);
-                startPendingConnectionPolling();
-            }
-
-            function startPendingConnectionPolling() {
-                if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
-                pendingConnectionTimer = setInterval(loadPendingConnections, 10000);
-            }
-
-            function startDevicesPolling() {
-                if (devicesRefreshTimer) return;
-                devicesRefreshTimer = setInterval(() => {
-                    // only poll when on devices tab
-                    if (currentTab === 'devices' && document.getElementById('devices-tab')?.style.display !== 'none') {
-                        loadDevices();
-                    }
-                }, 30000);
-            }
-
-            function stopDevicesPolling() {
-                if (devicesRefreshTimer) clearInterval(devicesRefreshTimer);
-                devicesRefreshTimer = null;
-            }
-
-            function toggleAuthForm() {
-                document.getElementById('login-form').style.display =
-                    document.getElementById('login-form').style.display === 'none' ? 'block' : 'none';
-                document.getElementById('register-form').style.display =
-                    document.getElementById('register-form').style.display === 'none' ? 'block' : 'none';
-            }
-
-            async function loadProfile() {
-                try {
-                    const response = await apiGet('/api/profile');
-                    if (!response.ok) throw new Error('Failed to load profile');
-                    currentProfile = await response.json();
-                    renderProfileUI();
-                } catch (error) {
-                    console.error('Error loading profile:', error);
-                }
-            }
-
-            function renderProfileUI() {
-                if (!currentProfile) return;
-                document.getElementById('profile-name-input').value = currentProfile.full_name || '';
-
-                const ns = currentProfile.notification_settings || {};
-                document.getElementById('notify-slack').checked = !!ns.notify_slack;
-                document.getElementById('notify-discord').checked = !!ns.notify_discord;
-                document.getElementById('notify-email').checked = !!ns.notify_email;
-                document.getElementById('notify-slack-webhook').value = ns.slack_webhook || '';
-                document.getElementById('notify-discord-webhook').value = ns.discord_webhook || '';
-                document.getElementById('notify-email-address').value = currentProfile.email || '';
-                const types = ns.types || {};
-                document.getElementById('notify-type-gamelist-update').checked = !!types.gamelist_update;
-                document.getElementById('notify-type-device-offline').checked = !!types.device_offline;
-                document.getElementById('notify-type-sync-failure').checked = !!types.sync_failure;
-                toggleNotificationInputs();
-            }
-
-            function toggleNotificationInputs() {
-                const slackEnabled = document.getElementById('notify-slack').checked;
-                const discordEnabled = document.getElementById('notify-discord').checked;
-                const emailEnabled = document.getElementById('notify-email').checked;
-                document.getElementById('notify-slack-webhook').disabled = !slackEnabled;
-                document.getElementById('notify-discord-webhook').disabled = !discordEnabled;
-                document.getElementById('notify-email-address').disabled = true;
-            }
-
-            async function handleAvatarSelected(event) {
-                const file = event.target.files && event.target.files[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = async () => {
-                    await saveProfile(reader.result);
-                };
-                reader.readAsDataURL(file);
-            }
-
-            async function saveProfile(avatarDataUrlOverride = null) {
-                try {
-                    const payload = {
-                        full_name: document.getElementById('profile-name-input').value.trim() || null,
-                    };
-                    if (avatarDataUrlOverride !== null) payload.avatar_data_url = avatarDataUrlOverride;
-                    const response = await apiPatch('/api/profile', payload);
-                    if (!response.ok) throw new Error('Failed to save profile');
-                    currentProfile = await response.json();
-                    renderProfileUI();
-                    showMessage('Profile updated.', 'success');
-                } catch (error) {
-                    console.error('Error saving profile:', error);
-                }
-            }
-
-            async function saveNotificationSettings() {
-                try {
-                    const response = await apiPatch('/api/profile', {
-                        notification_settings: {
-                            notify_slack: document.getElementById('notify-slack').checked,
-                            notify_discord: document.getElementById('notify-discord').checked,
-                            notify_email: document.getElementById('notify-email').checked,
-                            slack_webhook: document.getElementById('notify-slack-webhook').value.trim(),
-                            discord_webhook: document.getElementById('notify-discord-webhook').value.trim(),
-                            email_address: currentProfile.email || '',
-                            types: {
-                                gamelist_update: document.getElementById('notify-type-gamelist-update').checked,
-                                device_offline: document.getElementById('notify-type-device-offline').checked,
-                                sync_failure: document.getElementById('notify-type-sync-failure').checked
-                            }
-                        }
-                    });
-                    if (!response.ok) throw new Error('Failed to save notification settings');
-                    currentProfile = await response.json();
-                    renderProfileUI();
-                    showMessage('Notification settings saved.', 'success');
-                } catch (error) {
-                    console.error('Error saving notification settings:', error);
-                }
-            }
-
-            async function loadDevices() {
-                try {
-                    const response = await apiGet('/api/devices');
-                    if (!response.ok) throw new Error('Failed to load devices');
-                    const data = await response.json();
-                    currentDevices = data.devices;
-                    if (selectedDeviceId && !currentDevices.some(d => d.device_id === selectedDeviceId)) selectedDeviceId = null;
-                    displayDevices();
-                    updateSelectedDeviceSummary();
-                    updateSelectedDeviceWorkspace();
-                    applyRouteFromHash();
-                } catch (error) {
-                    console.error('Error loading devices:', error);
-                }
-            }
-
-            async function loadPendingConnections() {
-                if (!authToken) return;
-                try {
-                    const response = await apiGet('/api/drone-connections');
-                    if (!response.ok) throw new Error('Failed to load drone connections');
-                    const data = await response.json();
-                    pendingConnections = data.connections || [];
-                    displayPendingConnections();
-                } catch (error) {
-                    console.error('Error loading drone connections:', error);
-                }
-            }
-
-            function displayPendingConnections() {
-                const container = document.getElementById('pending-connections');
-                if (!container) return;
-                if (!pendingConnections.length) {
-                    container.innerHTML = '';
-                    return;
-                }
-                container.innerHTML = `
-                    <div class="connection-panel">
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-                            <div>
-                                <div class="fw-bold"><i class="bi bi-broadcast-pin me-1"></i>Psionic connection detected</div>
-                                <div class="small text-muted">A Drone is requesting control from the Overmind.</div>
-                            </div>
-                            <button class="btn btn-outline-secondary btn-sm" onclick="loadPendingConnections()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-                        </div>
-                        ${pendingConnections.map(conn => `
-                            <div class="card mb-2">
-                                <div class="card-body py-2">
-                                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-                                        <div>
-                                            <strong>${conn.device_name}</strong>
-                                            <div class="small text-muted">Drone ID: <code>${conn.device_id}</code></div>
-                                            <div class="small text-muted">Reachable URL: ${escapeHtml((conn.batocera_info || {}).reachable_url || 'n/a')}</div>
-                                            <div class="small text-muted">IP: ${escapeHtml((conn.batocera_info || {}).ip_address || 'n/a')}</div>
-                                            <div class="small text-muted">Detected: ${conn.detected_at ? new Date(conn.detected_at).toLocaleString() : 'now'}</div>
-                                            <div class="small text-muted">Last heartbeat: ${conn.last_seen ? new Date(conn.last_seen).toLocaleString() : 'n/a'}</div>
-                                        </div>
-                                        <div class="d-flex gap-2">
-                                            <button class="btn btn-primary btn-sm" onclick="acceptDroneConnection('${conn.device_id}')"><i class="bi bi-check2-circle me-1"></i>Accept</button>
-                                            <button class="btn btn-outline-danger btn-sm" onclick="denyDroneConnection('${conn.device_id}')"><i class="bi bi-x-circle me-1"></i>Deny</button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        `).join('')}
-                    </div>
-                `;
-            }
-
-            async function acceptDroneConnection(deviceId) {
-                try {
-                    const response = await fetch(`/api/drone-connections/${deviceId}/accept`, {
-                        method: 'POST',
-                        headers: { 'Authorization': `Bearer ${authToken}` }
-                    });
-                    if (!response.ok) throw new Error('Failed to accept Drone connection');
-                    await loadPendingConnections();
-                    await loadDevices();
-                    showMessage('Drone registered to the Overlord.', 'success');
-                } catch (error) {
-                    console.error('Error accepting Drone connection:', error);
-                }
-            }
-
-            async function denyDroneConnection(deviceId) {
-                if (!window.confirm('Deny this psionic connection?')) return;
-                try {
-                    const response = await fetch(`/api/drone-connections/${deviceId}/deny`, {
-                        method: 'POST',
-                        headers: { 'Authorization': `Bearer ${authToken}` }
-                    });
-                    if (!response.ok) throw new Error('Failed to deny Drone connection');
-                    await loadPendingConnections();
-                    showMessage('Drone connection denied.', 'success');
-                } catch (error) {
-                    console.error('Error denying Drone connection:', error);
-                }
-            }
-
-            async function generateIntegrationToken() {
-                try {
-                    const response = await fetch('/api/integration-tokens', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${authToken}`
-                        },
-                        body: JSON.stringify({ label: 'Local Drone onboarding' })
-                    });
-                    if (!response.ok) throw new Error('Failed to generate authorization token');
-                    const data = await response.json();
-                    showTokenModal(data.token.authorization_token);
-                } catch (error) {
-                    console.error('Error generating integration token:', error);
-                }
-            }
-
-            function updateSelectedDeviceSummary() {
-                const summary = document.getElementById('selected-device-summary');
-                if (!summary) return;
-                summary.style.display = selectedDeviceId ? 'none' : 'block';
-                if (!selectedDeviceId) {
-                    summary.textContent = 'Select a Drone to view systems, ROMs, and logs.';
-                    return;
-                }
-                const device = currentDevices.find(d => d.device_id === selectedDeviceId);
-                summary.textContent = device ? `Selected Drone: ${device.device_name} (${device.device_id})` : `Selected Drone: ${selectedDeviceId}`;
-            }
-
-            function displayDevices() {
-                const container = document.getElementById('devices-list');
-                const globalPanel = document.getElementById('swarm-global-panel');
-                if (globalPanel && globalPanel.style.display !== 'none') return;
-                if (currentDevices.length === 0) {
-                    container.innerHTML = '<div class="empty-state">No Drones registered yet</div>';
-                    return;
-                }
-                container.innerHTML = `
-                    <div class="device-grid">
-                        ${currentDevices.map(device => `
-                            <button type="button" class="card device-tile text-start border shadow-sm ${device.device_id === selectedDeviceId ? 'active' : ''}" onclick="selectDevice('${device.device_id}')">
-                                <div class="card-body">
-                                    <div class="d-flex align-items-start justify-content-between gap-2 mb-2">
-                                        <h5 class="card-title mb-0">${device.device_name}</h5>
-                                        <i class="bi bi-hdd-network text-muted"></i>
-                                    </div>
-                                    <div class="small text-muted mb-3">Drone ID</div>
-                                    <code class="small d-block text-break">${device.device_id}</code>
-                                    <div class="mt-3 d-flex flex-wrap gap-1">
-                                        <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
-                                        <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
-                                    </div>
-                                    <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
-                                </div>
-                            </button>
-                        `).join('')}
-                    </div>
-                `;
-            }
-
-            function showSwarmHome() {
-                const panel = document.getElementById('swarm-global-panel');
-                const list = document.getElementById('devices-list');
-                if (panel) {
-                    panel.style.display = 'none';
-                    panel.innerHTML = '';
-                }
-                if (list) list.style.display = 'block';
-                displayDevices();
-            }
-
-            function formatDuration(row) {
-                const ms = Number(row.duration_ms ?? '');
-                if (Number.isFinite(ms) && ms >= 0) {
-                    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
-                }
-                const seconds = Number(row.duration_seconds ?? '');
-                if (Number.isFinite(seconds) && seconds >= 0) return `${seconds.toFixed(1)}s`;
-                return '';
-            }
-
-            async function showSwarmSyncActivity() {
-                const panel = document.getElementById('swarm-global-panel');
-                const list = document.getElementById('devices-list');
-                if (!panel) return;
-                if (list) list.style.display = 'none';
-                panel.style.display = 'block';
-                const q = document.getElementById('swarm-sync-search')?.value || '';
-                const statusValue = document.getElementById('swarm-sync-status')?.value || '';
-                const params = new URLSearchParams();
-                if (q.trim()) params.set('q', q.trim());
-                if (statusValue) params.set('status_filter', statusValue);
-                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading swarm sync activity...</div></div>`;
-                try {
-                    const response = await apiGet('/api/sync-activity' + (params.toString() ? `?${params.toString()}` : ''));
-                    if (!response.ok) throw new Error('Failed to load sync activity');
-                    const rows = (await response.json()).activity || [];
-                    panel.innerHTML = `<div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
-                            <div style="flex:1;min-width:240px">
-                                <label class="form-label" for="swarm-sync-search">Search Sync Activity</label>
-                                <input id="swarm-sync-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="Drone, file, md5, status, date, error">
-                            </div>
-                            <div style="min-width:160px">
-                                <label class="form-label" for="swarm-sync-status">Status</label>
-                                <select id="swarm-sync-status" class="form-select">
-                                    <option value="">All</option>
-                                    <option value="pending" ${statusValue === 'pending' ? 'selected' : ''}>Pending</option>
-                                    <option value="completed" ${statusValue === 'completed' ? 'selected' : ''}>Completed</option>
-                                    <option value="failed" ${statusValue === 'failed' ? 'selected' : ''}>Failed</option>
-                                    <option value="skipped" ${statusValue === 'skipped' ? 'selected' : ''}>Skipped</option>
-                                </select>
-                            </div>
-                            <button class="btn btn-primary" onclick="showSwarmSyncActivity()">Search</button>
-                        </div>
-                        <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
-                            <th>Status</th><th>Transfer</th><th>ROM</th><th>MD5</th><th>Duration</th><th>Time</th>
-                        </tr></thead><tbody>
-                            ${rows.map(row => {
-                                const duration = formatDuration(row);
-                                const statusClass = row.status === 'completed' ? 'text-bg-success' : row.status === 'failed' ? 'text-bg-danger' : 'text-bg-secondary';
-                                return `<tr>
-                                    <td><span class="badge ${statusClass}">${escapeHtml(row.status || 'pending')}</span></td>
-                                    <td class="small">${escapeHtml(row.source_drone_id || 'source n/a')} &rarr; ${escapeHtml(row.target_drone_id || 'target n/a')}</td>
-                                    <td class="small">${escapeHtml(row.system || '')} / ${escapeHtml(row.relative_path || row.rom_name || '')}${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}</td>
-                                    <td class="small mono">${escapeHtml(row.rom_md5 || '')}</td>
-                                    <td class="small">${duration ? escapeHtml(row.status === 'failed' ? `Failed after ${duration}` : row.status === 'completed' ? `Completed in ${duration}` : duration) : ''}</td>
-                                    <td class="small text-muted">${escapeHtml(row.completed_at || row.started_at || row.received_at || '')}</td>
-                                </tr>`;
-                            }).join('')}
-                        </tbody></table></div>
-                        ${rows.length ? '' : '<div class="small text-muted">No swarm sync activity matched.</div>'}
-                    </div></div>`;
-                    document.getElementById('swarm-sync-search')?.addEventListener('keydown', event => {
-                        if (event.key === 'Enter') showSwarmSyncActivity();
-                    });
-                } catch (error) {
-                    panel.innerHTML = '<div class="empty-state">Unable to load swarm sync activity.</div>';
-                }
-            }
-
-            async function showSwarmMasterList() {
-                const panel = document.getElementById('swarm-global-panel');
-                const list = document.getElementById('devices-list');
-                if (!panel) return;
-                if (list) list.style.display = 'none';
-                panel.style.display = 'block';
-                const q = document.getElementById('swarm-master-search')?.value || '';
-                const params = new URLSearchParams();
-                if (q.trim()) params.set('q', q.trim());
-                params.set('per_page', '250');
-                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading swarm master list...</div></div>`;
-                try {
-                    const response = await apiGet('/api/master-roms' + (params.toString() ? `?${params.toString()}` : ''));
-                    if (!response.ok) throw new Error('Failed to load master list');
-                    const payload = await response.json();
-                    const rows = payload.roms || [];
-                    panel.innerHTML = `<div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
-                            <div style="flex:1;min-width:240px">
-                                <label class="form-label" for="swarm-master-search">Search Master List</label>
-                                <input id="swarm-master-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="System, ROM, md5, Drone">
-                            </div>
-                            <button class="btn btn-primary" onclick="showSwarmMasterList()">Search</button>
-                        </div>
-                        <div class="small text-muted mb-2">${payload.total || rows.length} unique ROMs across approved Drones</div>
-                        <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
-                            <th>System</th><th>ROM</th><th>Size</th><th>Drones</th>
-                        </tr></thead><tbody>
-                            ${rows.map(row => {
-                                const devices = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
-                                const filenames = (row.filenames || []).length > 1 ? `<div class="small text-muted">${(row.filenames || []).map(escapeHtml).join('<br>')}</div>` : '';
-                                const sizeText = row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '';
-                                return `<tr>
-                                    <td>${escapeHtml(row.system_name || '')}</td>
-                                    <td>${escapeHtml(row.rom_name || row.file_path || '')}${row.rom_md5 ? `<div class="small fst-italic text-muted mono">md5: ${escapeHtml(row.rom_md5)}</div>` : ''}${filenames}</td>
-                                    <td class="small text-muted">${escapeHtml(sizeText)}</td>
-                                    <td class="small">${escapeHtml(devices)}</td>
-                                </tr>`;
-                            }).join('')}
-                        </tbody></table></div>
-                        ${rows.length ? '' : '<div class="small text-muted">No ROMs matched.</div>'}
-                    </div></div>`;
-                    document.getElementById('swarm-master-search')?.addEventListener('keydown', event => {
-                        if (event.key === 'Enter') showSwarmMasterList();
-                    });
-                } catch (error) {
-                    panel.innerHTML = '<div class="empty-state">Unable to load swarm master list.</div>';
-                }
-            }
-
-            function selectDevice(deviceId) {
-                selectedDeviceId = deviceId;
-                currentDeviceView = 'systems';
-                currentDeviceSystems = {};
-                systemPageState = {};
-                deviceRomSearchQuery = '';
-                displayDevices();
-                updateSelectedDeviceSummary();
-                updateSelectedDeviceWorkspace();
-                switchTab('devices', null, false);
-                switchDeviceView('systems', null, false);
-                setRoute('devices', deviceId, 'systems');
-            }
-
-            async function loadGameLogs() {
-                if (!selectedDeviceId) {
-                    document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a Drone to view logs.</div>';
-                    return;
-                }
-                try {
-                    const [logsResp, deviceResp] = await Promise.all([
-                        apiGet(`/api/devices/${selectedDeviceId}/gamelogs`),
-                        apiGet(`/api/devices/${selectedDeviceId}`)
-                    ]);
-                    if (!logsResp.ok) throw new Error('Failed to load game logs');
-                    if (!deviceResp.ok) throw new Error('Failed to load device details');
-                    const logsData = await logsResp.json();
-                    const deviceData = await deviceResp.json();
-                    displayCombinedLogs({
-                        gamelogs: logsData.gamelogs || [],
-                        emulator_configs: deviceData.emulator_configs || [],
-                        log_sources: deviceData.log_sources || []
-                    });
-                } catch (error) {
-                    console.error('Error loading logs:', error);
-                }
-            }
-
-            function displayCombinedLogs({gamelogs, emulator_configs, log_sources}) {
-                const container = document.getElementById('gamelogs-list');
-                const sources = [];
-                const logPayload = log_sources && !Array.isArray(log_sources) ? log_sources : {};
-                const sourceRows = Array.isArray(logPayload.logs) ? logPayload.logs : (Array.isArray(log_sources) ? log_sources : []);
-                sourceRows.forEach(row => {
-                    const label = row.source || row.name || row.path || 'log_source';
-                    const content = (row.files || []).map(file => {
-                        if (typeof file === 'string') return file;
-                        return file.content || file.path || JSON.stringify(file, null, 2);
-                    }).join('\\n\\n');
-                    sources.push({id: label, label: label.replaceAll('_', ' '), path: (row.files || []).map(f => f.path || f.name).filter(Boolean).join(', '), content});
-                });
-                const gameLines = (Array.isArray(gamelogs) ? gamelogs : []).map(log => {
-                    const when = log.played_at ? new Date(log.played_at).toLocaleString() : '';
-                    return `${when} ${log.system_name || ''} ${log.game_name || ''}`.trim();
-                });
-                sources.unshift({id: 'game_logs', label: 'Game Logs', path: 'Overmind gameplay history', content: gameLines.join('\\n') || 'No game logs reported yet.'});
-                const first = sources[0];
-                container.innerHTML = `
-                    <div class="row">
-                        <div class="col-md-3 mb-3">
-                                <div class="card log-card">
-                                    <div class="card-header">Log Sources</div>
-                                    <div class="list-group list-group-flush" id="overmindLogSources">
-                                        ${sources.map((source, index) => `
-                                        <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindLogSource(${index})">
-                                            <i class="bi bi-journal-text me-2"></i>${escapeHtml(source.label)}
-                                        </button>
-                                    `).join('')}
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-9">
-                            <div class="card log-card">
-                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <span id="overmindLogTitle">Select a log source</span>
-                                    <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs()">Refresh</button>
-                                </div>
-                                <div class="card-body">
-                                    <div id="overmindLogPath" class="small text-muted mb-2"></div>
-                                    <pre id="overmindLogContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a source from the left panel to view logs.</pre>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                window.overmindLogSources = sources;
-            }
-
-            function selectOvermindLogSource(index) {
-                const sources = window.overmindLogSources || [];
-                const source = sources[index];
-                if (!source) return;
-                document.querySelectorAll('#overmindLogSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
-                const title = document.getElementById('overmindLogTitle');
-                const path = document.getElementById('overmindLogPath');
-                const content = document.getElementById('overmindLogContent');
-                if (title) title.textContent = source.label;
-                if (path) path.textContent = source.path || '';
-                if (content) content.textContent = source.content || '';
-            }
-
-            async function loadDeviceConfigs() {
-                const container = document.getElementById('configs-list');
-                if (!selectedDeviceId || !container) return;
-                try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}`);
-                    if (!response.ok) throw new Error('Failed to load config data');
-                    const device = await response.json();
-                    displayDeviceConfigs(device.emulator_configs || null);
-                } catch (error) {
-                    container.innerHTML = '<div class="empty-state">Unable to load emulator configs.</div>';
-                }
-            }
-
-            function displayDeviceConfigs(configPayload) {
-                const container = document.getElementById('configs-list');
-                const configs = configPayload && Array.isArray(configPayload.configs) ? configPayload.configs : [];
-                if (!configs.length) {
-                    container.innerHTML = `<div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
-                            <div>
-                                <strong>Emulator Configs</strong>
-                                <div class="small text-muted">No config snapshot has been collected from this Drone yet.</div>
-                            </div>
-                            <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')">Collect Configs</button>
-                        </div>
-                    </div></div>`;
-                    return;
-                }
-                const rows = configs.map((item, index) => {
-                    const label = item.relative_path || item.path || item.name || `config-${index + 1}`;
-                    const content = item.content || item.text || JSON.stringify(item, null, 2);
-                    return {label, root: item.root || '', content};
-                });
-                const first = rows[0];
-                container.innerHTML = `
-                    <div class="row">
-                        <div class="col-md-3 mb-3">
-                                <div class="card log-card">
-                                    <div class="card-header">Emulators</div>
-                                    <div class="list-group list-group-flush" id="overmindConfigSources">
-                                        ${rows.map((row, index) => `
-                                        <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindConfig(${index})">
-                                            <i class="bi bi-file-earmark-code me-2"></i>${escapeHtml(row.label)}
-                                        </button>
-                                    `).join('')}
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-9">
-                            <div class="card log-card">
-                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <span id="overmindConfigTitle">Select a config</span>
-                                    <div class="d-flex gap-2">
-                                        <button class="btn btn-sm btn-outline-primary" onclick="queueDeviceAction('collect_emulator_configs')">Refresh Snapshot</button>
-                                    </div>
-                                </div>
-                                <div class="card-body">
-                                    <div id="overmindConfigPath" class="small text-muted mb-2"></div>
-                                    <pre id="overmindConfigContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a config from the left panel to view its contents.</pre>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                window.overmindConfigRows = rows;
-            }
-
-            function selectOvermindConfig(index) {
-                const rows = window.overmindConfigRows || [];
-                const row = rows[index];
-                if (!row) return;
-                document.querySelectorAll('#overmindConfigSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
-                const title = document.getElementById('overmindConfigTitle');
-                const path = document.getElementById('overmindConfigPath');
-                const content = document.getElementById('overmindConfigContent');
-                if (title) title.textContent = row.label;
-                if (path) path.textContent = row.root || '';
-                if (content) content.textContent = row.content || '';
-            }
-
-            async function loadDeviceSystems() {
-                if (!selectedDeviceId) {
-                    document.getElementById('systems-list').innerHTML = '<div class="empty-state">Select a Drone to view systems.</div>';
-                    return;
-                }
-                try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/roms`);
-                    if (!response.ok) throw new Error('Failed to load device systems');
-                    const data = await response.json();
-                    currentDeviceSystems = data.systems || {};
-                    displaySystemsTree();
-                } catch (error) {
-                    console.error('Error loading systems:', error);
-                }
-            }
-
-            let deviceRomSearchDebounce = null;
-            function handleDeviceRomSearch(event) {
-                const val = (event.target.value || '').trim();
-                deviceRomSearchQuery = val;
-                masterRomPage = 1;
-                // debounce server-side filtering
-                if (deviceRomSearchDebounce) clearTimeout(deviceRomSearchDebounce);
-                deviceRomSearchDebounce = setTimeout(() => {
-                    deviceRomSearchDebounce = null;
-                    loadSwarmRomAvailabilityPanel();
-                }, 300);
-            }
-
-            function setMasterRomPage(page) {
-                masterRomPage = Math.max(1, page);
-                loadSwarmRomAvailabilityPanel();
-            }
-
-            function setSystemPage(systemName, page) {
-                systemPageState[systemName] = Math.max(1, page);
-                displaySystemsTree();
-            }
-
-            function handleDeviceRomFilterChange() {
-                // Trigger server-side reload of the master table when filters change
-                masterRomPage = 1;
-                loadSwarmRomAvailabilityPanel();
-            }
-
-            async function populateSystemFilterOptions() {
-                // populate systems dropdown from currentDeviceSystems or from server summary
-                const select = document.getElementById('device-rom-system-filter');
-                if (!select) return;
-                select.innerHTML = '<option value="">All systems</option>';
-                try {
-                    const resp = await apiGet('/api/systems');
-                    if (!resp.ok) return;
-                    const data = await resp.json();
-                    const systems = data.systems || [];
-                    systems.forEach(s => {
-                        const opt = document.createElement('option');
-                        opt.value = s.system_name;
-                        opt.text = `${s.system_name} (${s.rom_count})`;
-                        select.appendChild(opt);
-                    });
-                } catch (e) {
-                    // ignore
-                }
-            }
-
-            async function syncSystemFromFilter(systemParam) {
-                const system = systemParam || document.getElementById('device-rom-system-filter')?.value || '';
-                if (!system) return alert('Select a system to sync');
-                if (!selectedDeviceId) return;
-                if (!confirm(`Queue sync for system ${system} on this Drone?`)) return;
-                try {
-                    await syncSystem(system);
-                    await loadSyncActivityPanel();
-                    await loadSwarmRomAvailabilityPanel();
-                } catch (err) {
-                    console.error('Error syncing system:', err);
-                    showMessage('Failed to queue system sync.', 'error');
-                }
-            }
-
-            function filteredSystemEntries() {
-                const query = deviceRomSearchQuery;
-                return Object.entries(currentDeviceSystems).reduce((entries, [systemName, roms]) => {
-                    const systemMatches = systemName.toLowerCase().includes(query);
-                    const filteredRoms = !query || systemMatches
-                        ? roms
-                        : roms.filter(rom => String(rom.rom_name || '').toLowerCase().includes(query));
-                    if (!query || systemMatches || filteredRoms.length) entries.push([systemName, filteredRoms]);
-                    return entries;
-                }, []);
-            }
-
-            function displaySystemsTree() {
-                const container = document.getElementById('systems-list');
-                const entries = filteredSystemEntries();
-                if (!entries.length) {
-                    container.innerHTML = '<div class="empty-state">No systems or ROMs matched your search.</div>';
-                    return;
-                }
-                entries.sort((a, b) => a[0].localeCompare(b[0]));
-                container.innerHTML = `
-                    <div class="tree-view">
-                        ${entries.map(([systemName, roms]) => {
-                            const totalBytes = roms.reduce((sum, rom) => sum + Number(rom.file_size || 0), 0);
-                            const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
-                            const totalPages = Math.max(1, Math.ceil(roms.length / ROMS_PER_PAGE));
-                            const currentPage = Math.min(systemPageState[systemName] || 1, totalPages);
-                            const start = (currentPage - 1) * ROMS_PER_PAGE;
-                            const pageRoms = roms.slice(start, start + ROMS_PER_PAGE);
-                            return `
-                                <details>
-                                    <summary>${systemName} (${roms.length} ROMs, ${totalMb} MB)</summary>
-                                    <ul class="list-unstyled ms-3 mt-2">
-                                        ${pageRoms.map(rom => `<li class="py-1 border-bottom small">${rom.rom_name}${rom.file_size ? ` <span class="text-muted">(${(rom.file_size / 1024 / 1024).toFixed(2)} MB)</span>` : ''}</li>`).join('')}
-                                    </ul>
-                                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 ms-3 mt-2 small text-muted">
-                                        <span>Showing ${roms.length ? start + 1 : 0}-${Math.min(start + ROMS_PER_PAGE, roms.length)} of ${roms.length}</span>
-                                        <div class="btn-group btn-group-sm" role="group" aria-label="${systemName} pages">
-                                            <button class="btn btn-outline-secondary" ${currentPage <= 1 ? 'disabled' : ''} onclick="setSystemPage('${systemName.replace(/'/g, "\\'")}', ${currentPage - 1})">Previous</button>
-                                            <button class="btn btn-outline-secondary" disabled>Page ${currentPage} of ${totalPages}</button>
-                                            <button class="btn btn-outline-secondary" ${currentPage >= totalPages ? 'disabled' : ''} onclick="setSystemPage('${systemName.replace(/'/g, "\\'")}', ${currentPage + 1})">Next</button>
-                                        </div>
-                                    </div>
-                                </details>
-                            `;
-                        }).join('')}
-                    </div>
-                `;
-                renderDroneAutoSyncPanel();
-            }
-
-            function selectedDrone() {
-                return currentDevices.find(d => d.device_id === selectedDeviceId) || null;
-            }
-
-            function renderDroneNetworkPanel() {
-                const container = document.getElementById('drone-network-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                const resolved = device.resolved_network || {};
-                const ipv4 = resolved.ipv4 || [];
-                const ipv6 = resolved.ipv6 || [];
-                const cert = device.certificate || {};
-                const peerChecks = device.peer_checks || [];
-                const info = device.system_info || {};
-                const systemRows = [
-                    ['Hostname', info.hostname || device.device_name],
-                    ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
-                    ['Batocera', info.batocera_version],
-                    ['Drone App', info.drone_app_version],
-                    ['Architecture', info.architecture],
-                    ['CPU', info.cpu ? `${info.cpu.model || 'CPU'} ${info.cpu.count ? `(${info.cpu.count} cores)` : ''}` : ''],
-                    ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
-                    ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
-                    ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
-                    ['Updated', info.last_system_info_update || info.updated_at],
-                ].filter(row => row[1]);
-                const latestPeers = Object.values(peerChecks.reduce((acc, check) => {
-                    const key = check.target_drone_id || check.target_address || '';
-                    if (!key) return acc;
-                    if (!acc[key] || String(check.checked_at || '') >= String(acc[key].checked_at || '')) acc[key] = check;
-                    return acc;
-                }, {}));
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-                            <strong>Swarm Connection</strong>
-                            <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
-                        </div>
-                        <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
-                        <hr>
-                        <strong>Certificate</strong>
-                        <div class="small text-muted">Status: ${escapeHtml(cert.status || 'unknown')}</div>
-                        <div class="small text-muted">Fingerprint: ${escapeHtml(cert.fingerprint || 'n/a')}</div>
-                        <div class="small text-muted">Subject: ${escapeHtml(cert.subject || 'n/a')}</div>
-                        <div class="small text-muted">Issuer: ${escapeHtml(cert.issuer || 'n/a')}</div>
-                        <div class="small text-muted">SAN: ${(cert.san || []).map(escapeHtml).join(', ') || 'n/a'}</div>
-                        <div class="small text-muted">Valid: ${escapeHtml(cert.valid_from || 'n/a')} - ${escapeHtml(cert.valid_until || 'n/a')}</div>
-                        <div class="small text-muted">Renewal: ${escapeHtml(cert.renewal_status || 'n/a')}</div>
-                        <hr>
-                        <strong>System Information</strong>
-                        ${systemRows.length ? `<div class="row g-2 mt-1">${systemRows.map(([label, value]) => `
-                            <div class="col-12 col-md-6"><div class="small text-muted">${escapeHtml(label)}</div><div class="small">${escapeHtml(String(value || ''))}</div></div>
-                        `).join('')}</div>` : '<div class="small text-muted mt-1">No system information reported yet.</div>'}
-                        <hr>
-                        <strong>Peer-to-Peer Checks</strong>
-                        ${latestPeers.length ? latestPeers.map(check => `
-                            <div class="mt-2 p-2 rounded border">
-                                <div class="d-flex justify-content-between gap-2">
-                                    <span class="small">${escapeHtml(check.target_name || check.target_drone_id || 'Peer Drone')}</span>
-                                    <span class="badge ${check.status === 'pass' ? 'text-bg-success' : 'text-bg-danger'}">${check.status === 'pass' ? 'RESOLVED' : 'FAILED'}</span>
-                                </div>
-                                <div class="small text-muted">${escapeHtml(check.target_address || 'n/a')} · ${escapeHtml(check.checked_at || 'n/a')} · ${check.latency_ms ?? 'n/a'} ms</div>
-                                ${check.failure_reason ? `<div class="small text-danger">${escapeHtml(check.failure_reason)}</div>` : ''}
-                            </div>
-                        `).join('') : '<div class="small text-muted mt-1">No peer checks reported yet.</div>'}
-                    </div></div>
-                `;
-            }
-
-            function renderDroneTokenPanel() {
-                const container = document.getElementById('drone-token-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
-                        <div>
-                            <strong>Drone Authorization Token</strong>
-                            <div class="small text-muted">${device.token_rotated_at ? `Last rotated: ${new Date(device.token_rotated_at).toLocaleString()}` : 'Token hash stored in Overmind'}</div>
-                        </div>
-                        <button class="btn btn-outline-danger btn-sm" onclick="rotateDroneToken()"><i class="bi bi-arrow-clockwise me-1"></i>Rotate Token</button>
-                    </div></div>
-                `;
-            }
-
-            function renderDroneSpeedPanel() {
-                const container = document.getElementById('drone-speed-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                const sample = device.last_speed_sample;
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2">
-                        <strong>Speed Sample</strong>
-                        ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
-                    </div></div>
-                `;
-            }
-
-            function renderDroneAutoSyncPanel() {
-                const container = document.getElementById('drone-auto-sync-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                const policy = device.auto_sync_policy || { enabled: false, systems: [] };
-                const systems = Object.keys(currentDeviceSystems || {}).sort();
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2">
-                        <label class="d-flex gap-2 align-items-center mb-2">
-                            <input id="drone-auto-sync-enabled" type="checkbox" ${policy.enabled ? 'checked' : ''}>
-                            <strong>Auto-sync ROM metadata from this Drone</strong>
-                        </label>
-                        <div class="d-flex flex-wrap gap-2 mb-2">
-                            ${systems.length ? systems.map(system => `
-                                <label class="badge text-bg-secondary">
-                                    <input class="drone-auto-sync-system me-1" type="checkbox" value="${escapeHtml(system)}" ${policy.systems.includes(system) ? 'checked' : ''}>
-                                    ${escapeHtml(system)}
-                                </label>
-                            `).join('') : '<span class="small text-muted">Queue ROM & System Metadata to populate system checkboxes.</span>'}
-                            ${systems.length ? systems.map(system => `
-                                <label class="badge text-bg-secondary">
-                                    <input class="drone-auto-sync-system me-1" type="checkbox" value="${escapeHtml(system)}" ${policy.systems.includes(system) ? 'checked' : ''}>
-                                    ${escapeHtml(system)}
-                                </label>
-                            `).join('') : '<span class="small text-muted">Device has not reported system metadata yet.</span>'}
-                        </div>
-                        <button class="btn btn-primary btn-sm" onclick="saveDroneAutoSyncPolicy()">Save Policy</button>
-                    </div></div>
-                `;
-            }
-
-            function renderDroneMetadataPanel() {
-                const container = document.getElementById('device-metadata-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                const resolved = device.resolved_network || {};
-                const ipv4 = resolved.ipv4 || [];
-                const ipv6 = resolved.ipv6 || [];
-                const cert = device.certificate || {};
-                const info = device.system_info || {};
-                const sample = device.last_speed_sample;
-                const systemRows = [
-                    ['Hostname', info.hostname || device.device_name],
-                    ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
-                    ['Batocera', info.batocera_version],
-                    ['Drone App', info.drone_app_version],
-                    ['Architecture', info.architecture],
-                    ['CPU', info.cpu ? `${info.cpu.model || 'CPU'} ${info.cpu.count ? `(${info.cpu.count} cores)` : ''}` : ''],
-                    ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
-                    ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
-                    ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
-                    ['Updated', info.last_system_info_update || info.updated_at],
-                ].filter(row => row[1]);
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-                            <strong>Connection Information</strong>
-                            <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
-                        </div>
-                        <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
-                        <hr>
-                        <strong>Certificate</strong>
-                        <div class="small text-muted">Status: ${escapeHtml(cert.status || 'unknown')}</div>
-                        <div class="small text-muted">Fingerprint: ${escapeHtml(cert.fingerprint || 'n/a')}</div>
-                        <div class="small text-muted">Subject: ${escapeHtml(cert.subject || 'n/a')}</div>
-                        <div class="small text-muted">Issuer: ${escapeHtml(cert.issuer || 'n/a')}</div>
-                        <div class="small text-muted">SAN: ${(cert.san || []).map(escapeHtml).join(', ') || 'n/a'}</div>
-                        <div class="small text-muted">Valid: ${escapeHtml(cert.valid_from || 'n/a')} - ${escapeHtml(cert.valid_until || 'n/a')}</div>
-                        <hr>
-                        <strong>System Information</strong>
-                        ${systemRows.length ? `<div class="row g-2 mt-1">${systemRows.map(([label, value]) => `
-                            <div class="col-12 col-md-6"><div class="small text-muted">${escapeHtml(label)}</div><div class="small">${escapeHtml(String(value || ''))}</div></div>
-                        `).join('')}</div>` : '<div class="small text-muted mt-1">No system information reported yet.</div>'}
-                        <hr>
-                        <strong>Speed Sample</strong>
-                        ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
-                    </div></div>
-                `;
-            }
-
-            async function saveDroneAutoSyncPolicy() {
-                if (!selectedDeviceId) return;
-                const systems = Array.from(document.querySelectorAll('.drone-auto-sync-system:checked')).map(input => input.value);
-                const enabled = !!document.getElementById('drone-auto-sync-enabled')?.checked;
-                const response = await apiPatch(`/api/devices/${selectedDeviceId}/auto-sync`, { enabled, systems });
-                if (!response.ok) throw new Error('Failed to save policy');
-                await loadDevices();
-                showMessage('Drone sync policy saved.', 'success');
-            }
-
-            async function loadSwarmRomAvailabilityPanel() {
-                // Render a single master ROM table that shows all known ROMs across the swarm
-                // and indicates whether the selected Drone already has each ROM.
-                const container = document.getElementById('swarm-rom-availability-panel');
-                if (!container || !selectedDeviceId) return;
-                try {
-                    // prepare server-side filter params
-                    const params = new URLSearchParams();
-                    const q = (deviceRomSearchQuery || '').trim();
-                    const system = document.getElementById('device-rom-system-filter')?.value || '';
-                    const status = document.getElementById('device-rom-status-filter')?.value || '';
-                    if (q) params.set('q', q);
-                    if (system) params.set('system', system);
-                    if (status) params.set('status', status);
-                    params.set('page', String(masterRomPage));
-                    params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
-                    const url = `/api/devices/${selectedDeviceId}/master-roms` + (params.toString() ? `?${params.toString()}` : '');
-                    const response = await apiGet(url);
-                    if (!response.ok) throw new Error('Failed to load swarm ROM availability');
-                    const payload = await response.json();
-                    const filtered = payload.roms || [];
-                    const total = payload.total || filtered.length;
-                    const page = payload.page || masterRomPage;
-                    const perPage = payload.per_page || MASTER_ROM_PAGE_SIZE;
-                    const pageCount = Math.max(1, Math.ceil(total / perPage));
-                    masterRomPage = page;
-
-                    const missingCount = filtered.filter(r => !r.present_on_selected).length;
-                    const renderPageButton = (pageNumber) => {
-                        return `<button class="btn btn-sm ${pageNumber === page ? 'btn-primary' : 'btn-outline-secondary'}" onclick="setMasterRomPage(${pageNumber})">${pageNumber}</button>`;
-                    };
-                    const paginationButtons = [];
-                    if (pageCount <= 7) {
-                        for (let i = 1; i <= pageCount; i += 1) paginationButtons.push(renderPageButton(i));
-                    } else {
-                        const start = Math.max(1, page - 2);
-                        const end = Math.min(pageCount, page + 2);
-                        if (start > 1) paginationButtons.push(renderPageButton(1));
-                        if (start > 2) paginationButtons.push('<span class="px-2">&hellip;</span>');
-                        for (let i = start; i <= end; i += 1) paginationButtons.push(renderPageButton(i));
-                        if (end < pageCount - 1) paginationButtons.push('<span class="px-2">&hellip;</span>');
-                        if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
-                    }
-
-                    container.innerHTML = `
-                        <div class="card"><div class="card-body py-2">
-                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <div class="d-flex gap-2 align-items-center">
-                                    <strong>ROMs (Master List)</strong>
-                                    <div class="small text-muted">${total} ROMs · ${missingCount} missing here</div>
-                                </div>
-                                <div class="d-flex gap-2">
-                                    <button class="btn btn-outline-secondary btn-sm" onclick="populateSystemFilterOptions()">Refresh systems</button>
-                                </div>
-                            </div>
-                            <div id="sync-system-buttons" class="d-flex flex-wrap gap-2 mb-3"></div>
-                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <div class="small text-muted">Page ${page} of ${pageCount} · ${perPage} per page</div>
-                                <div class="btn-group" role="group" aria-label="Master ROM pagination">
-                                    <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterRomPage(${Math.max(1, page - 1)})">Previous</button>
-                                    ${paginationButtons.join('')}
-                                    <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterRomPage(${Math.min(pageCount, page + 1)})">Next</button>
-                                </div>
-                            </div>
-                            <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
-                                <th>System</th>
-                                <th>ROM</th>
-                                <th>Size</th>
-                                <th>Source</th>
-                                <th>Status</th>
-                                <th></th>
-                            </tr></thead><tbody>
-                                ${filtered.map(row => {
-                                    const present = !!row.present_on_selected;
-                                    const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
-                                    const preferred = row.preferred_source_name || (row.devices && row.devices[0] && (row.devices[0].device_name || row.devices[0].device_id)) || '';
-                                    const sizeText = row.size ? `${(Number(row.size) / 1024 / 1024).toFixed(2)} MB` : (row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '');
-                                    const statusLabel = present ? (row.present_label || 'Present') : (row.devices && row.devices.length ? 'Missing' : 'Unavailable');
-                                    const showSync = !present && row.devices && row.devices.length;
-                                    const rowData = Object.assign({}, row, { preferred_sync_source: row.preferred_source || preferred });
-                                    return `
-                                        <tr>
-                                            <td>${escapeHtml(row.system_name || '')}</td>
-                                            <td style="min-width:240px">
-                                                <div>${escapeHtml(row.file_path || row.rom_name || '')}</div>
-                                                ${row.rom_md5 ? `<div class="small fst-italic text-muted mono">md5: ${escapeHtml(row.rom_md5)}</div>` : ''}
-                                            </td>
-                                            <td class="text-muted">${escapeHtml(sizeText)}</td>
-                                            <td class="text-muted">${escapeHtml(sources || preferred)}</td>
-                                            <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${escapeHtml(statusLabel)}</span></td>
-                                            <td>
-                                                ${showSync ? `<button class="btn btn-primary btn-sm" onclick='syncRom(${JSON.stringify(rowData).replace(/'/g, "&apos;")})'>Sync</button>` : ''}
-                                            </td>
-                                        </tr>
-                                    `;
-                                }).join('')}
-                            </tbody></table></div>
-                            ${total ? '' : '<div class="small text-muted">No ROMs found for this filter.</div>'}
-                        </div></div>
-                    `;
-                    // populate per-system Sync buttons for missing systems
-                    try {
-                        const btnContainer = document.getElementById('sync-system-buttons');
-                        if (btnContainer) {
-                            btnContainer.innerHTML = '';
-                            const missingBySystem = filtered.reduce((acc, r) => {
-                                if (!r.present_on_selected) {
-                                    const s = r.system_name || 'Unknown';
-                                    acc[s] = (acc[s] || 0) + 1;
-                                }
-                                return acc;
-                            }, {});
-                            Object.keys(missingBySystem).sort().forEach(s => {
-                                const btn = document.createElement('button');
-                                btn.className = 'btn btn-outline-primary btn-sm';
-                                btn.textContent = `Sync ${s} (${missingBySystem[s]})`;
-                                btn.onclick = () => syncSystemFromFilter(s);
-                                btnContainer.appendChild(btn);
-                            });
-                        }
-                    } catch (e) {
-                        // ignore
-                    }
-                    // ensure system filter has options
-                    populateSystemFilterOptions();
-                } catch (error) {
-                    console.error('Error loading master ROM table:', error);
-                    container.innerHTML = '<div class="empty-state">Unable to load ROMs.</div>';
-                }
-            }
-
-            async function syncRom(row) {
-                try {
-                    const response = await fetch(`/api/devices/${selectedDeviceId}/sync-rom`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                        body: JSON.stringify(row)
-                    });
-                    if (!response.ok) throw new Error('Failed to queue ROM sync');
-                    showMessage('ROM sync queued. The Drone will choose the source peer automatically.', 'success');
-                    await loadSyncActivityPanel();
-                    // Refresh the master ROM table so the Sync button disappears once the Drone reports the ROM
-                    await loadSwarmRomAvailabilityPanel();
-                } catch (error) {
-                    console.error('Error queuing ROM sync:', error);
-                    showMessage('Failed to queue ROM sync.', 'error');
-                }
-            }
-
-            async function syncSystem(systemName) {
-                const response = await fetch(`/api/devices/${selectedDeviceId}/sync-system`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                    body: JSON.stringify({ system_name: systemName })
-                });
-                if (!response.ok) throw new Error('Failed to queue system sync');
-                showMessage('System sync queued. The Drone will choose source peers automatically.', 'success');
-                await loadSyncActivityPanel();
-            }
-
-            async function loadSyncActivityPanel() {
-                const container = document.getElementById('drone-sync-activity-panel');
-                if (!container || !selectedDeviceId) return;
-                try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/sync-activity`);
-                    if (!response.ok) throw new Error('Failed to load sync activity');
-                    const rows = ((await response.json()).activity || []).slice(0, 20);
-                    container.innerHTML = `<div class="card"><div class="card-body py-2"><strong>ROM Sync Activity</strong>
-                        ${rows.length ? rows.map(row => {
-                            const duration = formatDuration(row);
-                            const durationText = duration ? (row.status === 'failed' ? `Failed after ${duration}` : row.status === 'completed' ? `Completed in ${duration}` : duration) : '';
-                            const refreshText = row.inventory_refresh_status ? `Inventory ${row.inventory_refresh_status}${row.inventory_refresh_duration_ms !== undefined && row.inventory_refresh_duration_ms !== null ? ` in ${row.inventory_refresh_duration_ms}ms` : ''}` : '';
-                            return `<div class="mt-2 small">
-                            <span class="badge ${row.status === 'completed' ? 'text-bg-success' : row.status === 'failed' ? 'text-bg-danger' : 'text-bg-secondary'}">${escapeHtml(row.status || 'pending')}</span>
-                            ${escapeHtml(row.system || '')} / ${escapeHtml(row.rom_name || '')}
-                            ${row.source_drone_id ? `from ${escapeHtml(row.source_drone_id)}` : ''}
-                            ${durationText ? `<span class="text-muted ms-1">${escapeHtml(durationText)}</span>` : ''}
-                            ${refreshText ? `<div class="text-muted">${escapeHtml(refreshText)}</div>` : ''}
-                            ${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}
-                        </div>`;
-                        }).join('') : '<div class="small text-muted mt-1">No ROM sync activity yet.</div>'}
-                    </div></div>`;
-                } catch (error) {
-                    container.innerHTML = '<div class="empty-state">Unable to load ROM sync activity.</div>';
-                }
-            }
-
-            async function rotateDroneToken() {
-                if (!selectedDeviceId || !window.confirm('Rotate this Drone token? The old token will stop working immediately.')) return;
-                const response = await fetch(`/api/devices/${selectedDeviceId}/token/rotate`, {
-                    method: 'POST',
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                if (!response.ok) throw new Error('Failed to rotate token');
-                const data = await response.json();
-                await loadDevices();
-                showTokenModal(data.drone_token, 'New Drone Authorization Token');
-            }
-
-            function updateSelectedDeviceWorkspace() {
-                const workspace = document.getElementById('selected-device-workspace');
-                const listView = document.getElementById('device-list-view');
-                const title = document.getElementById('selected-device-title');
-                const idNode = document.getElementById('selected-device-id');
-                if (!workspace) return;
-                if (!selectedDeviceId) {
-                    workspace.style.display = 'none';
-                    if (listView) listView.style.display = 'block';
-                    return;
-                }
-                const device = currentDevices.find(d => d.device_id === selectedDeviceId);
-                if (listView) listView.style.display = 'none';
-                workspace.style.display = 'block';
-                if (title) title.textContent = device ? device.device_name : 'Selected Drone';
-                if (idNode) idNode.textContent = device ? `Drone ID: ${device.device_id}` : `Drone ID: ${selectedDeviceId}`;
-                renderDroneNetworkPanel();
-                renderDroneTokenPanel();
-                renderDroneSpeedPanel();
-                loadSwarmRomAvailabilityPanel();
-                loadSyncActivityPanel();
-            }
-
-            function backToDevices() {
-                selectedDeviceId = null;
-                currentDeviceView = 'systems';
-                setRoute('devices', null, 'systems');
-            }
-
-            function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
-                if (!selectedDeviceId) return;
-                currentDeviceView = ['gamelogs', 'configs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
-                document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
-                const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
-                if (activeBtn) activeBtn.classList.add('active');
-
-                const systemsPanel = document.getElementById('device-systems-panel');
-                const gamelogsPanel = document.getElementById('device-gamelogs-panel');
-                const configsPanel = document.getElementById('device-configs-panel');
-                const actionsPanel = document.getElementById('device-actions-panel');
-                const metadataPanel = document.getElementById('device-metadata-panel');
-                if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
-                if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
-                if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
-                if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
-                if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
-
-                if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
-                if (currentDeviceView === 'gamelogs') loadGameLogs();
-                if (currentDeviceView === 'configs') loadDeviceConfigs();
-                if (currentDeviceView === 'metadata') {
-                    renderDroneMetadataPanel();
-                }
-                if (actionRefreshTimer) clearInterval(actionRefreshTimer);
-                actionRefreshTimer = null;
-                if (currentDeviceView === 'actions') {
-                    loadDeviceActions();
-                    actionRefreshTimer = setInterval(loadDeviceActions, 5000);
-                }
-                if (updateUrl) setRoute('devices', selectedDeviceId, currentDeviceView);
-            }
-
-            function setRoute(tabName, deviceId = selectedDeviceId, deviceView = currentDeviceView) {
-                let hash = `#/${tabName}`;
-                if (tabName === 'devices' && deviceId) hash = `#/devices/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`;
-                if (window.location.hash !== hash) window.location.hash = hash; else applyRouteFromHash();
-            }
-
-            function parseRoute() {
-                const raw = window.location.hash || '#/devices';
-                const clean = raw.replace(/^#\\/?/, '');
-                const parts = clean.split('/').filter(Boolean);
-                const allowed = ['devices', 'profile', 'help', 'notifications'];
-                if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
-                    return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
-                }
-                const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
-                const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
-                const deviceView = tab === 'devices' && ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
-                return { tab, deviceId, deviceView };
-            }
-
-            function applyRouteFromHash() {
-                const route = parseRoute();
-                if (route.tab === 'devices' && !route.deviceId) {
-                    selectedDeviceId = null;
-                } else if (route.deviceId && currentDevices.some(d => d.device_id === route.deviceId)) {
-                    selectedDeviceId = route.deviceId;
-                    currentDeviceView = route.deviceView || 'systems';
-                }
-                updateSelectedDeviceSummary();
-                updateSelectedDeviceWorkspace();
-                switchTab(route.tab, null, false);
-                if (selectedDeviceId && route.tab === 'devices') switchDeviceView(currentDeviceView, null, false);
-            }
-
-            async function loadDeviceActions() {
-                const container = document.getElementById('actions-list');
-                if (!selectedDeviceId || !container) return;
-                try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/actions`);
-                    if (!response.ok) throw new Error('Failed to load device actions');
-                    const data = await response.json();
-                    const actions = data.actions || [];
-                    if (!actions.length) {
-                        container.innerHTML = '<div class="empty-state">No actions queued yet.</div>';
-                        return;
-                    }
-                    container.innerHTML = actions.map(action => {
-                        const result = action.result || null;
-                        const resultSummary = summarizeActionResult(result);
-                        return `
-                        <div class="card mb-2 shadow-sm">
-                            <div class="card-body py-2">
-                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-                                    <strong>${formatActionName(action.action)}</strong>
-                                    <span class="badge text-bg-secondary">${action.status}</span>
-                                </div>
-                                <div class="small text-muted mt-1">Created: ${action.created_at ? new Date(action.created_at).toLocaleString() : 'n/a'}</div>
-                                ${action.completed_at ? `<div class="small text-muted mt-1">Completed: ${new Date(action.completed_at).toLocaleString()}</div>` : ''}
-                                ${action.message ? `<div class="small mt-1">${action.message}</div>` : ''}
-                                ${result ? `
-                                    <div class="small text-muted mt-2">${resultSummary}</div>
-                                    <details class="mt-2">
-                                        <summary class="small">View returned data</summary>
-                                        <pre class="small mt-2 p-2 rounded" style="white-space:pre-wrap;background:rgba(0,0,0,0.18);max-height:360px;overflow:auto;">${escapeHtml(JSON.stringify(result, null, 2))}</pre>
-                                    </details>
-                                ` : ''}
-                            </div>
-                        </div>
-                    `;
-                    }).join('');
-                } catch (error) {
-                    console.error('Error loading actions:', error);
-                    container.innerHTML = '<div class="empty-state">Unable to load actions.</div>';
-                }
-            }
-
-            async function queueDeviceAction(actionName) {
-                if (!selectedDeviceId) return;
-                const labels = {
-                    restart: 'restart',
-                    update: 'update',
-                    collect_rom_metadata: 'collect ROM and system metadata',
-                    collect_game_logs: 'collect Game Logs',
-                    collect_emulator_configs: 'collect emulator configs',
-                    collect_log_sources: 'collect log sources',
-                };
-                if (!window.confirm(`Queue ${labels[actionName] || actionName} for this Drone?`)) return;
-                try {
-                    const response = await fetch(`/api/devices/${selectedDeviceId}/actions`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${authToken}`
-                        },
-                        body: JSON.stringify({ action: actionName })
-                    });
-                    if (response.status === 401) {
-                        logout();
-                        showMessage('Session expired. Please log in again.', 'error');
-                        throw new Error('Unauthorized');
-                    }
-                    if (!response.ok) throw new Error('Failed to queue action');
-                    await loadDeviceActions();
-                    showMessage('Action queued.', 'success');
-                } catch (error) {
-                    console.error('Error queuing action:', error);
-                }
-            }
-
-            function formatActionName(actionName) {
-                const labels = {
-                    collect_game_logs: 'Game Logs',
-                    collect_emulator_configs: 'Emulator Configs',
-                    collect_log_sources: 'Log Sources',
-                    collect_rom_metadata: 'ROM Metadata',
-                };
-                return labels[actionName] || String(actionName || 'n/a').replaceAll('_', ' ');
-            }
-
-            function summarizeActionResult(result) {
-                if (!result) return '';
-                if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;
-                if (result.type === 'game_logs') return `${(result.sessions || []).length} parsed play sessions, ${(result.logs || []).length} logs`;
-                if (result.type === 'emulator_configs') return `${(result.configs || []).length} config files`;
-                if (result.type === 'log_sources') return `${(result.logs || []).length} log sources`;
-                return 'Data returned from Drone';
-            }
-
-            function escapeHtml(value) {
-                return String(value ?? '')
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&#39;');
-            }
-
-            async function renameDevicePrompt(deviceId) {
-                if (!deviceId) return;
-                const current = currentDevices.find(d => d.device_id === deviceId);
-                const nextName = window.prompt('Enter Drone name:', current ? current.device_name : '');
-                if (!nextName || !nextName.trim()) return;
-                try {
-                    const response = await apiPatch(`/api/devices/${deviceId}/name`, { device_name: nextName.trim() });
-                    if (!response.ok) throw new Error('Failed to rename device');
-                    await loadDevices();
-                } catch (error) {
-                    console.error('Error renaming device:', error);
-                }
-            }
-
-            async function deleteSelectedDevice() {
-                if (!selectedDeviceId) return;
-                const current = currentDevices.find(d => d.device_id === selectedDeviceId);
-                const label = current ? current.device_name : selectedDeviceId;
-                if (!window.confirm(`Disconnect ${label}? This removes the Drone from this Overlord and it will no longer be controllable.`)) return;
-                try {
-                    const response = await apiDelete(`/api/devices/${selectedDeviceId}`);
-                    if (!response.ok) throw new Error('Failed to delete device');
-                    selectedDeviceId = null;
-                    currentDeviceView = 'systems';
-                    await loadDevices();
-                    setRoute('devices', null, 'systems');
-                    showMessage('Drone disconnected.', 'success');
-                } catch (error) {
-                    console.error('Error deleting device:', error);
-                }
-            }
-
-            function setPageChrome(tabName) {
-                const meta = pageMeta[tabName] || pageMeta.devices;
-                const title = document.getElementById('page-title');
-                const subtitle = document.getElementById('page-subtitle');
-                if (title) title.textContent = meta[0];
-                if (subtitle) subtitle.textContent = meta[1];
-            }
-
-            function activateNav(tabName) {
-                document.querySelectorAll('.nav-btn, .sub-nav-btn').forEach(btn => btn.classList.remove('active'));
-                const btn = document.querySelector(`.nav-btn[data-tab="${tabName}"], .sub-nav-btn[data-tab="${tabName}"]`);
-                if (btn) btn.classList.add('active');
-            }
-
-            function switchTab(tabName, buttonEl = null, updateUrl = true) {
-                activateNav(tabName);
-                document.querySelectorAll('.dashboard-tab').forEach(section => { section.style.display = 'none'; });
-                const tabMap = {
-                    devices: 'devices-tab',
-                    profile: 'profile-tab',
-                    help: 'help-tab',
-                    notifications: 'notifications-tab',
-                };
-                const tabElement = document.getElementById(tabMap[tabName]);
-                if (tabElement) tabElement.style.display = 'block';
-                currentTab = tabName;
-                if (tabName === 'devices') {
-                    updateSelectedDeviceWorkspace();
-                    startDevicesPolling();
-                } else {
-                    stopDevicesPolling();
-                }
-                if (tabName === 'profile' || tabName === 'notifications') renderProfileUI();
-                setPageChrome(tabName);
-                if (updateUrl) setRoute(tabName);
-            }
-
-            function showTokenModal(tokenValue, title = 'Drone Authorization Token') {
-                const hidden = document.getElementById('token-modal-overlay');
-                if (hidden) hidden.remove();
-                const overlay = document.createElement('div');
-                overlay.id = 'token-modal-overlay';
-                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;';
-                overlay.innerHTML = `
-                  <div style="background:var(--admin-surface,#151f32);border:1px solid var(--admin-border,#31405f);border-radius:0.75rem;max-width:600px;width:90%;padding:1.5rem;box-shadow:0 1rem 3rem rgba(0,0,0,0.45);">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
-                      <h4 style="margin:0;color:var(--admin-text,#ecf6ff);">${escapeHtml(title)}</h4>
-                      <button onclick="this.closest('#token-modal-overlay').remove()" style="background:transparent;border:none;color:var(--admin-muted,#9fb0c9);font-size:1.5rem;cursor:pointer;">&times;</button>
-                    </div>
-                    <p style="color:var(--admin-muted,#9fb0c9);margin-bottom:0.75rem;">Copy this token and paste it into the Drone admin page. It is shown only once.</p>
-                    <div style="display:flex;gap:0.5rem;">
-                      <input id="token-modal-value" type="text" readonly value="${escapeHtml(tokenValue)}" style="flex:1;font-family:monospace;background:rgba(0,0,0,0.3);border:1px solid var(--admin-border,#31405f);color:var(--admin-text,#ecf6ff);padding:0.65rem;border-radius:0.35rem;font-size:0.85rem;">
-                      <button id="token-copy-button" type="button" aria-label="Copy token" title="Copy token" onclick="copyTokenFromModal()" style="background:var(--admin-sidebar-accent,#00c2ff);border:none;color:#06111f;font-weight:800;padding:0.65rem 1rem;border-radius:0.35rem;cursor:pointer;white-space:nowrap;"><i class="bi bi-clipboard"></i></button>
-                    </div>
-                    <div id="token-copy-status" class="small mt-2" role="status" aria-live="polite" style="color:var(--admin-muted,#9fb0c9);min-height:1.25rem;"></div>
-                    <div style="margin-top:1rem;text-align:right;">
-                      <button onclick="this.closest('#token-modal-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid var(--admin-border,#31405f);color:var(--admin-text,#ecf6ff);padding:0.5rem 1rem;border-radius:0.35rem;cursor:pointer;">Close</button>
-                    </div>
-                  </div>
-                `;
-                document.body.appendChild(overlay);
-            }
-
-            async function copyTextToClipboard(text) {
-                if (!text) throw new Error('No token available to copy.');
-                if (navigator.clipboard && window.isSecureContext) {
-                    await navigator.clipboard.writeText(text);
-                    return;
-                }
-                const textarea = document.createElement('textarea');
-                textarea.value = text;
-                textarea.setAttribute('readonly', '');
-                textarea.style.position = 'fixed';
-                textarea.style.left = '-9999px';
-                document.body.appendChild(textarea);
-                textarea.select();
-                const ok = document.execCommand('copy');
-                document.body.removeChild(textarea);
-                if (!ok) throw new Error('Fallback clipboard copy failed.');
-            }
-
-            async function copyTokenFromModal() {
-                const input = document.getElementById('token-modal-value');
-                const button = document.getElementById('token-copy-button');
-                const status = document.getElementById('token-copy-status');
-                const original = '<i class="bi bi-clipboard"></i>';
-                try {
-                    await copyTextToClipboard(input ? input.value : '');
-                    if (button) {
-                        button.innerHTML = '<i class="bi bi-check2"></i>';
-                        button.title = 'Copied';
-                    }
-                    if (status) {
-                        status.textContent = 'Copied';
-                        status.style.color = 'var(--admin-accent-green,#34d399)';
-                    }
-                    setTimeout(() => {
-                        if (button) {
-                            button.innerHTML = original;
-                            button.title = 'Copy token';
-                        }
-                        if (status) status.textContent = '';
-                    }, 2000);
-                } catch (error) {
-                    console.error('Token copy failed:', error);
-                    if (status) {
-                        status.textContent = error.message || 'Copy failed';
-                        status.style.color = '#ff9aa7';
-                    }
-                    showMessage(error.message || 'Copy failed', 'error');
-                }
-            }
-
-            function showMessage(message, type) {
-                const msgElement = document.getElementById('auth-message');
-                msgElement.textContent = message;
-                msgElement.className = `message ${type}`;
-                setTimeout(() => {
-                    msgElement.classList.remove('success', 'error');
-                }, 5000);
-            }
-        </script>
-    </body>
-    </html>
-    """
+    return (TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
 
 
 # ==================== Health Check ====================
