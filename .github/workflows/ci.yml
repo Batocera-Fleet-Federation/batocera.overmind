@@ -36,5 +36,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure AWS credentials for ECR
+        if: github.event_name == 'push'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION || env.AWS_REGION }}
       - name: Build image
         run: ./scripts/docker-publish.sh ${{ github.event_name == 'push' && '--push' || '--dry-run' }}
+      - name: Push image to AWS ECR
+        if: github.event_name == 'push'
+        run: |
+          export TAG=${{ github.sha }}
+          export AWS_REGION=${{ secrets.AWS_DEFAULT_REGION || env.AWS_REGION }}
+          ./scripts/docker-publish-ecr.sh
