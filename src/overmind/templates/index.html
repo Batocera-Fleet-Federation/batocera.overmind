@@ -296,6 +296,8 @@
           <span>Batocera Overmind</span>
         </a>
         <div class="hero-actions">
+          <a class="cta-outline" href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer"><i class="bi bi-github me-1"></i>GitHub</a>
+          <a class="cta-outline" href="/docs" target="_blank" rel="noopener noreferrer"><i class="bi bi-braces me-1"></i>API Docs</a>
           <a class="cta-outline" href="#/login" onclick="event.preventDefault(); showLandingAuth('login-form')">Login</a>
           <a class="cta" href="#/register" onclick="event.preventDefault(); showLandingAuth('register-form')">Register</a>
         </div>
@@ -303,7 +305,7 @@
       <div class="hero">
         <div class="hero-badge"><i class="bi bi-broadcast-pin"></i> Fleet command for Batocera arcades</div>
         <h1>Batocera Overmind</h1>
-        <p><strong>One dashboard for every arcade machine in your swarm.</strong> Overmind lets a layman connect Batocera boxes, see which machines are online, understand what games and configs are installed, and trigger safe fleet actions without SSHing into every cabinet or digging through Linux folders.</p>
+        <p><strong>One free, open-source dashboard for your Batocera machines.</strong> Connect your arcade boxes, see what is online, sync ROMs, artwork, and configs, and debug issues remotely without SSHing into every device.</p>
       </div>
 
       <div class="feature-strip" aria-label="What Batocera Overmind does">
@@ -323,20 +325,21 @@
           <p>Pair Batocera machines as Drones so they can report back to the Overmind dashboard.</p>
         </div>
         <div class="feature-pill">
-          <i class="bi bi-shield-check"></i>
-          <h3>Manage safely</h3>
-          <p>Use role-aware controls for syncs, logs, configs, and maintenance actions from one place.</p>
+          <i class="bi bi-bug"></i>
+          <h3>Debug remotely</h3>
+          <p>View logs, configs, metadata, and machine status from the browser so you can troubleshoot without standing at the cabinet.</p>
         </div>
       </div>
 
       <div class="landing-card">
-        <h2>What Overmind Does (in plain English)</h2>
+        <h2>What Overmind Does</h2>
         <p>Think of Overmind as the control room for your retro arcade fleet. Each Batocera machine runs a small Drone helper. Overmind brings those Drones together so you can:</p>
         <ul>
           <li><strong>See machine health:</strong> online status, connection state, and swarm membership.</li>
           <li><strong>Understand game coverage:</strong> which systems and ROMs are present across the fleet.</li>
-          <li><strong>Review useful details:</strong> logs, metadata, and emulator configuration visibility from the browser.</li>
+          <li><strong>Debug remotely:</strong> review logs, metadata, emulator configs, and machine state from the browser before touching the physical device.</li>
           <li><strong>Trigger safe actions:</strong> collect logs, refresh inventory, sync content, and manage approved Drones without touching every machine.</li>
+          <li><strong>Stay free and open:</strong> the project is open source and completely free to use, modify, self-host, and extend.</li>
         </ul>
       </div>
 
@@ -897,14 +900,21 @@
             }
 
             .sidebar {
-                background: linear-gradient(90deg, #111936 0%, var(--admin-sidebar) 100%);
-                color: #fff;
+                background: rgba(21, 31, 50, 0.86);
+                color: var(--admin-text);
                 min-height: auto;
-                border: 1px solid rgba(255, 255, 255, 0.14);
-                box-shadow: 0 0.15rem 1rem rgba(0, 0, 0, 0.14);
+                border: 1px solid var(--admin-border);
+                border-radius: 1rem !important;
+                box-shadow: 0 0.15rem 1rem rgba(0, 0, 0, 0.18);
+                backdrop-filter: blur(10px);
             }
 
-            .brand-block { border-bottom: 1px solid rgba(255, 255, 255, 0.18); }
+            .brand-block {
+                border-bottom: 0;
+                padding-bottom: 0 !important;
+                margin-bottom: 0 !important;
+                white-space: nowrap;
+            }
 
             .brand-mark {
                 width: 2rem;
@@ -916,34 +926,69 @@
                 background: rgba(0, 194, 255, 0.15);
                 border: 1px solid rgba(0, 194, 255, 0.55);
                 box-shadow: 0 0 18px rgba(0, 194, 255, 0.24);
+                color: var(--admin-sidebar-accent);
             }
 
             .menu-label {
                 font-size: 0.72rem;
                 letter-spacing: 0.07em;
                 text-transform: uppercase;
-                color: rgba(255, 255, 255, 0.64);
-                font-weight: 700;
+                color: var(--admin-muted);
+                font-weight: 800;
             }
 
             .sidebar .btn {
-                border: 0;
+                border: 1px solid var(--admin-border) !important;
                 text-align: left;
-                color: rgba(255, 255, 255, 0.92) !important;
-                background: transparent !important;
-                padding: 0.62rem 0.8rem;
-                border-radius: 0.45rem;
-                font-weight: 700;
+                color: var(--admin-text) !important;
+                background: rgba(21, 31, 50, 0.72) !important;
+                padding: 0.62rem 0.85rem;
+                border-radius: 0.7rem;
+                font-weight: 800;
                 font-size: 0.92rem;
                 transform: none !important;
                 box-shadow: none !important;
+                transition: border-color .2s ease, color .2s ease, background .2s ease, transform .2s ease;
             }
 
             .sidebar .btn:hover,
-            .sidebar .btn:focus,
+            .sidebar .btn:focus {
+                border-color: var(--admin-sidebar-accent) !important;
+                color: var(--admin-sidebar-accent) !important;
+                background: rgba(0, 194, 255, 0.10) !important;
+                transform: translateY(-1px) !important;
+            }
+
             .sidebar .btn.active {
-                background: rgba(255, 255, 255, 0.14) !important;
-                color: #fff !important;
+                background: var(--admin-sidebar-accent) !important;
+                border-color: var(--admin-sidebar-accent) !important;
+                color: #06111f !important;
+                font-weight: 900;
+            }
+
+            .sidebar .btn[href*="github.com"],
+            .sidebar .btn[href="/docs"] {
+                color: #c8d7ee !important;
+            }
+
+            .sidebar .btn[href*="github.com"]:hover,
+            .sidebar .btn[href="/docs"]:hover {
+                color: var(--admin-sidebar-accent) !important;
+            }
+
+            .sidebar .brand-title {
+                color: var(--admin-text);
+                font-weight: 900;
+                letter-spacing: -0.02em;
+            }
+
+            .sidebar .brand-subtitle {
+                color: var(--admin-muted);
+                font-weight: 700;
+            }
+
+            .nav-actions {
+                align-items: center;
             }
 
             .topbar {
@@ -991,9 +1036,11 @@
                 background: var(--admin-sidebar-accent) !important;
                 border-color: var(--admin-sidebar-accent) !important;
             }
-            .profile-nav-btn {
+            .profile-nav-btn,
+            .sidebar .nav-btn {
                 align-items: center;
                 justify-content: flex-start;
+                display: inline-flex;
             }
             .profile-nav-btn .profile-chip {
                 flex: 0 0 auto;
@@ -1215,14 +1262,14 @@
     <body>
         <div class="container-fluid layout-shell py-3 py-lg-4">
             <div class="row g-3">
-                <aside class="col-12 col-lg-3 col-xl-2">
-                    <div class="sidebar rounded-3 h-100 p-3 d-flex flex-column flex-lg-row align-items-lg-center gap-3">
+                <aside class="col-12">
+                    <div class="sidebar h-100 p-3 d-flex flex-column flex-lg-row align-items-lg-center gap-3">
                         <div class="brand-block pb-3 mb-3 pb-lg-0 mb-lg-0 pe-lg-3">
                             <div class="d-flex align-items-center gap-2 mb-1">
                                 <span class="brand-mark"><i class="bi bi-controller"></i></span>
-                                <div class="h5 mb-0 text-white">Batocera Overmind</div>
+                                <div class="h5 mb-0 brand-title">Batocera Overmind</div>
                             </div>
-                            <div class="small text-white-50">Overlord command console</div>
+                            <div class="small brand-subtitle">Overlord command console</div>
                         </div>
                         <div class="menu-label mb-2 d-lg-none">Navigation</div>
                         <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
@@ -1235,7 +1282,7 @@
                         </div>
                     </div>
                 </aside>
-                <main id="app" class="col-12 col-lg-9 col-xl-10 app-main">
+                <main id="app" class="col-12 app-main">
                     <div class="app-shell p-3 p-md-4">
                 <!-- Auth Section -->
                 <div id="auth-section" class="content-section active">
