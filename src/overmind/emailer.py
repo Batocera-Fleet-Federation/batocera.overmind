@@ -15,7 +15,22 @@ def base_url() -> str:
 
 
 def provider() -> str:
-    return (os.getenv("EMAIL_PROVIDER") or "console").strip().lower()
+    """Determine the email provider.
+    
+    Priority:
+    1. Explicit EMAIL_PROVIDER env var
+    2. Auto-detect: use 'ses' if ENVIRONMENT=production and AWS_REGION is set
+    3. Default: 'console' (logging only)
+    """
+    explicit = os.getenv("EMAIL_PROVIDER", "").strip().lower()
+    if explicit:
+        return explicit
+    
+    environment = (os.getenv("OVERMIND_ENVIRONMENT") or os.getenv("ENVIRONMENT") or "").lower()
+    if environment == "production" and os.getenv("AWS_REGION"):
+        return "ses"
+    
+    return "console"
 
 
 def themed_email(title: str, body_html: str, body_text: str) -> tuple[str, str]:
@@ -45,10 +60,23 @@ def send_email(to_email: str, subject: str, html_body: str, text_body: str, from
         logger.warning("Unknown EMAIL_PROVIDER=%s; email not sent", selected)
         return False
 
-    sender = from_email or os.getenv("SES_FROM_EMAIL")
+    # Resolve sender email: explicit arg > AWS_SES_FROM_ADDRESS > SES_FROM_EMAIL
+    sender = from_email or os.getenv("AWS_SES_FROM_ADDRESS") or os.getenv("SES_FROM_EMAIL")
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-    if not sender or not region:
-        logger.error("SES email not sent; SES_FROM_EMAIL and AWS_REGION are required")
+    
+    if not sender:
+        logger.error(
+            "SES email not sent to %s: AWS_SES_FROM_ADDRESS (or SES_FROM_EMAIL) env var is required. "
+            "Verify the email in AWS SES console (Settings → Verified identities).",
+            to_email
+        )
+        return False
+    
+    if not region:
+        logger.error(
+            "SES email not sent to %s: AWS_REGION env var is required for AWS SES.",
+            to_email
+        )
         return False
 
     try:
@@ -66,8 +94,16 @@ def send_email(to_email: str, subject: str, html_body: str, text_body: str, from
                 },
             },
         )
-        logger.info("SES email sent to %s subject=%s", to_email, subject)
+        logger.info("SES email sent to %s subject=%s from=%s region=%s", to_email, subject, sender, region)
         return True
     except Exception as error:
-        logger.error("SES email send failed to %s subject=%s error=%s", to_email, subject, error.__class__.__name__)
+        logger.error(
+            "SES email send failed to %s subject=%s from=%s region=%s error=%s: %s",
+            to_email,
+            subject,
+            sender,
+            region,
+            error.__class__.__name__,
+            str(error),
+        )
         return False

@@ -1506,12 +1506,31 @@ async def startup_event():
     environment = (os.getenv("OVERMIND_ENVIRONMENT") or os.getenv("ENVIRONMENT") or "").lower()
     if environment in {"prod", "production"} and not database_url():
         raise RuntimeError("OVERMIND_DATABASE_URL or PostgreSQL environment variables are required in production mode")
+    
+    # Validate AWS SES configuration in production
+    if environment in {"prod", "production"}:
+        aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+        aws_ses_from = os.getenv("AWS_SES_FROM_ADDRESS") or os.getenv("SES_FROM_EMAIL")
+        if not aws_region:
+            raise RuntimeError("AWS_REGION environment variable is required in production mode for AWS SES email")
+        if not aws_ses_from:
+            raise RuntimeError(
+                "AWS_SES_FROM_ADDRESS (or SES_FROM_EMAIL) environment variable is required in production mode. "
+                "Value must be a verified sender email address in AWS SES console (Settings → Verified identities)."
+            )
+    
     key_file, cert_file = ensure_self_signed_cert()
     print("🎮 Batocera Overmind API started")
     print("📖 API Documentation: http://localhost:8000/docs")
     print("🏠 UI: http://localhost:8000/")
     if key_file and cert_file:
         print(f"🔐 Self-signed cert ready: {cert_file} / {key_file}")
+    
+    # Print email provider
+    env_provider = (os.getenv("EMAIL_PROVIDER") or "").strip().lower()
+    if env_provider or environment in {"prod", "production"}:
+        print(f"📧 Email provider: {emailer.provider()}")
+    
     postgres_store.ensure_schema()
     
     # Load fake data if USE_FAKE_DATA environment variable is set to true
