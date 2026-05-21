@@ -802,12 +802,11 @@
                         </div>
                         <div class="menu-label mb-2 d-lg-none">Navigation</div>
                         <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
-                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>Drones</a>
-                            <a href="#/help" role="button" class="btn nav-btn requires-auth" data-tab="help" onclick="event.preventDefault(); switchTab('help', this)"><i class="bi bi-question-circle me-2"></i>Help</a>
-                            <a href="#/notifications" role="button" class="btn nav-btn requires-auth" data-tab="notifications" onclick="event.preventDefault(); switchTab('notifications', this)"><i class="bi bi-bell me-2"></i>Notifications</a>
+                            <a href="#/hive" role="button" class="btn nav-btn active requires-auth" data-tab="hive" onclick="event.preventDefault(); setRoute('hive')"><i class="bi bi-people me-2"></i>Hive</a>
+                            <a href="#/devices" role="button" class="btn nav-btn requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
                             <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-github me-2"></i>GitHub</a>
                             <a href="/docs" target="_blank" rel="noopener noreferrer" role="button" class="btn"><i class="bi bi-braces me-2"></i>API Docs</a>
-                            <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i>Overlord</a>
+                            <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i><span id="profile-nav-label">Profile</span></a>
                             <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
                         </div>
                     </div>
@@ -903,10 +902,15 @@
 	                        <select id="swarm-selector" class="form-select" style="max-width:320px" onchange="selectSwarm(this.value)"></select>
 	                    </div>
                     <section class="dashboard-content">
-                        <div id="devices-tab" class="content-section dashboard-tab active">
+                        <div id="hive-tab" class="content-section dashboard-tab active">
+                            <h3>Hive</h3>
+                            <div id="hive-list" class="device-grid"></div>
+                        </div>
+
+                        <div id="devices-tab" class="content-section dashboard-tab" style="display: none;">
                             <div id="device-list-view">
                                 <div id="pending-connections"></div>
-                                <div id="integration-token-panel" class="card mb-3">
+                                <div id="integration-token-panel" class="card mb-3 mutate-only">
                                     <div class="card-body py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
                                         <div>
                                             <strong>Drone Authorization Token</strong>
@@ -933,10 +937,10 @@
                                         <div id="selected-device-id" class="small text-muted"></div>
                                     </div>
                                     <div class="d-flex flex-wrap align-items-center gap-2">
-                                        <button class="btn btn-outline-secondary btn-sm" onclick="renameDevicePrompt(selectedDeviceId)">
+                                        <button class="btn btn-outline-secondary btn-sm mutate-only" onclick="renameDevicePrompt(selectedDeviceId)">
                                             <i class="bi bi-pencil me-1"></i>Rename
                                         </button>
-                                        <button class="btn btn-outline-danger btn-sm" onclick="deleteSelectedDevice()">
+                                        <button class="btn btn-outline-danger btn-sm mutate-only" onclick="deleteSelectedDevice()">
                                             <i class="bi bi-plug-x me-1"></i>Disconnect
                                         </button>
                                         <div class="btn-group" role="group" aria-label="Drone views">
@@ -992,7 +996,7 @@
                                     <div id="configs-list"></div>
                                 </div>
                                 <div id="device-actions-panel" class="device-subpanel" style="display:none;">
-                                    <div class="d-flex flex-wrap gap-2 mb-3">
+                                    <div class="d-flex flex-wrap gap-2 mb-3 mutate-only">
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Game Logs</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')"><i class="bi bi-file-earmark-code me-1"></i>Emulator Configs</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_log_sources')"><i class="bi bi-journal-text me-1"></i>Log Sources</button>
@@ -1006,40 +1010,66 @@
                         </div>
 
                         <div id="profile-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>Overlord Profile</h3>
+                            <h3>Profile</h3>
                             <div class="device-card">
-                                <div class="form-group">
-                                    <label>Avatar</label>
-                                    <input type="file" id="profile-avatar-input" accept="image/*" onchange="handleAvatarSelected(event)">
+                                <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+                                    <img id="profile-avatar-preview" alt="" style="width:84px;height:84px;border-radius:50%;object-fit:cover;background:#1f2a44;">
+                                    <div class="form-group mb-0" style="flex:1;min-width:220px">
+                                        <label>Avatar</label>
+                                        <input type="file" id="profile-avatar-input" accept="image/*" onchange="handleAvatarSelected(event)">
+                                    </div>
                                 </div>
-                                <div class="form-group">
-                                    <label>Overlord Name</label>
-                                    <input type="text" id="profile-name-input" placeholder="Your Overlord name">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Username</label>
+                                        <input type="text" id="profile-username-input" placeholder="Username">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Display Name</label>
+                                        <input type="text" id="profile-name-input" placeholder="Your display name">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Swarm Name</label>
+                                        <input type="text" id="profile-swarm-name-input" placeholder="Swarm name">
+                                    </div>
                                 </div>
                                 <button class="btn btn-primary" onclick="saveProfile()">Save Profile</button>
                             </div>
-                        </div>
 
-                        <div id="help-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>IPv4 Port Forwarding Help</h3>
-                            <div class="device-card">
+                            <div class="device-card mt-3">
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                                    <h4 class="h5 mb-0">Swarm Access</h4>
+                                    <span id="access-role-badge" class="badge text-bg-secondary"></span>
+                                </div>
+                                <div id="access-invite-panel" class="mb-3 mutate-only">
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <input id="invite-email-input" type="email" class="form-control" style="max-width:320px" placeholder="email@example.com">
+                                        <button type="button" class="btn btn-primary" onclick="inviteOverseer()">Invite Overseer</button>
+                                    </div>
+                                </div>
+                                <div id="swarm-access-list"></div>
+                            </div>
+
+                            <div class="d-flex flex-wrap gap-2 mt-3">
+                                <button class="btn btn-outline-primary" type="button" onclick="toggleProfilePanel('profile-help-panel')"><i class="bi bi-question-circle me-1"></i>Help</button>
+                                <button class="btn btn-outline-primary" type="button" onclick="toggleProfilePanel('profile-notifications-panel')"><i class="bi bi-bell me-1"></i>Notifications</button>
+                            </div>
+
+                            <div id="profile-help-panel" class="device-card mt-3" style="display:none;">
+                                <h4 class="h5">IPv4 Port Forwarding Help</h4>
                                 <p>Port forwarding is only needed for fleet management features that require one Drone to reach another Drone directly, such as syncing ROMs or settings across devices.</p>
                                 <div class="row g-3">
                                     <div class="col-md-6"><strong>Router login IP</strong><div id="help-router-ip" class="text-muted">Usually your gateway IP, such as 192.168.1.1</div></div>
-                                    <div class="col-md-6"><strong>Internal Drone IP</strong><div id="help-internal-ip" class="text-muted">Open a Drone page after it reports alive.</div></div>
+                                    <div class="col-md-6"><strong>Internal Drone IP</strong><div id="help-internal-ip" class="text-muted">Open a Drone page after it reports heartbeat.</div></div>
                                     <div class="col-md-6"><strong>Internal port</strong><div class="text-muted">8443</div></div>
                                     <div class="col-md-6"><strong>External port</strong><div class="text-muted">8443</div></div>
                                     <div class="col-md-6"><strong>Protocol</strong><div class="text-muted">TCP</div></div>
                                     <div class="col-md-6"><strong>Test URL</strong><div id="help-test-url" class="text-muted">https://&lt;public_ip&gt;:8443/health</div></div>
                                 </div>
-                                <hr>
-                                <p>Log in to your router, look for settings named Port Forwarding, NAT, Virtual Server, or Applications. Add a TCP rule from external port 8443 to internal port 8443 on the Drone internal IP.</p>
                             </div>
-                        </div>
 
-                        <div id="notifications-tab" class="content-section dashboard-tab" style="display: none;">
-                            <h3>Notification Settings</h3>
-                            <div class="device-card">
+                            <div id="profile-notifications-panel" class="device-card mt-3" style="display:none;">
+                                <h4 class="h5">Notification Settings</h4>
                                 <label style="display:flex; gap:10px; align-items:center;">
                                     <input type="checkbox" id="notify-slack" onchange="toggleNotificationInputs()"> Notify Slack
                                 </label>
@@ -1100,7 +1130,7 @@
 	            let resetPasswordToken = null;
             let pendingConnections = [];
             let selectedDeviceId = null;
-            let currentTab = 'devices';
+            let currentTab = 'hive';
             let currentDeviceView = 'systems';
             let currentDeviceSystems = {};
             let deviceRomSearchQuery = '';
@@ -1113,10 +1143,9 @@
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
                 auth: ['Overlord Login', 'Access the Overmind'],
-                devices: ['Drones', 'Systems and ROMs'],
-                profile: ['Overlord', 'Account settings'],
-                help: ['Help', 'Port forwarding guide'],
-                notifications: ['Notifications', 'Delivery preferences'],
+                hive: ['Hive', 'Visible swarms and members'],
+                devices: ['My Swarm', 'Systems and ROMs'],
+                profile: ['Profile', 'Account, access, and preferences'],
             };
 
             document.addEventListener('DOMContentLoaded', () => {
@@ -1129,6 +1158,7 @@
 	                    showDashboard();
 	                    loadSwarms();
 	                    loadProfile();
+                    loadHive();
                     loadDevices();
                     loadPendingConnections();
                 } else {
@@ -1223,7 +1253,7 @@
                 if (!token) return;
                 authToken = token;
                 localStorage.setItem('auth_token', authToken);
-	                window.location.hash = '#/devices';
+	                window.location.hash = '#/hive';
 	                showMessage('Overlord authenticated.', 'success');
 	            }
 
@@ -1280,6 +1310,7 @@
 	                    showDashboard();
 	                    renderSwarmSelector();
                     await loadProfile();
+                    await loadHive();
                     await loadDevices();
                     await loadPendingConnections();
                     showMessage('Overlord authenticated.', 'success');
@@ -1358,7 +1389,7 @@
 	                    showMessage('Reset link is invalid or expired.', 'error');
 	                    return;
 	                }
-	                window.location.hash = '#/devices';
+	                window.location.hash = '#/hive';
 	                showLoginForm();
 	                showMessage('Password updated. You can log in now.', 'success');
 	            }
@@ -1385,7 +1416,7 @@
                 document.getElementById('login-form').style.display = 'block';
                 document.getElementById('register-form').style.display = 'none';
                 setPageChrome('auth');
-                window.location.hash = '#/devices';
+                window.location.hash = '#/hive';
             }
 
             function showDashboard() {
@@ -1428,6 +1459,8 @@
 	                }
 	                if (selectedSwarmId) localStorage.setItem('selected_swarm_id', selectedSwarmId);
 	                renderSwarmSelector();
+	                renderProfileUI();
+	                applyRbacUI();
 	            }
 
 	            function renderSwarmSelector() {
@@ -1440,6 +1473,8 @@
 	                selectedSwarmId = swarmId;
 	                localStorage.setItem('selected_swarm_id', selectedSwarmId);
 	                selectedDeviceId = null;
+	                renderProfileUI();
+	                await loadHive();
 	                await loadDevices();
 	                await loadPendingConnections();
 	            }
@@ -1449,8 +1484,59 @@
 	                return swarm ? swarm.role : null;
 	            }
 
+	            function canMutateSwarm() {
+	                return selectedSwarmRole() === 'overlord';
+	            }
+
+	            function applyRbacUI() {
+	                const canMutate = canMutateSwarm();
+	                document.querySelectorAll('.mutate-only').forEach(node => {
+	                    node.style.display = canMutate ? '' : 'none';
+	                });
+	            }
+
 	            function roleLabel(role) {
-	                return ({mastermind_overlord: 'Mastermind Overlord', overlord: 'Overlord', overseer: 'Overseer'}[role] || role || 'Member');
+	                return ({overlord: 'Overlord', overseer: 'Overseer'}[role] || role || 'Member');
+	            }
+
+	            async function loadHive() {
+	                if (!authToken) return;
+	                try {
+	                    const response = await apiGet('/api/hive');
+	                    if (!response.ok) throw new Error('Failed to load hive');
+	                    const data = await response.json();
+	                    renderHive(data.hive || []);
+	                } catch (error) {
+	                    console.error('Error loading hive:', error);
+	                }
+	            }
+
+	            function renderHive(rows) {
+	                const container = document.getElementById('hive-list');
+	                if (!container) return;
+	                if (!rows.length) {
+	                    container.innerHTML = '<div class="empty-state">No swarm memberships yet.</div>';
+	                    return;
+	                }
+	                container.innerHTML = rows.map(row => `
+	                    <div class="card device-tile border shadow-sm">
+	                        <div class="card-body">
+	                            <div class="d-flex align-items-center gap-3 mb-3">
+	                                <img alt="" src="${escapeHtml(row.avatar_data_url || '')}" style="width:52px;height:52px;border-radius:50%;object-fit:cover;background:#1f2a44;" onerror="this.style.visibility='hidden'">
+	                                <div>
+	                                    <h5 class="card-title mb-0">${escapeHtml(row.username || row.full_name || row.email || 'Member')}</h5>
+	                                    <div class="small text-muted">${escapeHtml(row.email || '')}</div>
+	                                </div>
+	                            </div>
+	                            <div class="small text-muted">Swarm</div>
+	                            <div class="fw-semibold">${escapeHtml(row.swarm_name || 'Swarm')}</div>
+	                            <div class="mt-3 d-flex flex-wrap gap-1">
+	                                <span class="badge text-bg-primary">${escapeHtml(roleLabel(row.role))}</span>
+	                                ${row.swarm_id === selectedSwarmId ? '<span class="badge text-bg-success">Selected</span>' : ''}
+	                            </div>
+	                        </div>
+	                    </div>
+	                `).join('');
 	            }
 
 	            function toggleAuthForm() {
@@ -1476,7 +1562,22 @@
 
             function renderProfileUI() {
                 if (!currentProfile) return;
+                const profileLabel = document.getElementById('profile-nav-label');
+                if (profileLabel) profileLabel.textContent = currentProfile.username || currentProfile.full_name || currentProfile.email || 'Profile';
+                const usernameInput = document.getElementById('profile-username-input');
+                if (usernameInput) usernameInput.value = currentProfile.username || '';
                 document.getElementById('profile-name-input').value = currentProfile.full_name || '';
+                const avatarPreview = document.getElementById('profile-avatar-preview');
+                if (avatarPreview) avatarPreview.src = currentProfile.avatar_data_url || '';
+                const swarm = currentSwarms.find(s => s.id === selectedSwarmId);
+                const swarmNameInput = document.getElementById('profile-swarm-name-input');
+                if (swarmNameInput) {
+                    swarmNameInput.value = swarm ? swarm.name || '' : '';
+                    swarmNameInput.disabled = !canMutateSwarm();
+                    swarmNameInput.title = canMutateSwarm() ? '' : 'Only the Overlord can rename the swarm.';
+                }
+                const roleBadge = document.getElementById('access-role-badge');
+                if (roleBadge) roleBadge.textContent = roleLabel(selectedSwarmRole());
 
                 const ns = currentProfile.notification_settings || {};
                 document.getElementById('notify-slack').checked = !!ns.notify_slack;
@@ -1490,6 +1591,13 @@
                 document.getElementById('notify-type-device-offline').checked = !!types.device_offline;
                 document.getElementById('notify-type-sync-failure').checked = !!types.sync_failure;
                 toggleNotificationInputs();
+                applyRbacUI();
+                loadSwarmAccess();
+            }
+
+            function toggleProfilePanel(id) {
+                const panel = document.getElementById(id);
+                if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
             }
 
             function toggleNotificationInputs() {
@@ -1505,26 +1613,130 @@
                 const file = event.target.files && event.target.files[0];
                 if (!file) return;
                 const reader = new FileReader();
-                reader.onload = async () => {
-                    await saveProfile(reader.result);
-                };
+                reader.onload = () => showAvatarCropModal(reader.result);
                 reader.readAsDataURL(file);
+            }
+
+            function showAvatarCropModal(dataUrl) {
+                const old = document.getElementById('avatar-crop-overlay');
+                if (old) old.remove();
+                const overlay = document.createElement('div');
+                overlay.id = 'avatar-crop-overlay';
+                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:99999;display:flex;align-items:center;justify-content:center;';
+                overlay.innerHTML = `
+                    <div class="card" style="max-width:420px;width:92%;background:var(--admin-surface);border-color:var(--admin-border);">
+                        <div class="card-body">
+                            <h5>Crop Avatar</h5>
+                            <canvas id="avatar-crop-canvas" width="320" height="320" style="width:100%;max-width:320px;display:block;margin:0 auto;border-radius:50%;background:#0b1020;"></canvas>
+                            <div class="d-flex justify-content-end gap-2 mt-3">
+                                <button class="btn btn-outline-secondary" type="button" id="avatar-cancel-btn">Cancel</button>
+                                <button class="btn btn-primary" type="button" id="avatar-accept-btn">Use Avatar</button>
+                            </div>
+                        </div>
+                    </div>`;
+                document.body.appendChild(overlay);
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.getElementById('avatar-crop-canvas');
+                    const ctx = canvas.getContext('2d');
+                    ctx.clearRect(0, 0, 320, 320);
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.arc(160, 160, 160, 0, Math.PI * 2);
+                    ctx.clip();
+                    const size = Math.min(img.width, img.height);
+                    const sx = (img.width - size) / 2;
+                    const sy = (img.height - size) / 2;
+                    ctx.drawImage(img, sx, sy, size, size, 0, 0, 320, 320);
+                    ctx.restore();
+                };
+                img.src = dataUrl;
+                document.getElementById('avatar-cancel-btn').onclick = () => overlay.remove();
+                document.getElementById('avatar-accept-btn').onclick = () => {
+                    const canvas = document.getElementById('avatar-crop-canvas');
+                    currentProfile.avatar_data_url = canvas.toDataURL('image/png');
+                    renderProfileUI();
+                    overlay.remove();
+                };
             }
 
             async function saveProfile(avatarDataUrlOverride = null) {
                 try {
                     const payload = {
+                        username: document.getElementById('profile-username-input').value.trim() || null,
                         full_name: document.getElementById('profile-name-input').value.trim() || null,
                     };
-                    if (avatarDataUrlOverride !== null) payload.avatar_data_url = avatarDataUrlOverride;
+                    const avatarValue = avatarDataUrlOverride !== null ? avatarDataUrlOverride : currentProfile.avatar_data_url;
+                    if (avatarValue) payload.avatar_data_url = avatarValue;
                     const response = await apiPatch('/api/profile', payload);
                     if (!response.ok) throw new Error('Failed to save profile');
                     currentProfile = await response.json();
+                    const swarmName = document.getElementById('profile-swarm-name-input').value.trim();
+                    if (selectedSwarmId && canMutateSwarm() && swarmName) {
+                        const swarmResponse = await apiPatch(`/api/swarms/${selectedSwarmId}`, { name: swarmName });
+                        if (!swarmResponse.ok) throw new Error('Failed to save swarm name');
+                        await loadSwarms();
+                    }
                     renderProfileUI();
+                    await loadHive();
                     showMessage('Profile updated.', 'success');
                 } catch (error) {
                     console.error('Error saving profile:', error);
+                    showMessage(error.message || 'Profile save failed.', 'error');
                 }
+            }
+
+            async function loadSwarmAccess() {
+                const container = document.getElementById('swarm-access-list');
+                if (!container || !selectedSwarmId || !authToken) return;
+                try {
+                    const response = await apiGet(`/api/swarms/${selectedSwarmId}/access`);
+                    if (!response.ok) throw new Error('Failed to load swarm access');
+                    const access = (await response.json()).access || {};
+                    const members = access.members || [];
+                    const invites = access.invitations || [];
+                    container.innerHTML = `
+                        <div class="table-responsive"><table class="table table-sm align-middle">
+                            <thead><tr><th>Email</th><th>Role</th><th>Registration</th><th>Status</th><th></th></tr></thead>
+                            <tbody>
+                                ${members.map(m => `<tr><td>${escapeHtml(m.email || '')}</td><td>${escapeHtml(roleLabel(m.role))}</td><td>registered</td><td>${escapeHtml(m.status || 'accepted')}</td><td>${canMutateSwarm() && m.role !== 'overlord' ? `<button class="btn btn-outline-danger btn-sm" onclick="removeSwarmMember('${escapeHtml(m.user_id)}')">Remove</button>` : ''}</td></tr>`).join('')}
+                                ${invites.map(i => `<tr><td>${escapeHtml(i.email || '')}</td><td>${escapeHtml(roleLabel(i.role))}</td><td>${escapeHtml(i.registration_status || 'invited')}</td><td>${escapeHtml(i.status || 'pending')}</td><td></td></tr>`).join('')}
+                            </tbody>
+                        </table></div>
+                    `;
+                } catch (error) {
+                    container.innerHTML = '<div class="empty-state">Unable to load swarm access.</div>';
+                }
+            }
+
+            async function inviteOverseer() {
+                const input = document.getElementById('invite-email-input');
+                const email = (input.value || '').trim();
+                if (!email || !selectedSwarmId) return;
+                try {
+                    const response = await fetch(`/api/swarms/${selectedSwarmId}/invitations`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
+                        body: JSON.stringify({ email })
+                    });
+                    if (!response.ok) throw new Error('Invite failed');
+                    input.value = '';
+                    await loadSwarmAccess();
+                    showMessage('Overseer invitation sent.', 'success');
+                } catch (error) {
+                    showMessage(error.message || 'Invite failed.', 'error');
+                }
+            }
+
+            async function removeSwarmMember(userId) {
+                if (!selectedSwarmId || !window.confirm('Remove this user from the swarm?')) return;
+                const response = await apiDelete(`/api/swarms/${selectedSwarmId}/members/${userId}`);
+                if (!response.ok) {
+                    showMessage('Unable to remove user.', 'error');
+                    return;
+                }
+                await loadSwarmAccess();
+                showMessage('Swarm access removed.', 'success');
             }
 
             async function saveNotificationSettings() {
@@ -1586,6 +1798,10 @@
                 const container = document.getElementById('pending-connections');
                 if (!container) return;
                 if (!pendingConnections.length) {
+                    container.innerHTML = '';
+                    return;
+                }
+                if (!canMutateSwarm()) {
                     container.innerHTML = '';
                     return;
                 }
@@ -2616,14 +2832,14 @@
             }
 
             function parseRoute() {
-                const raw = window.location.hash || '#/devices';
+                const raw = window.location.hash || '#/hive';
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
-                const allowed = ['devices', 'profile', 'help', 'notifications'];
+                const allowed = ['hive', 'devices', 'profile'];
                 if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
-                const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
+                const tab = allowed.includes(parts[0]) ? parts[0] : 'hive';
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
                 const deviceView = tab === 'devices' && ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
                 return { tab, deviceId, deviceView };
@@ -2779,7 +2995,7 @@
             }
 
             function setPageChrome(tabName) {
-                const meta = pageMeta[tabName] || pageMeta.devices;
+                const meta = pageMeta[tabName] || pageMeta.hive;
                 const title = document.getElementById('page-title');
                 const subtitle = document.getElementById('page-subtitle');
                 if (title) title.textContent = meta[0];
@@ -2796,10 +3012,9 @@
                 activateNav(tabName);
                 document.querySelectorAll('.dashboard-tab').forEach(section => { section.style.display = 'none'; });
                 const tabMap = {
+                    hive: 'hive-tab',
                     devices: 'devices-tab',
                     profile: 'profile-tab',
-                    help: 'help-tab',
-                    notifications: 'notifications-tab',
                 };
                 const tabElement = document.getElementById(tabMap[tabName]);
                 if (tabElement) tabElement.style.display = 'block';
@@ -2807,10 +3022,14 @@
                 if (tabName === 'devices') {
                     updateSelectedDeviceWorkspace();
                     startDevicesPolling();
+                } else if (tabName === 'hive') {
+                    loadHive();
+                    stopDevicesPolling();
                 } else {
                     stopDevicesPolling();
                 }
-                if (tabName === 'profile' || tabName === 'notifications') renderProfileUI();
+                if (tabName === 'profile') renderProfileUI();
+                applyRbacUI();
                 setPageChrome(tabName);
                 if (updateUrl) setRoute(tabName);
             }

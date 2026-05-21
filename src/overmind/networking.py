@@ -1,4 +1,4 @@
-"""Network payload normalization for Drone alive messages."""
+"""Network payload normalization for Drone heartbeat messages."""
 
 from __future__ import annotations
 

@@ -23,6 +23,7 @@ from overmind.models import (
 from overmind.db import db
 from overmind import auth
 from overmind import emailer
+from overmind.drone_ca import sign_drone_csr
 from overmind.drone_security import generate_drone_token, hash_drone_token
 from overmind.postgres_store import database_url, postgres_store
 
@@ -41,6 +42,8 @@ TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+OWNER_ROLE = "overlord"
+READONLY_ROLE = "overseer"
 
 app = FastAPI(
     title="Batocera Overmind API",
@@ -270,7 +273,10 @@ def selected_swarm_id(user: dict, swarm_id: Optional[str] = None) -> str:
 
 
 def require_swarm_role(user: dict, swarm_id: str, roles: set[str]) -> dict:
+    normalized_roles = {OWNER_ROLE if role == "overlord" else role for role in roles}
     member = db.require_swarm_role(swarm_id, user["id"], roles)
+    if not member:
+        member = db.require_swarm_role(swarm_id, user["id"], normalized_roles)
     if not member:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient swarm permission")
     return member
@@ -575,7 +581,7 @@ async def list_swarms(authorization: Optional[str] = Header(default=None)):
 async def create_swarm(payload: SwarmCreateRequest, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     swarm = db.create_swarm(user["id"], payload.name)
-    return {"swarm": {**swarm, "role": "mastermind_overlord"}}
+    return {"swarm": {**swarm, "role": OWNER_ROLE}}
 
 
 @app.get("/api/swarms/{swarm_id}/access")
@@ -591,8 +597,8 @@ async def get_swarm_access(swarm_id: str, authorization: Optional[str] = Header(
 async def invite_swarm_member(swarm_id: str, payload: SwarmInviteRequest, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
-    require_swarm_role(user, swarm_id, {"mastermind_overlord"})
-    role = payload.role.lower()
+    require_swarm_role(user, swarm_id, {OWNER_ROLE})
+    role = READONLY_ROLE
     raw_token = secrets.token_urlsafe(32)
     invite = db.invite_to_swarm(
         swarm_id,
@@ -624,7 +630,7 @@ async def accept_invitation(payload: dict, authorization: Optional[str] = Header
 async def remove_swarm_member(swarm_id: str, target_user_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
-    require_swarm_role(user, swarm_id, {"mastermind_overlord"})
+    require_swarm_role(user, swarm_id, {"overlord"})
     if not db.remove_swarm_member(swarm_id, target_user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swarm member not found")
     return {"status": "removed"}
@@ -634,13 +640,29 @@ async def remove_swarm_member(swarm_id: str, target_user_id: str, authorization:
 async def update_swarm_member(swarm_id: str, target_user_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
-    require_swarm_role(user, swarm_id, {"mastermind_overlord"})
+    require_swarm_role(user, swarm_id, {OWNER_ROLE})
     role = str(payload.get("role") or "").lower()
-    if role not in {"overlord", "overseer"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="role must be overlord or overseer")
+    if role != READONLY_ROLE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="role must be overseer")
     if not db.update_swarm_member_role(swarm_id, target_user_id, role):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swarm member not found")
     return {"status": "updated", "role": role}
+
+
+@app.patch("/api/swarms/{swarm_id}")
+async def update_swarm(swarm_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    selected_swarm_id(user, swarm_id)
+    require_swarm_role(user, swarm_id, {OWNER_ROLE})
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="name is required")
+    if len(name) > 80:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="name must be 80 characters or fewer")
+    swarm = db.update_swarm_name(swarm_id, name)
+    if not swarm:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swarm not found")
+    return {"swarm": {**swarm, "role": (db.get_swarm_member(swarm_id, user["id"]) or {}).get("role")}}
 
 
 # ==================== Device Management ====================
@@ -744,7 +766,7 @@ async def list_drone_connections(swarm_id: Optional[str] = None, authorization: 
     """List pending drone connection attempts for the Overlord."""
     user = get_current_user(authorization)
     sid = selected_swarm_id(user, swarm_id)
-    require_swarm_role(user, sid, {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, sid, {"overlord"})
     return {"connections": db.get_pending_drone_connections(user["id"])}
 
 
@@ -753,7 +775,7 @@ async def accept_drone_connection(device_id: str, authorization: Optional[str] =
     """Accept a pending drone connection."""
     user = get_current_user(authorization)
     sid = selected_swarm_id(user)
-    require_swarm_role(user, sid, {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, sid, {"overlord"})
     device = db.accept_pending_drone_connection(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drone connection not found")
@@ -769,7 +791,7 @@ async def deny_drone_connection(device_id: str, authorization: Optional[str] = H
     """Deny a pending drone connection."""
     user = get_current_user(authorization)
     sid = selected_swarm_id(user)
-    require_swarm_role(user, sid, {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, sid, {"overlord"})
     if not db.deny_pending_drone_connection(user["id"], device_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drone connection not found")
     return {"message": "Drone connection denied.", "device_id": device_id}
@@ -820,6 +842,33 @@ async def get_peer_certificate(device_id: str, peer_id: str, authorization: Opti
     return {"device_id": peer_id, "certificate_pem": public_cert, "metadata": safe_meta}
 
 
+@app.post("/api/devices/{device_id}/certificate/sign")
+async def sign_device_certificate(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Sign a CSR for an already approved Drone."""
+    device = get_current_drone(device_id, authorization)
+    csr_pem = str(payload.get("csr_pem") or "")
+    if "BEGIN CERTIFICATE REQUEST" not in csr_pem:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="csr_pem is required")
+    try:
+        signed = sign_drone_csr(csr_pem, device_id, int(payload.get("days") or 365))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSR could not be signed")
+    device.setdefault("certificate", {})
+    device["certificate"]["overmind_signed_at"] = datetime.utcnow()
+    device["certificate"]["serial_number"] = signed.get("serial_number")
+    db._persist_state()
+    return signed
+
+
+@app.post("/api/devices/{device_id}/disconnect")
+async def disconnect_device_from_drone(device_id: str, authorization: Optional[str] = Header(default=None)):
+    """Allow an approved Drone to disconnect itself from its swarm."""
+    device = get_current_drone(device_id, authorization)
+    if not db.delete_device(device["user_id"], device_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"status": "disconnected", "device_id": device_id}
+
+
 @app.post("/api/devices/{device_id}/token/rotate")
 async def rotate_device_token(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Rotate a Drone bearer token. The raw value is returned once."""
@@ -827,7 +876,7 @@ async def rotate_device_token(device_id: str, authorization: Optional[str] = Hea
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
     rotated = db.rotate_device_token(device["user_id"], device_id)
     if not rotated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
@@ -845,7 +894,7 @@ async def rename_device(
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
 
     new_name = (payload.get("device_name") or "").strip()
     if not new_name:
@@ -867,7 +916,7 @@ async def update_device_auto_sync(
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
     systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
     policy = db.update_device_auto_sync_policy(device["user_id"], device_id, bool(payload.get("enabled")), systems)
     if policy is None:
@@ -882,7 +931,7 @@ async def delete_device(device_id: str, authorization: Optional[str] = Header(de
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
     if not db.delete_device(user["id"], device_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"message": "Device deleted successfully", "device_id": device_id}
@@ -912,7 +961,7 @@ async def create_device_action(
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
     action_type = str(payload.get("action") or "").strip().lower()
     if action_type == "reboot":
         action_type = "restart"
@@ -932,8 +981,8 @@ async def claim_device_action(device_id: str, payload: dict, authorization: Opti
     return {"actions": actions, "action": actions[0] if actions else None}
 
 
-@app.post("/api/devices/{device_id}/alive")
-async def drone_alive(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/devices/{device_id}/heartbeat")
+async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     """Update drone last-seen and return the next pending action, if any."""
     device = get_current_drone(device_id, authorization)
     db.update_device_last_seen(
@@ -1034,6 +1083,7 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
     return {
         "id": user["id"],
         "email": user["email"],
+        "username": user.get("username"),
         "full_name": user.get("full_name"),
         "avatar_data_url": user.get("avatar_data_url"),
         "fleet_settings": user.get("fleet_settings", {}),
@@ -1047,9 +1097,10 @@ async def update_profile(payload: dict, authorization: Optional[str] = Header(de
     user = get_current_user(authorization)
     user_id = user["id"]
 
-    if "full_name" in payload or "avatar_data_url" in payload:
+    if "username" in payload or "full_name" in payload or "avatar_data_url" in payload:
         db.update_user_profile(
             user_id,
+            username=payload.get("username") if "username" in payload else None,
             full_name=payload.get("full_name") if "full_name" in payload else None,
             avatar_data_url=payload.get("avatar_data_url") if "avatar_data_url" in payload else None,
         )
@@ -1064,11 +1115,34 @@ async def update_profile(payload: dict, authorization: Optional[str] = Header(de
     return {
         "id": updated["id"],
         "email": updated["email"],
+        "username": updated.get("username"),
         "full_name": updated.get("full_name"),
         "avatar_data_url": updated.get("avatar_data_url"),
         "fleet_settings": updated.get("fleet_settings", {}),
         "notification_settings": updated.get("notification_settings", {}),
     }
+
+
+@app.get("/api/hive")
+async def get_hive(authorization: Optional[str] = Header(default=None)):
+    """Return swarms and visible members for the authenticated user."""
+    user = get_current_user(authorization)
+    swarms = db.get_user_swarms(user["id"])
+    rows = []
+    for swarm in swarms:
+        access = db.list_swarm_access(swarm["id"])
+        for member in access.get("members", []):
+            rows.append({
+                "swarm_id": swarm["id"],
+                "swarm_name": swarm.get("name"),
+                "current": swarm["id"] == db.default_swarm_id(user["id"]),
+                "role": member.get("role"),
+                "email": member.get("email"),
+                "username": member.get("username"),
+                "full_name": member.get("full_name"),
+                "avatar_data_url": (db.get_user(member.get("user_id")) or {}).get("avatar_data_url"),
+            })
+    return {"hive": rows, "swarms": swarms}
 
 
 # ==================== ROM Management ====================
@@ -1087,7 +1161,7 @@ async def update_device_roms(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
     
     rom_ids = db.add_roms(device_id, rom_data.system_name, rom_data.roms)
     
@@ -1227,7 +1301,7 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
     system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
     rom_path = str(payload.get("file_path") or payload.get("rom_name") or "").strip()
     if not system_name or not rom_path:
@@ -1260,7 +1334,7 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
     system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
     if not system_name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name is required")
@@ -1347,7 +1421,7 @@ async def log_gameplay(
             detail="Device not found"
         )
     
-    require_swarm_role(user, device["swarm_id"], {"mastermind_overlord", "overlord"})
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
     gamelog_id = db.log_gameplay(
         device_id,
         gameplay_data.system_name,

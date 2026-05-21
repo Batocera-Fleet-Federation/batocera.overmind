@@ -63,7 +63,7 @@ class SwarmCreateRequest(BaseModel):
 
 class SwarmInviteRequest(BaseModel):
     email: EmailStr
-    role: str = Field(..., pattern="^(overlord|overseer|Overlord|Overseer)$")
+    role: Optional[str] = None
 
 
 class User(BaseModel):

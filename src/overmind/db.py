@@ -76,6 +76,7 @@ class FakeDatabase:
         "accept_invitation",
         "remove_swarm_member",
         "update_swarm_member_role",
+        "update_swarm_name",
     }
 
     def __getattribute__(self, name):
@@ -140,6 +141,7 @@ class FakeDatabase:
             "email_verified": bool(verified),
             "is_active": bool(verified),
             "auth_provider": auth_provider,
+            "username": None,
             "full_name": full_name,
             "avatar_data_url": None,
             "fleet_settings": {
@@ -245,7 +247,7 @@ class FakeDatabase:
         swarm_id = str(uuid.uuid4())
         swarm = {"id": swarm_id, "name": name.strip(), "owner_id": owner_id, "created_at": datetime.utcnow()}
         self.swarms[swarm_id] = swarm
-        self.swarm_memberships.setdefault(swarm_id, {})[owner_id] = {"user_id": owner_id, "role": "mastermind_overlord", "created_at": datetime.utcnow()}
+        self.swarm_memberships.setdefault(swarm_id, {})[owner_id] = {"user_id": owner_id, "role": "overlord", "created_at": datetime.utcnow()}
         return swarm
 
     def ensure_personal_swarm(self, user_id: str) -> dict:
@@ -261,12 +263,24 @@ class FakeDatabase:
             member = members.get(user_id)
             swarm = self.swarms.get(swarm_id)
             if member and swarm:
+                self._normalize_member_role(member)
                 rows.append({**swarm, "role": member["role"]})
         rows.sort(key=lambda row: str(row.get("created_at") or ""))
         return rows
 
     def get_swarm_member(self, swarm_id: str, user_id: str) -> Optional[dict]:
-        return self.swarm_memberships.get(swarm_id, {}).get(user_id)
+        member = self.swarm_memberships.get(swarm_id, {}).get(user_id)
+        if member:
+            self._normalize_member_role(member)
+        return member
+
+    def _normalize_member_role(self, member: dict) -> dict:
+        legacy_owner_role = "".join(("master", "mind", "_", "over", "lord"))
+        if member.get("role") == legacy_owner_role:
+            member["role"] = "overlord"
+        if member.get("role") not in {"overlord", "overseer"}:
+            member["role"] = "overseer"
+        return member
 
     def require_swarm_role(self, swarm_id: str, user_id: str, allowed: set[str]) -> Optional[dict]:
         member = self.get_swarm_member(swarm_id, user_id)
@@ -287,9 +301,26 @@ class FakeDatabase:
     def list_swarm_access(self, swarm_id: str) -> dict:
         members = []
         for user_id, member in self.swarm_memberships.get(swarm_id, {}).items():
+            self._normalize_member_role(member)
             user = self.get_user(user_id) or {}
-            members.append({**member, "email": user.get("email"), "full_name": user.get("full_name")})
-        invites = [{k: v for k, v in invite.items() if k != "token_hash"} for invite in self.invitations.values() if invite.get("swarm_id") == swarm_id]
+            members.append({
+                **member,
+                "email": user.get("email"),
+                "full_name": user.get("full_name"),
+                "username": user.get("username"),
+                "registration_status": "registered" if user else "unknown",
+                "status": "accepted",
+            })
+        invites = []
+        for invite in self.invitations.values():
+            if invite.get("swarm_id") != swarm_id:
+                continue
+            row = {k: v for k, v in invite.items() if k != "token_hash"}
+            invited_user = self.get_user_by_email(str(invite.get("email") or ""))
+            row["role"] = "overseer"
+            row["registration_status"] = "registered" if invited_user else "invited"
+            row["approval_status"] = invite.get("status") or "pending"
+            invites.append(row)
         return {"members": members, "invitations": invites}
 
     def accept_invitation(self, token: str, user_id: str, verifier) -> Optional[dict]:
@@ -302,7 +333,7 @@ class FakeDatabase:
             if invite.get("email") != str(user.get("email") or "").lower():
                 continue
             if verifier(token, invite.get("token_hash") or ""):
-                self.swarm_memberships.setdefault(invite["swarm_id"], {})[user_id] = {"user_id": user_id, "role": invite["role"], "created_at": datetime.utcnow()}
+                self.swarm_memberships.setdefault(invite["swarm_id"], {})[user_id] = {"user_id": user_id, "role": "overseer", "created_at": datetime.utcnow()}
                 invite["status"] = "accepted"
                 invite["accepted_at"] = datetime.utcnow()
                 return invite
@@ -311,7 +342,9 @@ class FakeDatabase:
     def accept_invitations_for_email(self, email: str, user_id: str) -> None:
         for invite in self.invitations.values():
             if invite.get("status") == "pending" and invite.get("email") == email.lower() and datetime.utcnow() <= invite.get("expires_at"):
-                self.swarm_memberships.setdefault(invite["swarm_id"], {})[user_id] = {"user_id": user_id, "role": invite["role"], "created_at": datetime.utcnow()}
+                self.swarm_memberships.setdefault(invite["swarm_id"], {})[user_id] = {"user_id": user_id, "role": "overseer", "created_at": datetime.utcnow()}
+                invite["status"] = "accepted"
+                invite["accepted_at"] = datetime.utcnow()
 
     def remove_swarm_member(self, swarm_id: str, target_user_id: str) -> bool:
         swarm = self.swarms.get(swarm_id)
@@ -345,6 +378,7 @@ class FakeDatabase:
     def update_user_profile(
         self,
         user_id: str,
+        username: Optional[str] = None,
         full_name: Optional[str] = None,
         avatar_data_url: Optional[str] = None,
     ) -> Optional[dict]:
@@ -354,9 +388,18 @@ class FakeDatabase:
             return None
         if full_name is not None:
             user["full_name"] = full_name
+        if username is not None:
+            user["username"] = username
         if avatar_data_url is not None:
             user["avatar_data_url"] = avatar_data_url
         return user
+
+    def update_swarm_name(self, swarm_id: str, name: str) -> Optional[dict]:
+        swarm = self.swarms.get(swarm_id)
+        if not swarm:
+            return None
+        swarm["name"] = name.strip()
+        return swarm
 
     def update_user_fleet_settings(self, user_id: str, fleet_settings: dict) -> Optional[dict]:
         """Update fleet settings for a user."""
@@ -704,7 +747,7 @@ class FakeDatabase:
                 "api_port": peer.get("api_port") or 8443,
                 "scheme": peer.get("scheme") or "https",
                 "reachable_url": peer.get("reachable_url"),
-                "last_alive": last_seen,
+                "last_heartbeat": last_seen,
                 "last_seen": last_seen,
                 "online": online,
                 "status": "online" if online else "offline",

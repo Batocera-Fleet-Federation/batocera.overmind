@@ -177,9 +177,10 @@ def test_swarm_roles_gate_invites_and_mutations(client):
     invite = client.post(
         f"/api/swarms/{swarm_id}/invitations",
         headers={"Authorization": f"Bearer {owner_token}"},
-        json={"email": "viewer@example.com", "role": "overseer"},
+        json={"email": "viewer@example.com", "role": "overlord"},
     )
     assert invite.status_code == 200
+    assert invite.json()["invitation"]["role"] == "overseer"
 
     client.post("/api/auth/register", json={"email": "viewer@example.com", "password": "testpass123"})
     viewer_token = client.post("/api/auth/login", json={"email": "viewer@example.com", "password": "testpass123"}).json()["access_token"]
@@ -195,6 +196,10 @@ def test_swarm_roles_gate_invites_and_mutations(client):
     assert client.get("/api/devices?swarm_id=" + swarm_id, headers={"Authorization": f"Bearer {viewer_token}"}).status_code == 200
     mutate = client.post("/api/devices/swarm-drone/actions", headers={"Authorization": f"Bearer {viewer_token}"}, json={"action": "restart"})
     assert mutate.status_code == 403
+    access = client.get(f"/api/swarms/{swarm_id}/access", headers={"Authorization": f"Bearer {viewer_token}"})
+    assert access.status_code == 200
+    viewer_member = next(row for row in access.json()["access"]["members"] if row["email"] == "viewer@example.com")
+    assert viewer_member["role"] == "overseer"
 
 
 def _device_registration_payload(**overrides):
@@ -314,12 +319,12 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
     assert device["certificate"]["fingerprint"] == "abc123"
     assert "private_key" not in device["certificate"]
 
-    alive_response = client.post(
-        "/api/devices/drone-123/alive",
+    heartbeat_response = client.post(
+        "/api/devices/drone-123/heartbeat",
         headers={"Authorization": f"Bearer {drone_token}"},
         json={"network": {"ipv4": ["192.168.1.50"]}, "reachable_url": "https://bff-drone-a:8443"},
     )
-    assert alive_response.status_code == 200
+    assert heartbeat_response.status_code == 200
 
     cert_response = client.get(
         "/api/devices/drone-123/peer-certificate/drone-123",
@@ -430,7 +435,7 @@ def test_approval_preserves_bound_token_and_heartbeat_succeeds(client):
     assert accept.json()["drone_token"] is None
 
     immediate_heartbeat = client.post(
-        "/api/devices/drone-a/alive",
+        "/api/devices/drone-a/heartbeat",
         headers={"Authorization": f"Bearer {auth_token}"},
         json={"network": {"ipv4": ["192.168.1.50"]}},
     )
@@ -450,7 +455,7 @@ def test_approval_preserves_bound_token_and_heartbeat_succeeds(client):
     assert new_drone_token == old_drone_token == auth_token
 
     current = client.post(
-        "/api/devices/drone-a/alive",
+        "/api/devices/drone-a/heartbeat",
         headers={"Authorization": f"Bearer {new_drone_token}"},
         json={"network": {"ipv4": ["192.168.1.50"]}},
     )
@@ -475,7 +480,7 @@ def test_approval_updates_existing_removed_drone_to_new_bound_token(client):
     assert first.json()["status"] == "pending"
     client.post("/api/drone-connections/drone-a/accept", headers={"Authorization": f"Bearer {user_token}"})
     assert client.post(
-        "/api/devices/drone-a/alive",
+        "/api/devices/drone-a/heartbeat",
         headers={"Authorization": f"Bearer {first_auth}"},
         json={"network": {"ipv4": ["192.168.1.50"]}},
     ).status_code == 200
@@ -494,12 +499,12 @@ def test_approval_updates_existing_removed_drone_to_new_bound_token(client):
     client.post("/api/drone-connections/drone-a/accept", headers={"Authorization": f"Bearer {user_token}"})
 
     assert client.post(
-        "/api/devices/drone-a/alive",
+        "/api/devices/drone-a/heartbeat",
         headers={"Authorization": f"Bearer {second_auth}"},
         json={"network": {"ipv4": ["192.168.1.50"]}},
     ).status_code == 200
     assert client.post(
-        "/api/devices/drone-a/alive",
+        "/api/devices/drone-a/heartbeat",
         headers={"Authorization": f"Bearer {first_auth}"},
         json={"network": {"ipv4": ["192.168.1.50"]}},
     ).status_code == 401
@@ -533,12 +538,12 @@ def test_revoked_integration_token_invalidates_backed_drone_token(client):
         headers={"Authorization": f"Bearer {user_token}"},
     )
     assert revoke.status_code == 200
-    alive = client.post(
-        "/api/devices/drone-a/alive",
+    heartbeat = client.post(
+        "/api/devices/drone-a/heartbeat",
         headers={"Authorization": f"Bearer {drone_token}"},
         json={"network": {"ipv4": ["192.168.1.50"]}},
     )
-    assert alive.status_code == 401
+    assert heartbeat.status_code == 401
 
 
 def test_deny_pending_drone_connection(client):
@@ -844,8 +849,8 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
     assert create_response.status_code == 200
     action_id = create_response.json()["action"]["id"]
 
-    alive_response = client.post(
-        "/api/devices/arcade-cabinet-001/alive",
+    heartbeat_response = client.post(
+        "/api/devices/arcade-cabinet-001/heartbeat",
         headers={"Authorization": "Bearer demo-local-drone-token"},
         json={
             "device_id": "arcade-cabinet-001",
@@ -853,9 +858,9 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
             "rom_systems": [{"name": "snes"}],
         },
     )
-    assert alive_response.status_code == 200
-    assert alive_response.json()["action"]["id"] == action_id
-    assert alive_response.json()["action"]["status"] == "in_progress"
+    assert heartbeat_response.status_code == 200
+    assert heartbeat_response.json()["action"]["id"] == action_id
+    assert heartbeat_response.json()["action"]["status"] == "in_progress"
 
     result = {
         "type": "rom_metadata",
@@ -886,8 +891,8 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
     )
     token = login_response.json()["access_token"]
 
-    alive_response = client.post(
-        "/api/devices/arcade-cabinet-001/alive",
+    heartbeat_response = client.post(
+        "/api/devices/arcade-cabinet-001/heartbeat",
         headers={"Authorization": "Bearer demo-local-drone-token"},
         json={
             "device_id": "arcade-cabinet-001",
@@ -900,7 +905,7 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
             },
         },
     )
-    assert alive_response.status_code == 200
+    assert heartbeat_response.status_code == 200
 
     first_peer = client.post(
         "/api/devices/arcade-cabinet-001/peer-checks",
@@ -942,7 +947,7 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
     assert detail["peer_checks"][0]["target_name"]
 
 
-def test_alive_persists_rom_metadata_and_swarm_reachable_url(client):
+def test_heartbeat_persists_rom_metadata_and_swarm_reachable_url(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
@@ -950,8 +955,8 @@ def test_alive_persists_rom_metadata_and_swarm_reachable_url(client):
     )
     token = login_response.json()["access_token"]
 
-    alive_response = client.post(
-        "/api/devices/arcade-cabinet-001/alive",
+    heartbeat_response = client.post(
+        "/api/devices/arcade-cabinet-001/heartbeat",
         headers={"Authorization": "Bearer demo-local-drone-token"},
         json={
             "device_id": "arcade-cabinet-001",
@@ -969,8 +974,8 @@ def test_alive_persists_rom_metadata_and_swarm_reachable_url(client):
             },
         },
     )
-    assert alive_response.status_code == 200
-    swarm_peer = next(row for row in alive_response.json()["swarm"] if row["device_id"] == "arcade-cabinet-001")
+    assert heartbeat_response.status_code == 200
+    swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["device_id"] == "arcade-cabinet-001")
     assert swarm_peer["reachable_url"] == "https://bff-drone-a:8443"
 
     roms_response = client.get(
@@ -1017,6 +1022,7 @@ def test_profile_and_settings_update(client):
         headers={"Authorization": f"Bearer {token}"},
         json={
             "full_name": "Demo Updated",
+            "username": "demo-hive",
             "avatar_data_url": "data:image/png;base64,AAA",
             "fleet_settings": {"auto_sync_roms": False},
             "notification_settings": {
@@ -1029,10 +1035,20 @@ def test_profile_and_settings_update(client):
     assert update_response.status_code == 200
     data = update_response.json()
     assert data["full_name"] == "Demo Updated"
+    assert data["username"] == "demo-hive"
     assert data["avatar_data_url"].startswith("data:image/png;base64")
     assert data["fleet_settings"]["auto_sync_roms"] is False
     assert data["notification_settings"]["notify_slack"] is True
     assert data["notification_settings"]["types"]["gamelist_update"] is False
+
+    swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {token}"}).json()["swarms"][0]["id"]
+    swarm_update = client.patch(
+        f"/api/swarms/{swarm_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "Demo Swarm"},
+    )
+    assert swarm_update.status_code == 200
+    assert swarm_update.json()["swarm"]["name"] == "Demo Swarm"
 
 
 if __name__ == "__main__":
