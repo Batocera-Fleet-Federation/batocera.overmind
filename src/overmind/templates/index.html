@@ -417,7 +417,7 @@
             <li>Log in to your local Drone app.</li>
             <li>Open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>.</li>
             <li>Set <strong>Overmind URL</strong> to <code>https://www.batocera-swarm.com</code>.</li>
-            <li>Set <strong>Overmind Email</strong> to your Overmind email address.</li>
+            <li>Set <strong>Drone Name</strong> to the name you want shown in Overmind.</li>
             <li>Paste the generated token into <strong>Authorization Token</strong>, then save.</li>
           </ol>
 
@@ -1483,7 +1483,6 @@
                 <div id="dashboard-section" class="content-section" style="display: none;">
 	                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
 	                        <div id="selected-device-summary" class="text-muted"></div>
-	                        <select id="swarm-selector" class="form-select" style="max-width:320px" onchange="selectSwarm(this.value)"></select>
 	                    </div>
                     <section class="dashboard-content">
                         <div id="devices-tab" class="content-section dashboard-tab active">
@@ -1516,9 +1515,6 @@
                                         <div id="selected-device-id" class="small text-muted"></div>
                                     </div>
                                     <div class="d-flex flex-wrap align-items-center gap-2">
-                                        <button class="btn btn-outline-secondary btn-sm mutate-only" onclick="renameDevicePrompt(selectedDeviceId)">
-                                            <i class="bi bi-pencil me-1"></i>Rename
-                                        </button>
                                         <button class="btn btn-outline-danger btn-sm mutate-only" onclick="deleteSelectedDevice()">
                                             <i class="bi bi-plug-x me-1"></i>Disconnect
                                         </button>
@@ -1604,10 +1600,6 @@
                                         <input type="text" id="profile-username-input" placeholder="Username">
                                     </div>
                                     <div class="form-group">
-                                        <label>Display Name</label>
-                                        <input type="text" id="profile-name-input" placeholder="Your display name">
-                                    </div>
-                                    <div class="form-group">
                                         <label>Swarm Name</label>
                                         <input type="text" id="profile-swarm-name-input" placeholder="Swarm name">
                                     </div>
@@ -1629,25 +1621,7 @@
                                 <div id="swarm-access-list"></div>
                             </div>
 
-                            <div class="d-flex flex-wrap gap-2 mt-3">
-                                <button class="btn btn-outline-primary" type="button" onclick="toggleProfilePanel('profile-help-panel')"><i class="bi bi-question-circle me-1"></i>Help</button>
-                                <button class="btn btn-outline-primary" type="button" onclick="toggleProfilePanel('profile-notifications-panel')"><i class="bi bi-bell me-1"></i>Notifications</button>
-                            </div>
-
-                            <div id="profile-help-panel" class="device-card mt-3" style="display:none;">
-                                <h4 class="h5">IPv4 Port Forwarding Help</h4>
-                                <p>Port forwarding is only needed for fleet management features that require one Drone to reach another Drone directly, such as syncing ROMs or settings across devices.</p>
-                                <div class="row g-3">
-                                    <div class="col-md-6"><strong>Router login IP</strong><div id="help-router-ip" class="text-muted">Usually your gateway IP, such as 192.168.1.1</div></div>
-                                    <div class="col-md-6"><strong>Internal Drone IP</strong><div id="help-internal-ip" class="text-muted">Open a Drone page after it reports heartbeat.</div></div>
-                                    <div class="col-md-6"><strong>Internal port</strong><div class="text-muted">8443</div></div>
-                                    <div class="col-md-6"><strong>External port</strong><div class="text-muted">8443</div></div>
-                                    <div class="col-md-6"><strong>Protocol</strong><div class="text-muted">TCP</div></div>
-                                    <div class="col-md-6"><strong>Test URL</strong><div id="help-test-url" class="text-muted">https://<public_ip>:8443/health</div></div>
-                                </div>
-                            </div>
-
-                            <div id="profile-notifications-panel" class="device-card mt-3" style="display:none;">
+                            <div id="profile-notifications-panel" class="device-card mt-3">
                                 <h4 class="h5">Notification Settings</h4>
                                 <label style="display:flex; gap:10px; align-items:center;">
                                     <input type="checkbox" id="notify-slack" onchange="toggleNotificationInputs()"> Notify Slack
@@ -1736,7 +1710,7 @@
                                             <li>Log in to your local Drone app.</li>
                                             <li>Open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>.</li>
                                             <li>Set <strong>Overmind URL</strong> to <code>https://www.batocera-swarm.com</code>.</li>
-                                            <li>Set <strong>Overmind Email</strong> to your Overmind email address.</li>
+                                            <li>Set <strong>Drone Name</strong> to the name you want shown in Overmind.</li>
                                             <li>Paste the generated token into <strong>Authorization Token</strong>, then save.</li>
                                         </ol>
 
@@ -2168,9 +2142,7 @@
 	            }
 
 	            function renderSwarmSelector() {
-	                const selector = document.getElementById('swarm-selector');
-	                if (!selector) return;
-	                selector.innerHTML = currentSwarms.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === selectedSwarmId ? 'selected' : ''}>${escapeHtml(s.name)} (${escapeHtml(roleLabel(s.role))})</option>`).join('');
+	                return;
 	            }
 
 	            async function selectSwarm(swarmId) {
@@ -2266,10 +2238,9 @@
             function renderProfileUI() {
                 if (!currentProfile) return;
                 const profileLabel = document.getElementById('profile-nav-label');
-                if (profileLabel) profileLabel.textContent = currentProfile.username || currentProfile.full_name || currentProfile.email || 'Profile';
+                if (profileLabel) profileLabel.textContent = currentProfile.username || currentProfile.email || 'Profile';
                 const usernameInput = document.getElementById('profile-username-input');
                 if (usernameInput) usernameInput.value = currentProfile.username || '';
-                document.getElementById('profile-name-input').value = currentProfile.full_name || '';
                 const avatarPreview = document.getElementById('profile-avatar-preview');
                 if (avatarPreview) avatarPreview.src = currentProfile.avatar_data_url || '';
                 const swarm = currentSwarms.find(s => s.id === selectedSwarmId);
@@ -2367,7 +2338,6 @@
                 try {
                     const payload = {
                         username: document.getElementById('profile-username-input').value.trim() || null,
-                        full_name: document.getElementById('profile-name-input').value.trim() || null,
                     };
                     const avatarValue = avatarDataUrlOverride !== null ? avatarDataUrlOverride : currentProfile.avatar_data_url;
                     if (avatarValue) payload.avatar_data_url = avatarValue;
@@ -3667,20 +3637,6 @@
                     .replace(/>/g, '>')
                     .replace(/"/g, '"')
                     .replace(/'/g, '&#39;');
-            }
-
-            async function renameDevicePrompt(deviceId) {
-                if (!deviceId) return;
-                const current = currentDevices.find(d => d.device_id === deviceId);
-                const nextName = window.prompt('Enter Drone name:', current ? current.device_name : '');
-                if (!nextName || !nextName.trim()) return;
-                try {
-                    const response = await apiPatch(`/api/devices/${deviceId}/name`, { device_name: nextName.trim() });
-                    if (!response.ok) throw new Error('Failed to rename device');
-                    await loadDevices();
-                } catch (error) {
-                    console.error('Error renaming device:', error);
-                }
             }
 
             async function deleteSelectedDevice() {

@@ -889,28 +889,6 @@ async def rotate_device_token(device_id: str, authorization: Optional[str] = Hea
     return {"device": device_response(rotated["device"]), "drone_token": rotated["token"]}
 
 
-@app.patch("/api/devices/{device_id}/name")
-async def rename_device(
-    device_id: str,
-    payload: dict,
-    authorization: Optional[str] = Header(default=None),
-):
-    """Rename a device from the UI."""
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
-
-    new_name = (payload.get("device_name") or "").strip()
-    if not new_name:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_name is required")
-
-    db.update_device_name(device_id, new_name)
-    updated = db.get_device_by_device_id(device_id)
-    return {"device_id": updated["device_id"], "device_name": updated["device_name"]}
-
-
 @app.patch("/api/devices/{device_id}/auto-sync")
 async def update_device_auto_sync(
     device_id: str,
@@ -1001,6 +979,9 @@ async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional
         certificate=payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
         system_info=payload.get("system_info") if isinstance(payload.get("system_info"), dict) else None,
     )
+    drone_name = str(payload.get("device_name") or "").strip()
+    if drone_name:
+        db.update_device_name(device_id, drone_name)
     if isinstance(payload.get("rom_metadata"), dict):
         db.store_rom_metadata(device_id, payload["rom_metadata"])
     actions = db.claim_pending_device_actions(device_id)

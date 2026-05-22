@@ -447,15 +447,23 @@ class FakeDatabase:
         return claimed["user"] if claimed else None
 
     def claim_integration_token(self, email: Optional[str], token: Optional[str], device_id: Optional[str]) -> Optional[dict]:
-        if not email or not token:
+        if not token:
             return None
-        user = self.get_user_by_email(email)
-        if not user:
-            return None
-        for entry in self.integration_tokens.get(user["id"], []):
-            if entry.get("revoked_at"):
+        candidates = []
+        if email:
+            user = self.get_user_by_email(email)
+            if user:
+                candidates.append((user["id"], user))
+        else:
+            candidates = [(user_id, self.get_user(user_id)) for user_id in self.integration_tokens.keys()]
+        for user_id, user in candidates:
+            if not user:
                 continue
-            if verify_drone_token(token, entry.get("token_hash")):
+            for entry in self.integration_tokens.get(user_id, []):
+                if entry.get("revoked_at"):
+                    continue
+                if not verify_drone_token(token, entry.get("token_hash")):
+                    continue
                 bound_device = entry.get("bound_device_id")
                 if bound_device and device_id and bound_device != device_id:
                     return None

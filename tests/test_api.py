@@ -351,6 +351,42 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
     assert upload_probe.json()["bytes_received"] == 4096
 
 
+def test_register_device_resolves_owner_from_token_without_email(client):
+    """Drone registration no longer needs the Overmind email when the token is valid."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "token-owner@example.com", "password": "testpass123"},
+    )
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "token-owner@example.com", "password": "testpass123"},
+    )
+    token = login_response.json()["access_token"]
+    token_response = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"label": "Token-only Drone"},
+    )
+    auth_token = token_response.json()["token"]["authorization_token"]
+    payload = _device_registration_payload(
+        authorization_token=auth_token,
+        device_id="token-only-drone",
+        device_name="Token Only Drone",
+    )
+    payload.pop("email", None)
+
+    register_response = client.post(
+        "/api/devices/register",
+        headers={"Authorization": f"Bearer {auth_token}"},
+        json=payload,
+    )
+
+    assert register_response.status_code == 200
+    assert register_response.json()["status"] == "pending"
+    pending_response = client.get("/api/drone-connections", headers={"Authorization": f"Bearer {token}"})
+    assert any(conn["device_id"] == "token-only-drone" for conn in pending_response.json()["connections"])
+
+
 def test_integration_token_onboarding_and_approved_token_claim(client):
     client.post(
         "/api/auth/register",
@@ -663,21 +699,20 @@ def test_demo_seed_exposes_pending_drone_connections(client):
     }
 
 
-def test_rename_device(client):
-    """Device name can be updated from UI/API."""
-    db.populate_fake_data()
-    login_response = client.post(
-        "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
-    )
-    token = login_response.json()["access_token"]
-    rename_response = client.patch(
-        "/api/devices/arcade-cabinet-001/name",
-        headers={"Authorization": f"Bearer {token}"},
+def test_drone_heartbeat_updates_device_name(client):
+    """Device name is controlled by the Drone heartbeat."""
+    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
+    user = db.get_user_by_email("owner@example.com")
+    db.create_device(user["id"], "drone-a", "Old Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    response = client.post(
+        "/api/devices/drone-a/heartbeat",
+        headers={"Authorization": "Bearer drone-token"},
         json={"device_name": "Arcade Alpha"},
     )
-    assert rename_response.status_code == 200
-    assert rename_response.json()["device_name"] == "Arcade Alpha"
+
+    assert response.status_code == 200
+    assert db.get_device_by_device_id("drone-a")["device_name"] == "Arcade Alpha"
 
 
 def test_delete_device_removes_device_and_related_data(client):
