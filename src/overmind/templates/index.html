@@ -369,7 +369,7 @@
 
       <div class="landing-card">
         <h2>What Overmind Does</h2>
-        <p>Think of Overmind as the control room for your retro arcade fleet. Each Batocera machine runs a small Drone helper. Overmind brings those Drones together so you can:</p>
+        <p>Think of Overmind as the control room for your retro arcade fleet. Each Batocera machine runs a small Drone app. Overmind brings those Drones together so you can:</p>
         <ul>
           <li><strong>See machine health:</strong> online status, connection state, and swarm membership.</li>
           <li><strong>Understand game coverage:</strong> which systems and ROMs are present across the fleet.</li>
@@ -383,21 +383,55 @@
         <div class="step">
           <h3>Quick install: Drone on a Batocera machine</h3>
           <ol>
-            <li>Enable networking and SSH on the Batocera device.</li>
-            <li>Download the <em>drone</em> client (from your Overmind releases or the project repo).</li>
-            <li>Place the drone binary in <code>/userdata/drone-app/</code> and make it executable.</li>
-            <li>Configure the drone with your Overmind URL, e.g. <code>https://YOUR-OVERMIND</code>, and start it.</li>
-            <li>On first run the drone will create a registration request — approve it from the Overmind UI to link the device.</li>
+            <li>On the Batocera machine, open a command prompt. You can SSH into the machine, or press <strong>F1</strong> on the Batocera keyboard and open the terminal from the file manager.</li>
+            <li>Copy and run this installer command:</li>
           </ol>
-          <p style="color:var(--admin-muted)">These steps vary slightly by Batocera version; use the built-in file manager or SSH for copy/paste.</p>
+          <div style="margin:.75rem 0 1rem;">
+            <code style="display:block;white-space:normal;word-break:break-all;line-height:1.5;padding:.75rem;">curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash</code>
+          </div>
+          <ol start="3">
+            <li>If you are using <strong>Batocera v43 or newer</strong>, go to <strong>System Settings</strong> &gt; <strong>Services</strong>, then turn on <strong>DRONE_SERVER</strong>.</li>
+            <li>If you are using an <strong>older Batocera version</strong>, reboot the machine after the installer finishes.</li>
+          </ol>
+          <div style="margin:1rem 0;padding:.9rem 1rem;border:1px solid rgba(52,211,153,0.35);background:rgba(52,211,153,0.10);border-radius:.75rem;color:var(--admin-text);font-weight:900;">
+            <i class="bi bi-check-circle me-1" style="color:var(--admin-accent-green);"></i> Done! The Drone app is installed on this Batocera machine.
+          </div>
+          <h4 style="color:var(--admin-text);font-size:1rem;font-weight:900;margin:1rem 0 .5rem;">Open the Drone app on your home network</h4>
+          <ol start="5">
+            <li>From a phone, laptop, or another computer on the same home network, open <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
+            <li>The default hostname is usually <code>batocera</code>, so try <code>https://batocera.local:8443</code> first.</li>
+            <li>If that does not open, check the machine name in Batocera under <strong>Network Settings</strong> &gt; <strong>Hostname</strong>, then replace <code>BATOCERA-HOSTNAME</code> with that name.</li>
+          </ol>
+          <p style="color:var(--admin-muted)">Once the Drone app opens, sign in with the default username <code>batocera</code> and password <code>linux</code>. You can change these credentials from the Drone app after logging in.</p>
+          <p style="color:var(--admin-muted)">After that, this Batocera machine is ready to connect back to Overmind and join your swarm.</p>
         </div>
 
         <div class="step">
-          <h3>Tips & Links</h3>
+          <h3>Connect your Drone to Overmind</h3>
+          <p style="color:var(--admin-muted)">Link the Drone app to your Overmind account so this Batocera machine can join your swarm at <code>www.batocera-swarm.com</code>.</p>
+
+          <h4 style="color:var(--admin-text);font-size:1rem;font-weight:900;margin:1rem 0 .5rem;">Recommended setup order</h4>
+          <ol>
+            <li>Register or sign in at <code>https://www.batocera-swarm.com</code>.</li>
+            <li>Go to <strong>My Swarm</strong> and click <strong>Generate Token</strong>.</li>
+            <li>Log in to your local Drone app.</li>
+            <li>Open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>.</li>
+            <li>Set <strong>Overmind URL</strong> to <code>https://www.batocera-swarm.com</code>.</li>
+            <li>Set <strong>Overmind Email</strong> to your Overmind email address.</li>
+            <li>Paste the generated token into <strong>Authorization Token</strong>, then save.</li>
+          </ol>
+
+          <p style="color:var(--admin-muted)">After saving, Overmind will detect the Drone. Approve it from <strong>My Swarm</strong> to finish adding the machine.</p>
+
+          <h4 style="color:var(--admin-text);font-size:1rem;font-weight:900;margin:1rem 0 .5rem;">Optional: enable file syncing</h4>
+          <p style="color:var(--admin-muted)">Port forwarding is only required for ROM, file, artwork, config, and settings syncing. You can still connect a Drone to Overmind without port forwarding, but Overmind and other Drones will not be able to download ROMs, configs, settings, or files from that machine.</p>
           <ul>
-            <li>Use a stable local IP or DNS name for Overmind so game systems can reliably connect.</li>
-            <li>Keep backups of your <code>userdata</code> folder — Overmind reads metadata but does not replace your backups.</li>
-            <li>If you're testing, use Mailinator or the local email provider before enabling AWS SES.</li>
+            <li>Forward internet traffic on port <code>8443</code> to your Batocera machine.</li>
+            <li>In the Drone app, find your router address under <strong>System Info</strong> &gt; <strong>Router IP Address</strong>, then enter that IP in your browser to log in to your router.</li>
+            <li>In your router, look for <strong>NAT</strong>, <strong>Port Forwarding</strong>, or <strong>Connected Devices</strong>.</li>
+            <li>Find your Batocera machine and forward port <code>8443</code> to its IP address.</li>
+            <li>You can also find the Batocera IP address on the machine under <strong>Network Settings</strong> &gt; <strong>IP Address</strong>.</li>
+            <li>Need help? Open <a href="https://www.youtube.com/results?search_query=How+to+enable+Home+Router+NAT+Port+Forwarding" target="_blank" rel="noopener noreferrer">NAT Port Forwarding Help</a>.</li>
           </ul>
         </div>
       </div>
@@ -1344,7 +1378,7 @@
                         <div class="brand-block pb-3 mb-3 pb-lg-0 mb-lg-0 pe-lg-3">
                             <div class="d-flex align-items-center gap-2">
                                 <span class="brand-mark"><i class="bi bi-controller"></i></span>
-                                <div class="h5 mb-0 brand-title">Batocera Overmind</div>
+                                <a href="/#/home" class="h5 mb-0 brand-title text-decoration-none">Batocera Overmind</a>
                             </div>
                             <span class="resource-links" aria-label="Project resources">
                                 <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" class="resource-icon-link" title="GitHub" aria-label="GitHub"><i class="bi bi-github"></i></a>
@@ -2026,10 +2060,10 @@
                 document.getElementById('login-form').style.display = 'block';
                 document.getElementById('register-form').style.display = 'none';
                 setPageChrome('auth');
-                window.location.hash = '#/hive';
-            }
+	                window.location.href = 'https://www.batocera-swarm.com/#/home';
+	            }
 
-            function showDashboard() {
+	            function showDashboard() {
                 hideLandingShell();
                 document.body.classList.add('is-authenticated');
                 document.getElementById('auth-section').classList.remove('active');
