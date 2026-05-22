@@ -1388,11 +1388,9 @@
                         </div>
                         <div class="menu-label mb-2 d-lg-none">Navigation</div>
                         <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
-                            <a href="#/hive" role="button" class="btn nav-btn active requires-auth" data-tab="hive" onclick="event.preventDefault(); setRoute('hive')"><i class="bi bi-people me-2"></i>Hive</a>
-                            <a href="#/devices" role="button" class="btn nav-btn requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
+                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
 
                             <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i><span id="profile-nav-label">Profile</span></a>
-                            <a href="#/help" role="button" class="btn nav-btn requires-auth" data-tab="help" onclick="event.preventDefault(); setRoute('help')"><i class="bi bi-question-circle me-2"></i>Help</a>
                             <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
                         </div>
                     </div>
@@ -1488,12 +1486,7 @@
 	                        <select id="swarm-selector" class="form-select" style="max-width:320px" onchange="selectSwarm(this.value)"></select>
 	                    </div>
                     <section class="dashboard-content">
-                        <div id="hive-tab" class="content-section dashboard-tab active">
-                            <h3>Hive</h3>
-                            <div id="hive-list" class="device-grid"></div>
-                        </div>
-
-                        <div id="devices-tab" class="content-section dashboard-tab" style="display: none;">
+                        <div id="devices-tab" class="content-section dashboard-tab active">
                             <div id="device-list-view">
                                 <div id="pending-connections"></div>
                                 <div id="integration-token-panel" class="card mb-3 mutate-only">
@@ -1782,7 +1775,7 @@
 	            let resetPasswordToken = null;
             let pendingConnections = [];
             let selectedDeviceId = null;
-            let currentTab = 'hive';
+            let currentTab = 'devices';
             let currentDeviceView = 'systems';
             let currentDeviceSystems = {};
             let deviceRomSearchQuery = '';
@@ -1795,7 +1788,6 @@
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
                 auth: ['Overlord Login', 'Access the Overmind'],
-                hive: ['Hive', 'Visible swarms and members'],
                 devices: ['My Swarm', 'Systems and ROMs'],
                 profile: ['Profile', 'Account, access, and preferences'],
                 help: ['Help', 'Install, connect, and configure Drones'],
@@ -1811,7 +1803,6 @@
 	                    showDashboard();
 	                    loadSwarms();
 	                    loadProfile();
-                    loadHive();
                     loadDevices();
                     loadPendingConnections();
                 } else {
@@ -1963,7 +1954,7 @@
                 if (!token) return;
                 authToken = token;
                 localStorage.setItem('auth_token', authToken);
-	                window.location.hash = '#/hive';
+	                window.location.hash = '#/devices';
 	                showMessage('Overlord authenticated.', 'success');
 	            }
 
@@ -2023,7 +2014,6 @@
 	                    showDashboard();
 	                    renderSwarmSelector();
                     await loadProfile();
-                    await loadHive();
                     await loadDevices();
                     await loadPendingConnections();
                     showMessage('Overlord authenticated.', 'success');
@@ -2102,7 +2092,7 @@
 	                    showMessage('Reset link is invalid or expired.', 'error');
 	                    return;
 	                }
-	                window.location.hash = '#/hive';
+	                window.location.hash = '#/devices';
 	                showLoginForm();
 	                showMessage('Password updated. You can log in now.', 'success');
 	            }
@@ -2129,7 +2119,7 @@
                 document.getElementById('login-form').style.display = 'block';
                 document.getElementById('register-form').style.display = 'none';
                 setPageChrome('auth');
-	                window.location.href = 'https://www.batocera-swarm.com/#/home';
+	                window.location.href = '/#/home';
 	            }
 
 	            function showDashboard() {
@@ -2188,7 +2178,6 @@
 	                localStorage.setItem('selected_swarm_id', selectedSwarmId);
 	                selectedDeviceId = null;
 	                renderProfileUI();
-	                await loadHive();
 	                await loadDevices();
 	                await loadPendingConnections();
 	            }
@@ -2392,7 +2381,6 @@
                         await loadSwarms();
                     }
                     renderProfileUI();
-                    await loadHive();
                     showMessage('Profile updated.', 'success');
                 } catch (error) {
                     console.error('Error saving profile:', error);
@@ -2603,6 +2591,11 @@
             function updateSelectedDeviceSummary() {
                 const summary = document.getElementById('selected-device-summary');
                 if (!summary) return;
+                if (currentTab !== 'devices') {
+                    summary.style.display = 'none';
+                    summary.textContent = '';
+                    return;
+                }
                 summary.style.display = selectedDeviceId ? 'none' : 'block';
                 if (!selectedDeviceId) {
                     summary.textContent = 'Select a Drone to view systems, ROMs, and logs.';
@@ -3546,14 +3539,14 @@
             }
 
             function parseRoute() {
-                const raw = window.location.hash || '#/hive';
+                const raw = window.location.hash || '#/devices';
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
-                const allowed = ['hive', 'devices', 'profile', 'help'];
+                const allowed = ['devices', 'profile', 'help'];
                 if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
-                const tab = allowed.includes(parts[0]) ? parts[0] : 'hive';
+                const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
                 const deviceView = tab === 'devices' && ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
                 return { tab, deviceId, deviceView };
@@ -3709,7 +3702,7 @@
             }
 
             function setPageChrome(tabName) {
-                const meta = pageMeta[tabName] || pageMeta.hive;
+                const meta = pageMeta[tabName] || pageMeta.devices;
                 const title = document.getElementById('page-title');
                 const subtitle = document.getElementById('page-subtitle');
                 if (title) title.textContent = meta[0];
@@ -3726,7 +3719,6 @@
                 activateNav(tabName);
                 document.querySelectorAll('.dashboard-tab').forEach(section => { section.style.display = 'none'; });
                 const tabMap = {
-                    hive: 'hive-tab',
                     devices: 'devices-tab',
                     profile: 'profile-tab',
                     help: 'help-tab',
@@ -3737,13 +3729,11 @@
                 if (tabName === 'devices') {
                     updateSelectedDeviceWorkspace();
                     startDevicesPolling();
-                } else if (tabName === 'hive') {
-                    loadHive();
-                    stopDevicesPolling();
                 } else {
                     stopDevicesPolling();
                 }
                 if (tabName === 'profile') renderProfileUI();
+                updateSelectedDeviceSummary();
                 applyRbacUI();
                 setPageChrome(tabName);
                 if (updateUrl) setRoute(tabName);
