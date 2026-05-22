@@ -1383,6 +1383,7 @@
                             <span class="resource-links" aria-label="Project resources">
                                 <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" class="resource-icon-link" title="GitHub" aria-label="GitHub"><i class="bi bi-github"></i></a>
                                 <a href="/docs" target="_blank" rel="noopener noreferrer" class="resource-icon-link" title="API Docs" aria-label="API Docs"><i class="bi bi-braces"></i></a>
+                                <a href="#/help" class="resource-icon-link requires-auth" title="Help" aria-label="Help" onclick="event.preventDefault(); setRoute('help')"><i class="bi bi-question-circle"></i></a>
                             </span>
                         </div>
                         <div class="menu-label mb-2 d-lg-none">Navigation</div>
@@ -1391,6 +1392,7 @@
                             <a href="#/devices" role="button" class="btn nav-btn requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
 
                             <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i><span id="profile-nav-label">Profile</span></a>
+                            <a href="#/help" role="button" class="btn nav-btn requires-auth" data-tab="help" onclick="event.preventDefault(); setRoute('help')"><i class="bi bi-question-circle me-2"></i>Help</a>
                             <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
                         </div>
                     </div>
@@ -1695,6 +1697,72 @@
                                 <button class="btn btn-primary" onclick="saveNotificationSettings()">Save Notification Settings</button>
                             </div>
                         </div>
+
+                        <div id="help-tab" class="content-section dashboard-tab" style="display: none;">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                                <h3 class="mb-0">Help</h3>
+                                <a class="btn btn-outline-primary btn-sm" href="https://github.com/Batocera-Fleet-Federation/batocera.drone" target="_blank" rel="noopener noreferrer"><i class="bi bi-github me-1"></i>Drone Project</a>
+                            </div>
+                            <div class="row g-3">
+                                <div class="col-lg-6">
+                                    <div class="device-card h-100">
+                                        <h4 class="h5">Quick install: Drone on a Batocera machine</h4>
+                                        <ol>
+                                            <li>On the Batocera machine, open a command prompt. You can SSH into the machine, or press <strong>F1</strong> on the Batocera keyboard and open the terminal from the file manager.</li>
+                                            <li>Copy and run this installer command:</li>
+                                        </ol>
+                                        <div class="my-3">
+                                            <code style="display:block;white-space:normal;word-break:break-all;line-height:1.5;padding:.75rem;">curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash</code>
+                                        </div>
+                                        <ol start="3">
+                                            <li>If you are using <strong>Batocera v43 or newer</strong>, go to <strong>System Settings</strong> &gt; <strong>Services</strong>, then turn on <strong>DRONE_SERVER</strong>.</li>
+                                            <li>If you are using an <strong>older Batocera version</strong>, reboot the machine after the installer finishes.</li>
+                                        </ol>
+                                        <div class="my-3 p-3 border rounded" style="border-color:rgba(52,211,153,0.35)!important;background:rgba(52,211,153,0.10);font-weight:800;">
+                                            <i class="bi bi-check-circle me-1" style="color:var(--admin-accent-green);"></i> Done! The Drone app is installed on this Batocera machine.
+                                        </div>
+                                        <h5 class="h6 mt-3">Open the Drone app on your home network</h5>
+                                        <ol start="5">
+                                            <li>From a phone, laptop, or another computer on the same home network, open <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
+                                            <li>The default hostname is usually <code>batocera</code>, so try <code>https://batocera.local:8443</code> first.</li>
+                                            <li>If that does not open, check the machine name in Batocera under <strong>Network Settings</strong> &gt; <strong>Hostname</strong>, then replace <code>BATOCERA-HOSTNAME</code> with that name.</li>
+                                        </ol>
+                                        <p class="text-muted">Once the Drone app opens, sign in with the default username <code>batocera</code> and password <code>linux</code>. You can change these credentials from the Drone app after logging in.</p>
+                                        <p class="text-muted mb-0">After that, this Batocera machine is ready to connect back to Overmind and join your swarm.</p>
+                                    </div>
+                                </div>
+                                <div class="col-lg-6">
+                                    <div class="device-card h-100">
+                                        <h4 class="h5">Connect your Drone to Overmind</h4>
+                                        <p class="text-muted">Link the Drone app to your Overmind account so this Batocera machine can join your swarm at <code>www.batocera-swarm.com</code>.</p>
+
+                                        <h5 class="h6 mt-3">Recommended setup order</h5>
+                                        <ol>
+                                            <li>Register or sign in at <code>https://www.batocera-swarm.com</code>.</li>
+                                            <li>Go to <strong>My Swarm</strong> and click <strong>Generate Token</strong>.</li>
+                                            <li>Log in to your local Drone app.</li>
+                                            <li>Open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>.</li>
+                                            <li>Set <strong>Overmind URL</strong> to <code>https://www.batocera-swarm.com</code>.</li>
+                                            <li>Set <strong>Overmind Email</strong> to your Overmind email address.</li>
+                                            <li>Paste the generated token into <strong>Authorization Token</strong>, then save.</li>
+                                        </ol>
+
+                                        <p class="text-muted">After saving, Overmind will detect the Drone. Approve it from <strong>My Swarm</strong> to finish adding the machine.</p>
+
+                                        <h5 class="h6 mt-3">Optional: enable file syncing</h5>
+                                        <p class="text-muted">Port forwarding is only required for ROM, file, artwork, config, and settings syncing. You can still connect a Drone to Overmind without port forwarding, but Overmind and other Drones will not be able to download ROMs, configs, settings, or files from that machine.</p>
+                                        <ul>
+                                            <li>Forward internet traffic on port <code>8443</code> to your Batocera machine.</li>
+                                            <li>In the Drone app, find your router address under <strong>System Info</strong> &gt; <strong>Router IP Address</strong>, then enter that IP in your browser to log in to your router.</li>
+                                            <li>In your router, look for <strong>NAT</strong>, <strong>Port Forwarding</strong>, or <strong>Connected Devices</strong>.</li>
+                                            <li>Find your Batocera machine and forward port <code>8443</code> to its IP address.</li>
+                                            <li>You can also find the Batocera IP address on the machine under <strong>Network Settings</strong> &gt; <strong>IP Address</strong>.</li>
+                                            <li>Need help? Open <a href="https://www.youtube.com/results?search_query=How+to+enable+Home+Router+NAT+Port+Forwarding" target="_blank" rel="noopener noreferrer">NAT Port Forwarding Help</a>.</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </section>
                 </div>
                         <footer class="mt-4 pt-3 border-top text-muted small">
@@ -1730,6 +1798,7 @@
                 hive: ['Hive', 'Visible swarms and members'],
                 devices: ['My Swarm', 'Systems and ROMs'],
                 profile: ['Profile', 'Account, access, and preferences'],
+                help: ['Help', 'Install, connect, and configure Drones'],
             };
 
             document.addEventListener('DOMContentLoaded', () => {
@@ -3480,7 +3549,7 @@
                 const raw = window.location.hash || '#/hive';
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
-                const allowed = ['hive', 'devices', 'profile'];
+                const allowed = ['hive', 'devices', 'profile', 'help'];
                 if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
@@ -3660,6 +3729,7 @@
                     hive: 'hive-tab',
                     devices: 'devices-tab',
                     profile: 'profile-tab',
+                    help: 'help-tab',
                 };
                 const tabElement = document.getElementById(tabMap[tabName]);
                 if (tabElement) tabElement.style.display = 'block';
