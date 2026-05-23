@@ -1598,9 +1598,6 @@
                                 </div>
                                 <div id="device-actions-panel" class="device-subpanel" style="display:none;">
                                     <div class="d-flex flex-wrap gap-2 mb-3 mutate-only">
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_game_logs')"><i class="bi bi-clock-history me-1"></i>Game Logs</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')"><i class="bi bi-file-earmark-code me-1"></i>Emulator Configs</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_log_sources')"><i class="bi bi-journal-text me-1"></i>Log Sources</button>
                                         <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Restart</button>
                                         <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('update')"><i class="bi bi-download me-1"></i>Update</button>
                                         <button class="btn btn-outline-secondary btn-sm" onclick="loadDeviceActions()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
@@ -3109,9 +3106,13 @@
                 setRoute('devices', deviceId, 'systems');
             }
 
-            async function loadGameLogs() {
+            async function loadGameLogs(options = {}) {
                 if (!selectedDeviceId) {
                     document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a Drone to view logs.</div>';
+                    return;
+                }
+                if (options.queue) {
+                    await requestDeviceDataSnapshot('logs');
                     return;
                 }
                 try {
@@ -3123,8 +3124,9 @@
                     if (!deviceResp.ok) throw new Error('Failed to load device details');
                     const logsData = await logsResp.json();
                     const deviceData = await deviceResp.json();
+                    const snapshotLogs = deviceData.game_logs && Array.isArray(deviceData.game_logs.sessions) ? deviceData.game_logs.sessions : [];
                     displayCombinedLogs({
-                        gamelogs: logsData.gamelogs || [],
+                        gamelogs: snapshotLogs.length ? snapshotLogs : (logsData.gamelogs || []),
                         emulator_configs: deviceData.emulator_configs || [],
                         log_sources: deviceData.log_sources || []
                     });
@@ -3170,7 +3172,7 @@
                             <div class="card log-card">
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                     <span id="overmindLogTitle">Select a log source</span>
-                                    <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs()">Refresh</button>
+                                    <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs({queue:true})">Refresh</button>
                                 </div>
                                 <div class="card-body">
                                     <div id="overmindLogPath" class="small text-muted mb-2"></div>
@@ -3181,6 +3183,9 @@
                     </div>
                 `;
                 window.overmindLogSources = sources;
+                if (sources.length) {
+                    setTimeout(() => selectOvermindLogSource(0), 0);
+                }
             }
 
             function selectOvermindLogSource(index) {
@@ -3196,9 +3201,13 @@
                 if (content) content.textContent = source.content || '';
             }
 
-            async function loadDeviceConfigs() {
+            async function loadDeviceConfigs(options = {}) {
                 const container = document.getElementById('configs-list');
                 if (!selectedDeviceId || !container) return;
+                if (options.queue) {
+                    await requestDeviceDataSnapshot('configs');
+                    return;
+                }
                 try {
                     const response = await apiGet(`/api/devices/${selectedDeviceId}`);
                     if (!response.ok) throw new Error('Failed to load config data');
@@ -3219,7 +3228,7 @@
                                 <strong>Emulator Configs</strong>
                                 <div class="small text-muted">No config snapshot has been collected from this Drone yet.</div>
                             </div>
-                            <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('collect_emulator_configs')">Collect Configs</button>
+                            <button class="btn btn-outline-primary btn-sm" onclick="loadDeviceConfigs({queue:true})">Collect Configs</button>
                         </div>
                     </div></div>`;
                     return;
@@ -3249,7 +3258,7 @@
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                     <span id="overmindConfigTitle">Select a config</span>
                                     <div class="d-flex gap-2">
-                                        <button class="btn btn-sm btn-outline-primary" onclick="queueDeviceAction('collect_emulator_configs')">Refresh Snapshot</button>
+                                        <button class="btn btn-sm btn-outline-primary" onclick="loadDeviceConfigs({queue:true})">Refresh Snapshot</button>
                                     </div>
                                 </div>
                                 <div class="card-body">
@@ -3261,6 +3270,9 @@
                     </div>
                 `;
                 window.overmindConfigRows = rows;
+                if (rows.length) {
+                    setTimeout(() => selectOvermindConfig(0), 0);
+                }
             }
 
             function selectOvermindConfig(index) {
@@ -3274,6 +3286,53 @@
                 if (title) title.textContent = row.label;
                 if (path) path.textContent = row.root || '';
                 if (content) content.textContent = row.content || '';
+            }
+
+            async function requestDeviceDataSnapshot(kind) {
+                if (!selectedDeviceId) return;
+                const isLogs = kind === 'logs';
+                const container = document.getElementById(isLogs ? 'gamelogs-list' : 'configs-list');
+                if (container) {
+                    container.innerHTML = `<div class="empty-state">${isLogs ? 'Log' : 'Emulator config'} data is being retrieved and should be available within 30 seconds.</div>`;
+                }
+                showMessage(`${isLogs ? 'Log' : 'Emulator config'} data is being retrieved and should be available within 30 seconds.`, 'success');
+                const actions = isLogs ? ['collect_game_logs', 'collect_log_sources'] : ['collect_emulator_configs'];
+                try {
+                    for (const actionName of actions) {
+                        await queueDeviceAction(actionName, { confirm: false, refreshActions: false, notify: false });
+                    }
+                    await pollDeviceSnapshot(kind);
+                } catch (error) {
+                    console.error('Error requesting device data:', error);
+                    if (container) container.innerHTML = `<div class="empty-state">Unable to request ${isLogs ? 'log' : 'emulator config'} data.</div>`;
+                }
+            }
+
+            async function pollDeviceSnapshot(kind) {
+                const deadline = Date.now() + 30000;
+                const isLogs = kind === 'logs';
+                while (Date.now() <= deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}`);
+                    if (!response.ok) throw new Error('Failed to load device details');
+                    const device = await response.json();
+                    if (isLogs) {
+                        const hasLogSources = Array.isArray(device.log_sources?.logs) && device.log_sources.logs.length > 0;
+                        const hasGameLogs = Array.isArray(device.game_logs?.sessions) && device.game_logs.sessions.length > 0;
+                        if (hasLogSources || hasGameLogs) {
+                            await loadGameLogs({ queue: false });
+                            return;
+                        }
+                    } else if (Array.isArray(device.emulator_configs?.configs) && device.emulator_configs.configs.length > 0) {
+                        displayDeviceConfigs(device.emulator_configs);
+                        return;
+                    }
+                }
+                if (isLogs) {
+                    await loadGameLogs({ queue: false });
+                } else {
+                    await loadDeviceConfigs({ queue: false });
+                }
             }
 
             async function loadDeviceSystems() {
@@ -3846,8 +3905,8 @@
                 if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
 
                 if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
-                if (currentDeviceView === 'gamelogs') loadGameLogs();
-                if (currentDeviceView === 'configs') loadDeviceConfigs();
+                if (currentDeviceView === 'gamelogs') loadGameLogs({queue: true});
+                if (currentDeviceView === 'configs') loadDeviceConfigs({queue: true});
                 if (currentDeviceView === 'metadata') {
                     renderDroneMetadataPanel();
                 }
@@ -3948,8 +4007,11 @@
                 }
             }
 
-            async function queueDeviceAction(actionName) {
+            async function queueDeviceAction(actionName, options = {}) {
                 if (!selectedDeviceId) return;
+                const shouldConfirm = options.confirm !== false;
+                const shouldRefreshActions = options.refreshActions !== false;
+                const shouldNotify = options.notify !== false;
                 const labels = {
                     restart: 'restart',
                     update: 'update',
@@ -3958,7 +4020,7 @@
                     collect_emulator_configs: 'collect emulator configs',
                     collect_log_sources: 'collect log sources',
                 };
-                if (!window.confirm(`Queue ${labels[actionName] || actionName} for this Drone?`)) return;
+                if (shouldConfirm && !window.confirm(`Queue ${labels[actionName] || actionName} for this Drone?`)) return;
                 try {
                     const response = await fetch(`/api/devices/${selectedDeviceId}/actions`, {
                         method: 'POST',
@@ -3974,10 +4036,14 @@
                         throw new Error('Unauthorized');
                     }
                     if (!response.ok) throw new Error('Failed to queue action');
-                    await loadDeviceActions();
-                    showMessage('Action queued.', 'success');
+                    const data = await response.json().catch(() => ({}));
+                    if (shouldRefreshActions) await loadDeviceActions();
+                    if (shouldNotify) showMessage('Action queued.', 'success');
+                    return data;
                 } catch (error) {
                     console.error('Error queuing action:', error);
+                    if (shouldNotify) showMessage('Failed to queue action.', 'danger');
+                    throw error;
                 }
             }
 

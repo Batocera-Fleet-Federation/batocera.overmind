@@ -341,6 +341,7 @@ def device_response(device: dict) -> dict:
         "last_speed_sample": device.get("last_speed_sample"),
         "emulator_configs": device.get("emulator_configs"),
         "log_sources": device.get("log_sources"),
+        "game_logs": device.get("game_logs"),
         "token_rotated_at": device.get("token_rotated_at"),
         "api_port": device.get("api_port"),
         "scheme": device.get("scheme") or "https",

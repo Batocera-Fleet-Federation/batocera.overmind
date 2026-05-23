@@ -967,6 +967,8 @@ class FakeDatabase:
             device["emulator_configs"] = result
         if result_type == "log_sources":
             device["log_sources"] = result
+        if result_type == "game_logs":
+            device["game_logs"] = result
         if result_type == "rom_sync":
             for activity in result.get("activity") if isinstance(result.get("activity"), list) else []:
                 if isinstance(activity, dict):

@@ -1077,11 +1077,15 @@ def test_shutdown_action_is_rejected_by_api(client):
     assert response.status_code == 400
 
 
-def test_selected_drone_actions_ui_omits_shutdown_and_uses_game_logs_label():
+def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     assert "queueDeviceAction('shutdown')" not in html
     assert ">Shutdown<" not in html
-    assert ">Game Logs<" in html
+    assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
+    assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html
+    assert "onclick=\"queueDeviceAction('collect_log_sources')\"" not in html
+    assert "loadGameLogs({queue: true})" in html
+    assert "loadDeviceConfigs({queue: true})" in html
 
 
 def test_drone_alive_claims_data_action_and_stores_result(client):
