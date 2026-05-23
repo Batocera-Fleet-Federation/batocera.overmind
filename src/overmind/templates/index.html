@@ -1397,6 +1397,7 @@
                         <div class="menu-label mb-2 d-lg-none">Navigation</div>
                         <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
                             <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
+                            <a href="#/hive" role="button" class="btn nav-btn requires-auth" data-tab="hive" onclick="event.preventDefault(); switchTab('hive', this)"><i class="bi bi-diagram-3 me-2"></i>The Hive</a>
 
                             <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i><span id="profile-nav-label">Profile</span></a>
                             <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
@@ -1674,6 +1675,16 @@
                             </div>
                         </div>
 
+                        <div id="hive-tab" class="content-section dashboard-tab" style="display: none;">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                                <h3 class="mb-0">The Hive</h3>
+                                <button class="btn btn-outline-primary btn-sm" type="button" onclick="loadHive()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                            </div>
+                            <div id="hive-list" class="row g-3">
+                                <div class="empty-state">Loading swarms...</div>
+                            </div>
+                        </div>
+
                         <div id="help-tab" class="content-section dashboard-tab" style="display: none;">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
                                 <h3 class="mb-0">Help</h3>
@@ -1779,6 +1790,7 @@
             const pageMeta = {
                 auth: ['Overlord Login', 'Access the Overmind'],
                 devices: ['My Swarm', 'Systems and ROMs'],
+                hive: ['The Hive', 'Browse public swarm listings'],
                 profile: ['Profile', 'Account, access, and preferences'],
                 help: ['Help', 'Install, connect, and configure Drones'],
             };
@@ -2314,6 +2326,8 @@
 
 	            async function loadHive() {
 	                if (!authToken) return;
+                    const container = document.getElementById('hive-list');
+                    if (container) container.innerHTML = '<div class="empty-state">Loading swarms...</div>';
 	                try {
 	                    const response = await apiGet('/api/hive');
 	                    if (!response.ok) throw new Error('Failed to load hive');
@@ -2321,6 +2335,7 @@
 	                    renderHive(data.hive || []);
 	                } catch (error) {
 	                    console.error('Error loading hive:', error);
+                        if (container) container.innerHTML = '<div class="empty-state">Unable to load The Hive.</div>';
 	                }
 	            }
 
@@ -2328,29 +2343,40 @@
 	                const container = document.getElementById('hive-list');
 	                if (!container) return;
 	                if (!rows.length) {
-	                    container.innerHTML = '<div class="empty-state">No swarm memberships yet.</div>';
+	                    container.innerHTML = '<div class="empty-state">No swarms registered yet.</div>';
 	                    return;
 	                }
 	                container.innerHTML = rows.map(row => `
-	                    <div class="card device-tile border shadow-sm">
+	                    <div class="col-12 col-md-6 col-xl-4">
+	                    <div class="card device-tile border shadow-sm h-100">
 	                        <div class="card-body">
 	                            <div class="d-flex align-items-center gap-3 mb-3">
-	                                <img alt="" src="${escapeHtml(row.avatar_data_url || '')}" style="width:52px;height:52px;border-radius:50%;object-fit:cover;background:#1f2a44;" onerror="this.style.visibility='hidden'">
+	                                ${row.owner_avatar_data_url ? `<img alt="" src="${escapeHtml(row.owner_avatar_data_url)}" style="width:52px;height:52px;border-radius:50%;object-fit:cover;background:#1f2a44;" onerror="this.style.display='none'">` : `<div aria-hidden="true" style="width:52px;height:52px;border-radius:50%;background:#1f2a44;display:flex;align-items:center;justify-content:center;font-weight:700;">${escapeHtml(String(row.owner_username || 'O').slice(0, 1).toUpperCase())}</div>`}
 	                                <div>
-	                                    <h5 class="card-title mb-0">${escapeHtml(row.username || row.full_name || row.email || 'Member')}</h5>
-	                                    <div class="small text-muted">${escapeHtml(row.email || '')}</div>
+	                                    <h5 class="card-title mb-0">${escapeHtml(row.swarm_name || 'Swarm')}</h5>
+	                                    <div class="small text-muted">Owner: ${escapeHtml(row.owner_username || 'Overlord')}</div>
 	                                </div>
 	                            </div>
-	                            <div class="small text-muted">Swarm</div>
-	                            <div class="fw-semibold">${escapeHtml(row.swarm_name || 'Swarm')}</div>
+	                            <div class="small text-muted">Drones: ${escapeHtml(String(row.drone_count || 0))}</div>
 	                            <div class="mt-3 d-flex flex-wrap gap-1">
-	                                <span class="badge text-bg-primary">${escapeHtml(roleLabel(row.role))}</span>
+	                                ${row.viewer_role ? `<span class="badge text-bg-primary">${escapeHtml(roleLabel(row.viewer_role))}</span>` : '<span class="badge text-bg-secondary">Public</span>'}
 	                                ${row.swarm_id === selectedSwarmId ? '<span class="badge text-bg-success">Selected</span>' : ''}
 	                            </div>
+                                <button class="btn btn-outline-primary btn-sm mt-3" type="button" ${row.can_view ? '' : 'disabled'} onclick="openHiveSwarm('${escapeHtml(row.swarm_id)}')">${row.can_view ? 'Open Swarm' : 'Private'}</button>
 	                        </div>
-	                    </div>
+	                    </div></div>
 	                `).join('');
 	            }
+
+            async function openHiveSwarm(swarmId) {
+                const swarm = currentSwarms.find(row => row.id === swarmId);
+                if (!swarm) {
+                    showMessage('This swarm is private.', 'error');
+                    return;
+                }
+                await selectSwarm(swarmId);
+                setRoute('devices', null, 'systems', 'drones');
+            }
 
 	            function toggleAuthForm() {
 	                document.getElementById('verify-form').style.display = 'none';
@@ -3829,7 +3855,7 @@
                 const raw = window.location.hash || '#/devices';
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
-                const allowed = ['devices', 'profile', 'help'];
+                const allowed = ['devices', 'hive', 'profile', 'help'];
                 if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
@@ -4004,6 +4030,7 @@
                 document.querySelectorAll('.dashboard-tab').forEach(section => { section.style.display = 'none'; });
                 const tabMap = {
                     devices: 'devices-tab',
+                    hive: 'hive-tab',
                     profile: 'profile-tab',
                     help: 'help-tab',
                 };
@@ -4017,6 +4044,7 @@
                     stopDevicesPolling();
                 }
                 if (tabName === 'profile') renderProfileUI();
+                if (tabName === 'hive') loadHive();
                 updateSelectedDeviceSummary();
                 applyRbacUI();
                 setPageChrome(tabName);

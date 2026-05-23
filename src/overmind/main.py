@@ -50,9 +50,6 @@ OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
 
 
-def use_fake_data_enabled() -> bool:
-    return os.getenv("USE_FAKE_DATA", "").strip().lower() in {"1", "true", "yes", "on"}
-
 app = FastAPI(
     title="Batocera Overmind API",
     description="API for Batocera system management and game tracking",
@@ -231,6 +228,14 @@ def build_login_response(user: dict) -> dict:
     }
 
 
+def _authenticate_password_user(email: str, password: str) -> Optional[dict]:
+    user = db.get_user_by_email(email)
+    if not user or not auth.verify_password(password, user["password"]):
+        return None
+    ensure_active_user(user)
+    return user
+
+
 def hash_secret_token(token: str) -> str:
     return auth.hash_password(f"{TOKEN_HASH_SECRET}:{token}")
 
@@ -240,8 +245,6 @@ def verify_secret_token(token: str, stored_hash: str) -> bool:
 
 
 def send_verification_email(user: dict, code: str, token: str) -> None:
-    if use_fake_data_enabled():
-        print(f"USE_FAKE_DATA registration verification code for {user['email']}: {code}")
     link = f"{emailer.base_url()}/api/auth/verify-email?token={urllib.parse.quote(token)}"
     body_html = emailer.render_email_template(
         "registration_verification.html",
@@ -303,6 +306,11 @@ def require_swarm_role(user: dict, swarm_id: str, roles: set[str]) -> dict:
     if not member:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient swarm permission")
     return member
+
+
+def public_swarm_name(swarm: dict) -> str:
+    name = str(swarm.get("name") or "Swarm")
+    return "Personal Swarm" if "@" in name else name
 
 
 def device_response(device: dict) -> dict:
@@ -396,15 +404,13 @@ async def register(user_data: UserRegister):
 @app.post("/api/auth/login")
 async def login(credentials: UserLogin):
     """Login user and return access token."""
-    user = db.get_user_by_email(credentials.email)
-    
-    if not user or not auth.verify_password(credentials.password, user["password"]):
+    user = _authenticate_password_user(str(credentials.email), credentials.password)
+    if not user:
         print(f"Login failed for {credentials.email}: invalid_credentials")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
-    ensure_active_user(user)
     return build_login_response(user)
 
 
@@ -813,6 +819,56 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
         "status": "pending",
         "device_id": device_data.device_id,
     }
+
+
+@app.post("/api/drones/claim-ownership")
+async def claim_drone_ownership(payload: dict):
+    """Claim a Drone directly with Overmind account credentials."""
+    device_id = str(payload.get("device_id") or payload.get("drone_id") or "").strip()
+    device_name = str(payload.get("device_name") or payload.get("drone_name") or device_id or "Drone").strip()
+    email = str(payload.get("email") or "").strip()
+    password = str(payload.get("password") or "")
+    print(f"Drone ownership claim attempted: device_id={device_id}")
+    if not device_id or not email or not password:
+        print(f"Drone ownership claim failed: device_id={device_id} reason=missing_required_fields")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_id, email, and password are required")
+    try:
+        user = _authenticate_password_user(email, password)
+    except HTTPException:
+        user = None
+    if not user:
+        print(f"Drone ownership claim failed: device_id={device_id} reason=invalid_credentials")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+
+    existing = db.get_device_by_device_id(device_id)
+    if existing and existing.get("user_id") != user["id"]:
+        print(f"Drone ownership claim failed: device_id={device_id} reason=already_owned")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Drone is already owned")
+
+    batocera_info = payload.get("batocera_info") if isinstance(payload.get("batocera_info"), dict) else {}
+    if not batocera_info:
+        batocera_info = {
+            "ip_address": str(payload.get("ip_address") or ""),
+            "network": payload.get("network") if isinstance(payload.get("network"), dict) else {},
+            "api_port": payload.get("api_port"),
+            "scheme": payload.get("scheme") or "https",
+            "reachable_url": payload.get("reachable_url"),
+            "system_info": payload.get("system_info") if isinstance(payload.get("system_info"), dict) else {},
+            "certificate": payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
+        }
+
+    if existing:
+        existing["device_name"] = device_name or existing.get("device_name") or device_id
+        existing["approval_status"] = "approved"
+        existing["swarm_id"] = db.default_swarm_id(user["id"]) or db.ensure_personal_swarm(user["id"])["id"]
+        rotated = db.rotate_device_token(user["id"], device_id)
+        drone_token = rotated["token"] if rotated else generate_drone_token()
+    else:
+        drone_token = generate_drone_token()
+        db.create_device(user["id"], device_id, device_name, batocera_info, raw_token=drone_token)
+    db.pending_drone_connections.pop(device_id, None)
+    print(f"Drone ownership claim succeeded: device_id={device_id} user_id={user['id']}")
+    return {"status": "approved", "device_id": device_id, "drone_token": drone_token}
 
 
 @app.get("/api/integration-tokens")
@@ -1236,24 +1292,29 @@ async def update_profile(payload: dict, authorization: Optional[str] = Header(de
 
 @app.get("/api/hive")
 async def get_hive(authorization: Optional[str] = Header(default=None)):
-    """Return swarms and visible members for the authenticated user."""
+    """Return a privacy-safe public swarm directory."""
     user = get_current_user(authorization)
-    swarms = db.get_user_swarms(user["id"])
+    print(f"Hive page/list requested: user_id={user['id']}")
+    user_swarms = {row["id"]: row for row in db.get_user_swarms(user["id"])}
     rows = []
-    for swarm in swarms:
-        access = db.list_swarm_access(swarm["id"])
-        for member in access.get("members", []):
-            rows.append({
-                "swarm_id": swarm["id"],
-                "swarm_name": swarm.get("name"),
-                "current": swarm["id"] == db.default_swarm_id(user["id"]),
-                "role": member.get("role"),
-                "email": member.get("email"),
-                "username": member.get("username"),
-                "full_name": member.get("full_name"),
-                "avatar_data_url": (db.get_user(member.get("user_id")) or {}).get("avatar_data_url"),
-            })
-    return {"hive": rows, "swarms": swarms}
+    for swarm in db.swarms.values():
+        owner = db.get_user(swarm.get("owner_id")) or {}
+        member = db.get_swarm_member(swarm["id"], user["id"])
+        rows.append({
+            "swarm_id": swarm["id"],
+            "swarm_name": public_swarm_name(swarm),
+            "owner_username": owner.get("username") or owner.get("full_name") or "Overlord",
+            "owner_avatar_data_url": owner.get("avatar_data_url"),
+            "drone_count": len([device for device in db.devices.values() if device.get("swarm_id") == swarm["id"] and device.get("approval_status", "approved") == "approved"]),
+            "current": swarm["id"] == db.default_swarm_id(user["id"]),
+            "viewer_role": member.get("role") if member else None,
+            "can_view": bool(member),
+        })
+    rows.sort(key=lambda row: str(row.get("swarm_name") or "").lower())
+    return {
+        "hive": rows,
+        "swarms": [{"id": row.get("id"), "name": public_swarm_name(row), "role": row.get("role")} for row in user_swarms.values()],
+    }
 
 
 # ==================== ROM Management ====================

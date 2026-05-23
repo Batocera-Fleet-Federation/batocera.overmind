@@ -375,6 +375,14 @@ The Overmind UI keeps authenticated users signed in while they are active. Mouse
 
 ## Drone ROM Metadata
 
+Drone ownership can be claimed directly from the Drone admin UI through:
+
+```text
+POST /api/drones/claim-ownership
+```
+
+The endpoint validates Overmind email/password credentials using the normal password verification path. On success it associates the Drone with the user’s swarm as owner/Overlord and returns a Drone bearer token for future Drone-to-Overmind calls. Invalid credentials return a generic auth failure, and already-owned Drones cannot be claimed by a different user. Passwords, password hashes, auth proofs, bearer tokens, and secrets are never logged.
+
 Drone heartbeat no longer stores ROM metadata. If an older Drone still sends `rom_metadata` in a heartbeat, Overmind accepts the heartbeat for compatibility, logs that the ROM metadata was ignored, and keeps the heartbeat focused on lightweight health/status fields.
 
 ROM inventory now arrives through Drone-authenticated metadata uploads:
@@ -388,15 +396,13 @@ The payload is the full ROM metadata snapshot previously used for visibility and
 
 ## Fake Data and Invitations
 
-When `USE_FAKE_DATA=true`, registration verification codes are logged for local testing as:
-
-```text
-USE_FAKE_DATA registration verification code for <email>: <code>
-```
-
-Codes are not logged unless fake data mode is enabled. Passwords, auth tokens, invitation tokens, and OAuth secrets are never logged.
+Registration verification is required in fake-data/local mode the same way it is in production unless `OVERMIND_AUTO_VERIFY_REGISTRATION` is explicitly enabled. Verification codes are not logged. Passwords, auth tokens, invitation tokens, OAuth secrets, and verification codes are never logged.
 
 Swarm invitation emails contain an accept link. Existing registered users can accept after signing in and are added as Overseer. New users can register from the invite link with password, GitHub, or Google auth; valid invitation registration auto-verifies the new user, accepts the invitation, and adds the user as Overseer without a separate verification email. Invitations remain tied to the invited email address and cannot be claimed by a different account.
+
+## The Hive
+
+The authenticated Overmind navigation includes `The Hive`, a privacy-safe public directory of registered swarms. It lists swarm name, owner username, owner avatar when present, and basic swarm counts. It does not expose owner email addresses, invite addresses, tokens, secrets, or private user profile details. Members can open swarms they own or oversee and view Drone details; Overseers remain read-only, and non-members cannot open private Drone details.
 
 ## Contributing
 

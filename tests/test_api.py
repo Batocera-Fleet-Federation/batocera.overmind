@@ -159,13 +159,13 @@ def test_email_registration_requires_verification(client, monkeypatch):
     assert client.post("/api/auth/login", json={"email": "verify@example.com", "password": "testpass123"}).status_code == 200
 
 
-def test_fake_data_logs_registration_verification_code(client, monkeypatch, capsys):
+def test_fake_data_does_not_log_registration_verification_code(client, monkeypatch, capsys):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
     monkeypatch.setenv("USE_FAKE_DATA", "true")
     response = client.post("/api/auth/register", json={"email": "fake-code@example.com", "password": "testpass123"})
     assert response.status_code == 200
     captured = capsys.readouterr()
-    assert "USE_FAKE_DATA registration verification code for fake-code@example.com:" in captured.out
+    assert "registration verification code for fake-code@example.com" not in captured.out
 
 
 def test_normal_mode_does_not_log_registration_verification_code(client, monkeypatch, capsys):
@@ -237,6 +237,116 @@ def test_swarm_roles_gate_invites_and_mutations(client):
     assert access.status_code == 200
     viewer_member = next(row for row in access.json()["access"]["members"] if row["email"] == "viewer@example.com")
     assert viewer_member["role"] == "overseer"
+
+
+def test_drone_ownership_claim_success_and_owner_actions(client, capsys):
+    client.post("/api/auth/register", json={"email": "claim-owner@example.com", "password": "claimpass123"})
+    token = client.post("/api/auth/login", json={"email": "claim-owner@example.com", "password": "claimpass123"}).json()["access_token"]
+
+    response = client.post(
+        "/api/drones/claim-ownership",
+        json={
+            "device_id": "claim-drone",
+            "device_name": "Claimed Drone",
+            "email": "claim-owner@example.com",
+            "password": "claimpass123",
+            "batocera_info": {"ip_address": "10.0.0.7"},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+    assert response.json()["drone_token"]
+    assert "claimpass123" not in capsys.readouterr().out
+
+    devices = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+    assert devices.status_code == 200
+    assert devices.json()["devices"][0]["device_id"] == "claim-drone"
+    action = client.post("/api/devices/claim-drone/actions", headers={"Authorization": f"Bearer {token}"}, json={"action": "restart"})
+    assert action.status_code == 200
+
+
+def test_drone_ownership_claim_invalid_credentials_and_already_owned(client, capsys):
+    client.post("/api/auth/register", json={"email": "first-owner@example.com", "password": "claimpass123"})
+    client.post("/api/auth/register", json={"email": "second-owner@example.com", "password": "otherpass123"})
+
+    bad = client.post(
+        "/api/drones/claim-ownership",
+        json={"device_id": "owned-drone", "email": "first-owner@example.com", "password": "wrongpass123"},
+    )
+    assert bad.status_code == 401
+    captured = capsys.readouterr()
+    assert "wrongpass123" not in captured.out
+    assert "wrongpass123" not in captured.err
+
+    claimed = client.post(
+        "/api/drones/claim-ownership",
+        json={"device_id": "owned-drone", "email": "first-owner@example.com", "password": "claimpass123"},
+    )
+    assert claimed.status_code == 200
+
+    denied = client.post(
+        "/api/drones/claim-ownership",
+        json={"device_id": "owned-drone", "email": "second-owner@example.com", "password": "otherpass123"},
+    )
+    assert denied.status_code == 409
+
+
+def test_hive_lists_public_swarms_without_private_owner_data(client):
+    client.post("/api/auth/register", json={"email": "hive-owner@example.com", "password": "testpass123", "full_name": "Hive Owner"})
+    owner_token = client.post("/api/auth/login", json={"email": "hive-owner@example.com", "password": "testpass123"}).json()["access_token"]
+    client.patch(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"username": "hive-owner", "avatar_data_url": "data:image/png;base64,AAA"},
+    )
+    owner = db.get_user_by_email("hive-owner@example.com")
+    swarm_id = db.default_swarm_id(owner["id"])
+    db.create_device(owner["id"], "hive-drone", "Hive Drone", {"ip_address": "10.0.0.9"}, raw_token="drone-token", swarm_id=swarm_id)
+
+    client.post("/api/auth/register", json={"email": "visitor@example.com", "password": "testpass123"})
+    visitor_token = client.post("/api/auth/login", json={"email": "visitor@example.com", "password": "testpass123"}).json()["access_token"]
+    response = client.get("/api/hive", headers={"Authorization": f"Bearer {visitor_token}"})
+    assert response.status_code == 200
+    raw = response.text
+    assert "hive-owner@example.com" not in raw
+    assert "visitor@example.com" not in raw
+    row = next(item for item in response.json()["hive"] if item["swarm_id"] == swarm_id)
+    assert row["owner_username"] == "hive-owner"
+    assert row["owner_avatar_data_url"].startswith("data:image/png;base64")
+    assert row["drone_count"] == 1
+    assert row["can_view"] is False
+
+
+def test_hive_overseer_can_view_drone_but_not_mutate(client):
+    client.post("/api/auth/register", json={"email": "owner-hive@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "overseer-hive@example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("owner-hive@example.com")
+    overseer = db.get_user_by_email("overseer-hive@example.com")
+    swarm_id = db.default_swarm_id(owner["id"])
+    db.swarm_memberships.setdefault(swarm_id, {})[overseer["id"]] = {"user_id": overseer["id"], "role": "overseer"}
+    db.create_device(owner["id"], "overseer-drone", "Overseer Drone", {"ip_address": "10.0.0.10"}, raw_token="drone-token", swarm_id=swarm_id)
+    overseer_token = client.post("/api/auth/login", json={"email": "overseer-hive@example.com", "password": "testpass123"}).json()["access_token"]
+
+    hive = client.get("/api/hive", headers={"Authorization": f"Bearer {overseer_token}"})
+    assert next(item for item in hive.json()["hive"] if item["swarm_id"] == swarm_id)["can_view"] is True
+    devices = client.get(f"/api/devices?swarm_id={swarm_id}", headers={"Authorization": f"Bearer {overseer_token}"})
+    assert devices.status_code == 200
+    assert devices.json()["devices"][0]["device_id"] == "overseer-drone"
+    detail = client.get("/api/devices/overseer-drone", headers={"Authorization": f"Bearer {overseer_token}"})
+    assert detail.status_code == 200
+    mutate = client.post("/api/devices/overseer-drone/actions", headers={"Authorization": f"Bearer {overseer_token}"}, json={"action": "restart"})
+    assert mutate.status_code == 403
+
+
+def test_unauthorized_user_cannot_view_private_drone_details(client):
+    client.post("/api/auth/register", json={"email": "private-owner@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "outsider@example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("private-owner@example.com")
+    db.create_device(owner["id"], "private-drone", "Private Drone", {"ip_address": "10.0.0.11"}, raw_token="drone-token")
+    outsider_token = client.post("/api/auth/login", json={"email": "outsider@example.com", "password": "testpass123"}).json()["access_token"]
+
+    response = client.get("/api/devices/private-drone", headers={"Authorization": f"Bearer {outsider_token}"})
+    assert response.status_code == 404
 
 
 def test_download_state_and_cancel_rbac(client):
