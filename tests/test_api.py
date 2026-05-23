@@ -29,6 +29,7 @@ def client(monkeypatch):
     db.integration_tokens.clear()
     db.approved_drone_tokens.clear()
     db.rom_sync_activity.clear()
+    db.download_states.clear()
     db.pending_drone_connections.clear()
     return TestClient(app)
 
@@ -200,6 +201,75 @@ def test_swarm_roles_gate_invites_and_mutations(client):
     assert access.status_code == 200
     viewer_member = next(row for row in access.json()["access"]["members"] if row["email"] == "viewer@example.com")
     assert viewer_member["role"] == "overseer"
+
+
+def test_download_state_and_cancel_rbac(client):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {owner_token}"}).json()["swarms"][0]["id"]
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(owner["id"], "target-a", "Target A", {"ip_address": "10.0.0.2"}, raw_token="drone-token", swarm_id=swarm_id)
+
+    heartbeat = client.post(
+        "/api/devices/target-a/heartbeat",
+        headers={"Authorization": "Bearer drone-token"},
+        json={
+            "device_name": "Target A",
+            "downloads": {
+                "target_drone_id": "target-a",
+                "active": [{
+                    "job_id": "job-1",
+                    "target_drone_id": "target-a",
+                    "source_drone_id": "source-a",
+                    "file_path": "snes/Game.zip",
+                    "file_size": 100,
+                    "downloaded_bytes": 25,
+                    "percentage": 25,
+                    "status": "downloading",
+                }],
+                "queued": [{
+                    "job_id": "job-2",
+                    "target_drone_id": "target-a",
+                    "source_drone_id": "source-b",
+                    "file_path": "snes/Next.zip",
+                    "queue_position": 1,
+                    "status": "queued",
+                }],
+            },
+        },
+    )
+    assert heartbeat.status_code == 200
+
+    downloads = client.get("/api/downloads", headers={"Authorization": f"Bearer {owner_token}"})
+    assert downloads.status_code == 200
+    target = downloads.json()["targets"][0]
+    assert target["concurrency"]["scope"] == "target_drone"
+    assert target["active"][0]["source_drone_id"] == "source-a"
+    assert target["queued"][0]["queue_position"] == 1
+
+    cancel = client.post(
+        "/api/devices/target-a/downloads/job-2/cancel",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert cancel.status_code == 200
+    assert cancel.json()["action"]["action"] == "cancel_download"
+    assert cancel.json()["action"]["payload"]["job_id"] == "job-2"
+
+    client.post(
+        f"/api/swarms/{swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "viewer@example.com", "role": "overseer"},
+    )
+    client.post("/api/auth/register", json={"email": "viewer@example.com", "password": "testpass123"})
+    viewer_token = client.post("/api/auth/login", json={"email": "viewer@example.com", "password": "testpass123"}).json()["access_token"]
+
+    viewer_downloads = client.get("/api/downloads", headers={"Authorization": f"Bearer {viewer_token}"})
+    assert viewer_downloads.status_code == 200
+    denied = client.post(
+        "/api/devices/target-a/downloads/job-1/cancel",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+    )
+    assert denied.status_code == 403
 
 
 def _device_registration_payload(**overrides):

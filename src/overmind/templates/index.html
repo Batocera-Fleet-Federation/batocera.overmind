@@ -1487,6 +1487,15 @@
                     <section class="dashboard-content">
                         <div id="devices-tab" class="content-section dashboard-tab active">
                             <div id="device-list-view">
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                                    <h3 class="mb-0">Drone Swarm</h3>
+                                    <div class="btn-group" role="group" aria-label="Swarm views">
+                                        <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="drones" onclick="setSwarmView('drones')"><i class="bi bi-hdd-network me-1"></i>Drones</button>
+                                        <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="downloads" onclick="setSwarmView('downloads')"><i class="bi bi-cloud-arrow-down me-1"></i>Downloads</button>
+                                        <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="sync-activity" onclick="setSwarmView('sync-activity')"><i class="bi bi-clock-history me-1"></i>Sync Activity</button>
+                                        <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="master-list" onclick="setSwarmView('master-list')"><i class="bi bi-list-stars me-1"></i>Master List</button>
+                                    </div>
+                                </div>
                                 <div id="pending-connections"></div>
                                 <div id="integration-token-panel" class="card mb-3 mutate-only">
                                     <div class="card-body py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
@@ -1495,14 +1504,6 @@
                                             <div class="small text-muted">Generate a token, paste it into Drone admin, then approve the Psionic connection.</div>
                                         </div>
                                         <button class="btn btn-outline-primary btn-sm" onclick="generateIntegrationToken()"><i class="bi bi-key me-1"></i>Generate Token</button>
-                                    </div>
-                                </div>
-                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-                                    <h3 class="mb-0">Drone Swarm</h3>
-                                    <div class="btn-group" role="group" aria-label="Swarm views">
-                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmHome()"><i class="bi bi-hdd-network me-1"></i>Drones</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmSyncActivity()"><i class="bi bi-clock-history me-1"></i>Sync Activity</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="showSwarmMasterList()"><i class="bi bi-list-stars me-1"></i>Master List</button>
                                     </div>
                                 </div>
                                 <div id="swarm-global-panel" class="mb-3" style="display:none;"></div>
@@ -2606,7 +2607,28 @@
                 `;
             }
 
-            function showSwarmHome() {
+            function setActiveSwarmView(viewName) {
+                document.querySelectorAll('.swarm-view-btn').forEach(btn => {
+                    const active = btn.getAttribute('data-swarm-view') === viewName;
+                    btn.classList.toggle('active', active);
+                    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+                });
+                const pendingPanel = document.getElementById('pending-connections');
+                if (pendingPanel) pendingPanel.style.display = viewName === 'drones' ? '' : 'none';
+            }
+
+            function setSwarmView(viewName) {
+                selectedDeviceId = null;
+                currentDeviceView = 'systems';
+                setRoute('devices', null, 'systems', viewName);
+            }
+
+            function showSwarmHome(updateUrl = true) {
+                if (updateUrl) {
+                    setSwarmView('drones');
+                    return;
+                }
+                setActiveSwarmView('drones');
                 const panel = document.getElementById('swarm-global-panel');
                 const list = document.getElementById('devices-list');
                 if (panel) {
@@ -2627,7 +2649,114 @@
                 return '';
             }
 
-            async function showSwarmSyncActivity() {
+            function formatBytes(value) {
+                const n = Number(value || 0);
+                if (!Number.isFinite(n) || n <= 0) return '0 B';
+                const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                let size = n;
+                let unit = 0;
+                while (size >= 1024 && unit < units.length - 1) {
+                    size /= 1024;
+                    unit += 1;
+                }
+                return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+            }
+
+            function flattenDownloadTargets(targets) {
+                const rows = [];
+                (targets || []).forEach(target => {
+                    [...(target.active || []), ...(target.queued || [])].forEach(row => {
+                        rows.push({
+                            ...row,
+                            target_drone_id: row.target_drone_id || target.target_drone_id,
+                            target_device_name: target.device_name || target.target_drone_id,
+                        });
+                    });
+                });
+                return rows;
+            }
+
+            function renderSwarmDownloadsTable(rows) {
+                return `<div class="table-responsive"><table class="table table-sm align-middle">
+                    <thead><tr>
+                        <th>Target</th><th>Source</th><th>Status</th><th>Queue</th><th>File</th><th>Size</th><th>Downloaded</th><th>Progress</th><th>Speed</th><th>Started</th><th>Reason</th><th></th>
+                    </tr></thead>
+                    <tbody>${rows.map(row => {
+                        const pct = Number(row.percentage || 0);
+                        const active = ['queued', 'downloading'].includes(String(row.status || ''));
+                        const canCancel = active && canMutateSwarm();
+                        return `<tr>
+                            <td class="small"><div class="fw-semibold">${escapeHtml(row.target_device_name || row.target_drone_id || 'n/a')}</div><div class="small text-muted mono">${escapeHtml(row.target_drone_id || '')}</div></td>
+                            <td class="small mono">${escapeHtml(row.source_drone_id || 'n/a')}</td>
+                            <td><span class="badge text-bg-${row.status === 'failed' ? 'danger' : row.status === 'completed' ? 'success' : row.status === 'cancelled' ? 'secondary' : 'primary'}">${escapeHtml(row.status || 'queued')}</span></td>
+                            <td class="small">${row.queue_position ? `#${escapeHtml(row.queue_position)}` : row.status === 'downloading' ? 'active' : ''}</td>
+                            <td class="small">${escapeHtml(row.file_path || row.relative_path || row.rom_name || '')}${row.failure_reason || row.error_message ? `<div class="text-danger">${escapeHtml(row.failure_reason || row.error_message)}</div>` : ''}</td>
+                            <td class="small">${formatBytes(row.total_bytes || row.file_size)}</td>
+                            <td class="small">${formatBytes(row.downloaded_bytes || row.bytes_transferred)}</td>
+                            <td style="min-width:150px"><div class="progress" style="height:.55rem"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="small text-muted">${pct.toFixed(1)}%</div></td>
+                            <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ''}</td>
+                            <td class="small text-muted">${escapeHtml(row.started_at || row.download_started_at || row.created_at || '')}</td>
+                            <td class="small text-danger">${escapeHtml(row.failure_reason || row.error_message || row.cancel_reason || '')}</td>
+                            <td>${canCancel ? `<button class="btn btn-outline-danger btn-sm" onclick="cancelSwarmDownload('${escapeHtml(row.target_drone_id)}','${escapeHtml(row.job_id || row.id)}')"><i class="bi bi-x-circle"></i></button>` : ''}</td>
+                        </tr>`;
+                    }).join('')}</tbody></table></div>`;
+            }
+
+            async function showSwarmDownloads(updateUrl = true) {
+                if (updateUrl) {
+                    setSwarmView('downloads');
+                    return;
+                }
+                setActiveSwarmView('downloads');
+                const panel = document.getElementById('swarm-global-panel');
+                const list = document.getElementById('devices-list');
+                if (!panel) return;
+                if (list) list.style.display = 'none';
+                panel.style.display = 'block';
+                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading downloads...</div></div>`;
+                try {
+                    const response = await apiGet('/api/downloads');
+                    if (!response.ok) throw new Error('Failed to load downloads');
+                    const payload = await response.json();
+                    const targets = payload.targets || [];
+                    const rows = flattenDownloadTargets(targets);
+                    if (!rows.length) {
+                        panel.innerHTML = '<div class="empty-state">No downloads in flight.</div>';
+                        return;
+                    }
+                    panel.innerHTML = `<div class="card"><div class="card-body py-3">
+                        <div class="d-flex flex-wrap justify-content-between gap-2 mb-3">
+                            <div><strong>Swarm Downloads</strong><div class="small text-muted">Concurrency is limited to one active download per target Drone, not globally.</div></div>
+                            <button class="btn btn-outline-primary btn-sm" onclick="showSwarmDownloads(false)"><i class="bi bi-arrow-repeat"></i></button>
+                        </div>
+                        ${renderSwarmDownloadsTable(rows)}
+                    </div></div>`;
+                    applyRbacUI();
+                } catch (error) {
+                    panel.innerHTML = '<div class="empty-state">Unable to load downloads.</div>';
+                }
+            }
+
+            async function cancelSwarmDownload(deviceId, jobId) {
+                if (!deviceId || !jobId || !window.confirm('Cancel this download on the target Drone?')) return;
+                const response = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/downloads/${encodeURIComponent(jobId)}/cancel`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                if (!response.ok) {
+                    showMessage('Unable to queue cancel request.', 'error');
+                    return;
+                }
+                showMessage('Cancel request sent to the target Drone.', 'success');
+                await showSwarmDownloads(false);
+            }
+
+            async function showSwarmSyncActivity(updateUrl = true) {
+                if (updateUrl) {
+                    setSwarmView('sync-activity');
+                    return;
+                }
+                setActiveSwarmView('sync-activity');
                 const panel = document.getElementById('swarm-global-panel');
                 const list = document.getElementById('devices-list');
                 if (!panel) return;
@@ -2659,7 +2788,7 @@
                                     <option value="skipped" ${statusValue === 'skipped' ? 'selected' : ''}>Skipped</option>
                                 </select>
                             </div>
-                            <button class="btn btn-primary" onclick="showSwarmSyncActivity()">Search</button>
+                            <button class="btn btn-primary" onclick="showSwarmSyncActivity(false)">Search</button>
                         </div>
                         <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
                             <th>Status</th><th>Transfer</th><th>ROM</th><th>MD5</th><th>Duration</th><th>Time</th>
@@ -2680,14 +2809,19 @@
                         ${rows.length ? '' : '<div class="small text-muted">No swarm sync activity matched.</div>'}
                     </div></div>`;
                     document.getElementById('swarm-sync-search')?.addEventListener('keydown', event => {
-                        if (event.key === 'Enter') showSwarmSyncActivity();
+                        if (event.key === 'Enter') showSwarmSyncActivity(false);
                     });
                 } catch (error) {
                     panel.innerHTML = '<div class="empty-state">Unable to load swarm sync activity.</div>';
                 }
             }
 
-            async function showSwarmMasterList() {
+            async function showSwarmMasterList(updateUrl = true) {
+                if (updateUrl) {
+                    setSwarmView('master-list');
+                    return;
+                }
+                setActiveSwarmView('master-list');
                 const panel = document.getElementById('swarm-global-panel');
                 const list = document.getElementById('devices-list');
                 if (!panel) return;
@@ -2709,7 +2843,7 @@
                                 <label class="form-label" for="swarm-master-search">Search Master List</label>
                                 <input id="swarm-master-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="System, ROM, md5, Drone">
                             </div>
-                            <button class="btn btn-primary" onclick="showSwarmMasterList()">Search</button>
+                            <button class="btn btn-primary" onclick="showSwarmMasterList(false)">Search</button>
                         </div>
                         <div class="small text-muted mb-2">${payload.total || rows.length} unique ROMs across approved Drones</div>
                         <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
@@ -2730,7 +2864,7 @@
                         ${rows.length ? '' : '<div class="small text-muted">No ROMs matched.</div>'}
                     </div></div>`;
                     document.getElementById('swarm-master-search')?.addEventListener('keydown', event => {
-                        if (event.key === 'Enter') showSwarmMasterList();
+                        if (event.key === 'Enter') showSwarmMasterList(false);
                     });
                 } catch (error) {
                     panel.innerHTML = '<div class="empty-state">Unable to load swarm master list.</div>';
@@ -3502,8 +3636,9 @@
                 if (updateUrl) setRoute('devices', selectedDeviceId, currentDeviceView);
             }
 
-            function setRoute(tabName, deviceId = selectedDeviceId, deviceView = currentDeviceView) {
+            function setRoute(tabName, deviceId = selectedDeviceId, deviceView = currentDeviceView, swarmView = null) {
                 let hash = `#/${tabName}`;
+                if (tabName === 'devices' && !deviceId && swarmView) hash = `#/devices/swarm/${swarmView}`;
                 if (tabName === 'devices' && deviceId) hash = `#/devices/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`;
                 if (window.location.hash !== hash) window.location.hash = hash; else applyRouteFromHash();
             }
@@ -3517,9 +3652,13 @@
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
+                if (tab === 'devices' && parts[1] === 'swarm') {
+                    const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
+                    return { tab, deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[2]) ? parts[2] : 'drones' };
+                }
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
                 const deviceView = tab === 'devices' && ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
-                return { tab, deviceId, deviceView };
+                return { tab, deviceId, deviceView, swarmView: 'drones' };
             }
 
             function applyRouteFromHash() {
@@ -3534,6 +3673,13 @@
                 updateSelectedDeviceWorkspace();
                 switchTab(route.tab, null, false);
                 if (selectedDeviceId && route.tab === 'devices') switchDeviceView(currentDeviceView, null, false);
+                if (!selectedDeviceId && route.tab === 'devices') {
+                    const view = route.swarmView || 'drones';
+                    if (view === 'downloads') showSwarmDownloads(false);
+                    else if (view === 'sync-activity') showSwarmSyncActivity(false);
+                    else if (view === 'master-list') showSwarmMasterList(false);
+                    else showSwarmHome(false);
+                }
             }
 
             async function loadDeviceActions() {

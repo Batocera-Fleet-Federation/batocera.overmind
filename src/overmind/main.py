@@ -37,6 +37,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "collect_log_sources",
     "sync_rom",
     "sync_system",
+    "cancel_download",
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
@@ -934,6 +935,33 @@ async def list_device_actions(device_id: str, authorization: Optional[str] = Hea
     return {"actions": actions}
 
 
+@app.get("/api/downloads")
+async def list_downloads(device_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    if device_id:
+        device = db.user_can_access_device(user["id"], device_id)
+        if not device:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    states = db.get_download_states(user["id"], device_id=device_id)
+    return {
+        "concurrency": {"scope": "target_drone", "active_limit": 1},
+        "targets": states,
+    }
+
+
+@app.post("/api/devices/{device_id}/downloads/{job_id}/cancel")
+async def cancel_device_download(device_id: str, job_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    action = db.create_device_action(device["user_id"], device_id, "cancel_download", {"job_id": job_id})
+    if not action:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"status": "queued", "action": action}
+
+
 @app.post("/api/devices/{device_id}/actions")
 async def create_device_action(
     device_id: str,
@@ -984,6 +1012,8 @@ async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional
         db.update_device_name(device_id, drone_name)
     if isinstance(payload.get("rom_metadata"), dict):
         db.store_rom_metadata(device_id, payload["rom_metadata"])
+    if isinstance(payload.get("downloads"), dict):
+        db.store_download_state(device_id, payload["downloads"])
     actions = db.claim_pending_device_actions(device_id)
     updated = db.get_device(device["id"])
     swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)

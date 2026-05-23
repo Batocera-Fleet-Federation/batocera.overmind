@@ -26,6 +26,7 @@ class FakeDatabase:
         "integration_tokens",
         "approved_drone_tokens",
         "rom_sync_activity",
+        "download_states",
         "pending_drone_connections",
         "email_verifications",
         "password_resets",
@@ -65,6 +66,7 @@ class FakeDatabase:
         "add_peer_checks",
         "add_roms",
         "add_rom_sync_activity",
+        "store_download_state",
         "log_gameplay",
         "populate_fake_data",
         "create_email_verification",
@@ -104,6 +106,7 @@ class FakeDatabase:
         self.integration_tokens: Dict[str, list] = {}
         self.approved_drone_tokens: Dict[str, str] = {}
         self.rom_sync_activity: Dict[str, list] = {}
+        self.download_states: Dict[str, dict] = {}
         self.pending_drone_connections: Dict[str, dict] = {}
         self.email_verifications: Dict[str, dict] = {}
         self.password_resets: Dict[str, dict] = {}
@@ -1235,6 +1238,48 @@ class FakeDatabase:
             bucket.append(entry)
             del bucket[:-200]
         return entry
+
+    def store_download_state(self, device_id: str, payload: dict) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        state = payload if isinstance(payload, dict) else {}
+        clean = {
+            "target_drone_id": state.get("target_drone_id") or device_id,
+            "concurrency": state.get("concurrency") if isinstance(state.get("concurrency"), dict) else {"scope": "target_drone", "active_limit": 1},
+            "active": state.get("active") if isinstance(state.get("active"), list) else [],
+            "queued": state.get("queued") if isinstance(state.get("queued"), list) else [],
+            "recent": state.get("recent") if isinstance(state.get("recent"), list) else [],
+            "downloads": state.get("downloads") if isinstance(state.get("downloads"), list) else [],
+            "received_at": datetime.utcnow(),
+        }
+        if not clean["downloads"]:
+            clean["downloads"] = clean["active"] + clean["queued"] + clean["recent"]
+        self.download_states[device["id"]] = clean
+        return clean
+
+    def get_download_states(self, user_id: str, device_id: Optional[str] = None) -> List[dict]:
+        devices = [self.user_can_access_device(user_id, device_id)] if device_id else self.get_user_devices(user_id)
+        rows = []
+        for device in devices:
+            if not device:
+                continue
+            state = dict(self.download_states.get(device["id"]) or {})
+            if not state:
+                state = {
+                    "target_drone_id": device.get("device_id"),
+                    "concurrency": {"scope": "target_drone", "active_limit": 1},
+                    "active": [],
+                    "queued": [],
+                    "recent": [],
+                    "downloads": [],
+                    "received_at": None,
+                }
+            state["target_drone_id"] = state.get("target_drone_id") or device.get("device_id")
+            state["device_name"] = device.get("device_name")
+            rows.append(state)
+        rows.sort(key=lambda row: str(row.get("target_drone_id") or "").lower())
+        return rows
 
     def get_rom_sync_activity(self, user_id: str, device_id: str) -> Optional[List[dict]]:
         device = self.get_device_by_device_id(device_id)
