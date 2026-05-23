@@ -31,6 +31,11 @@ def client(monkeypatch):
     db.rom_sync_activity.clear()
     db.download_states.clear()
     db.pending_drone_connections.clear()
+    db.email_verifications.clear()
+    db.password_resets.clear()
+    db.swarms.clear()
+    db.swarm_memberships.clear()
+    db.invitations.clear()
     return TestClient(app)
 
 
@@ -152,6 +157,24 @@ def test_email_registration_requires_verification(client, monkeypatch):
     verify = client.post("/api/auth/verify-email", json={"email": "verify@example.com", "code": code})
     assert verify.status_code == 200
     assert client.post("/api/auth/login", json={"email": "verify@example.com", "password": "testpass123"}).status_code == 200
+
+
+def test_fake_data_logs_registration_verification_code(client, monkeypatch, capsys):
+    monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
+    monkeypatch.setenv("USE_FAKE_DATA", "true")
+    response = client.post("/api/auth/register", json={"email": "fake-code@example.com", "password": "testpass123"})
+    assert response.status_code == 200
+    captured = capsys.readouterr()
+    assert "USE_FAKE_DATA registration verification code for fake-code@example.com:" in captured.out
+
+
+def test_normal_mode_does_not_log_registration_verification_code(client, monkeypatch, capsys):
+    monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
+    monkeypatch.delenv("USE_FAKE_DATA", raising=False)
+    response = client.post("/api/auth/register", json={"email": "real-code@example.com", "password": "testpass123"})
+    assert response.status_code == 200
+    captured = capsys.readouterr()
+    assert "registration verification code for real-code@example.com" not in captured.out
 
 
 def test_expired_verification_code_fails(client, monkeypatch):
@@ -1065,7 +1088,7 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
     assert detail["peer_checks"][0]["target_name"]
 
 
-def test_heartbeat_persists_rom_metadata_and_swarm_reachable_url(client):
+def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
@@ -1101,7 +1124,65 @@ def test_heartbeat_persists_rom_metadata_and_swarm_reachable_url(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert roms_response.status_code == 200
+    before_snes_count = len(roms_response.json()["systems"].get("snes", []))
+
+    metadata_response = client.post(
+        "/api/devices/arcade-cabinet-001/rom-metadata",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={
+            "device_id": "arcade-cabinet-001",
+            "type": "rom_metadata",
+            "roms_root": "/userdata/roms",
+            "systems": [{"name": "snes", "rom_count": 2}],
+            "roms": [
+                {"system": "snes", "name": "Super Metroid", "rom_file": "Super Metroid (USA).zip", "byte_count": 32, "rom_md5": "aaa"},
+                {"system": "snes", "name": "Chrono Trigger", "rom_file": "Chrono Trigger (USA).zip", "byte_count": 32, "rom_md5": "bbb"},
+            ],
+            "gamelists": [],
+        },
+    )
+    assert metadata_response.status_code == 200
+    assert metadata_response.json()["rom_count"] == 2
+
+    roms_response = client.get(
+        "/api/devices/arcade-cabinet-001/roms",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     assert len(roms_response.json()["systems"]["snes"]) == 2
+    assert len(roms_response.json()["systems"]["snes"]) != before_snes_count
+
+
+def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    swarm_id = db.default_swarm_id(db.get_user_by_email("owner@example.com")["id"])
+
+    invite_response = client.post(
+        f"/api/swarms/{swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "new-user@example.com"},
+    )
+    assert invite_response.status_code == 200
+    invite = next(row for row in db.invitations.values() if row["email"] == "new-user@example.com")
+    # The raw email token is only sent by email, so use a test-created invitation for token checks.
+    import secrets
+    raw_token = secrets.token_urlsafe(16)
+    invite["token_hash"] = auth_utils.hash_password(f"{TOKEN_HASH_SECRET}:{raw_token}")
+
+    mismatch = client.post(
+        "/api/auth/register",
+        json={"email": "someone-else@example.com", "password": "testpass123", "invitation_token": raw_token},
+    )
+    assert mismatch.status_code == 403
+
+    registered = client.post(
+        "/api/auth/register",
+        json={"email": "new-user@example.com", "password": "testpass123", "invitation_token": raw_token},
+    )
+    assert registered.status_code == 200
+    new_user = db.get_user_by_email("new-user@example.com")
+    assert new_user["email_verified"] is True
+    assert db.get_swarm_member(swarm_id, new_user["id"])["role"] == "overseer"
 
 
 def test_overmind_manufactures_and_reuses_certificate(tmp_path, monkeypatch):

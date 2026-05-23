@@ -1771,6 +1771,7 @@
             let inactivityTimer = null;
             let lastAuthRefreshAt = 0;
             let authRefreshInFlight = false;
+            let pendingInvitationToken = sessionStorage.getItem('pending_invitation_token') || null;
             const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
             const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
             const MASTER_ROM_PAGE_SIZE = 100;
@@ -1934,6 +1935,7 @@
             }
 
             function startOAuth(provider) {
+                if (pendingInvitationToken) sessionStorage.setItem('pending_invitation_token', pendingInvitationToken);
                 window.location.href = `/api/auth/${provider}/start`;
             }
 
@@ -1945,7 +1947,12 @@
                 if (!token) return;
                 authToken = token;
                 localStorage.setItem('auth_token', authToken);
+                pendingInvitationToken = sessionStorage.getItem('pending_invitation_token') || pendingInvitationToken;
 	                window.location.hash = '#/devices';
+                if (pendingInvitationToken) {
+                    acceptPendingInvitation().catch(error => showMessage(error.message, 'error'));
+                    return;
+                }
 	                showMessage('Overlord authenticated.', 'success');
 	            }
 
@@ -1956,8 +1963,51 @@
 	                    showAuthOnly('reset-form');
 	                } else if (hash.startsWith('#verified=')) {
 	                    showMessage('Email verified. You can log in now.', 'success');
+	                } else if (hash.startsWith('#invite=')) {
+	                    pendingInvitationToken = new URLSearchParams(hash.slice(1)).get('invite');
+                        if (pendingInvitationToken) sessionStorage.setItem('pending_invitation_token', pendingInvitationToken);
+	                    handleInvitationLink();
 	                }
 	            }
+
+            async function handleInvitationLink() {
+                if (!pendingInvitationToken) return;
+                try {
+                    const response = await fetch(`/api/invitations/status?token=${encodeURIComponent(pendingInvitationToken)}`);
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data.detail || 'Invitation expired or invalid');
+                    document.getElementById('login-email').value = data.email || '';
+                    document.getElementById('register-email').value = data.email || '';
+                    if (authToken) {
+                        await acceptPendingInvitation();
+                        return;
+                    }
+                    showAuthOnly(data.registered ? 'login-form' : 'register-form');
+                    showMessage(data.registered ? 'Sign in to accept this invitation.' : 'Registration required before accepting this invitation.', 'success');
+                } catch (error) {
+                    showAuthOnly('login-form');
+                    showMessage(error.message, 'error');
+                }
+            }
+
+            async function acceptPendingInvitation() {
+                if (!pendingInvitationToken || !authToken) return;
+                const response = await fetch('/api/invitations/accept', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                    body: JSON.stringify({ token: pendingInvitationToken })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Invitation expired or invalid');
+                pendingInvitationToken = null;
+                sessionStorage.removeItem('pending_invitation_token');
+                window.location.hash = '#/devices';
+                await loadSwarms();
+                showDashboard();
+                renderSwarmSelector();
+                await loadDevices();
+                showMessage('Invitation accepted.', 'success');
+            }
 
 	            function showAuthOnly(id) {
                     hideLandingShell();
@@ -2002,6 +2052,10 @@
 	                    selectedSwarmId = selectedSwarmId || (currentSwarms[0] && currentSwarms[0].id) || null;
 	                    if (selectedSwarmId) localStorage.setItem('selected_swarm_id', selectedSwarmId);
 	                    localStorage.setItem('auth_token', authToken);
+                        if (pendingInvitationToken) {
+                            await acceptPendingInvitation();
+                            return;
+                        }
 	                    showDashboard();
 	                    renderSwarmSelector();
                     await loadProfile();
@@ -2026,15 +2080,21 @@
                     const response = await fetch('/api/auth/register', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email, password, full_name })
+                        body: JSON.stringify({ email, password, full_name, invitation_token: pendingInvitationToken })
                     });
                     if (!response.ok) {
                         const error = await response.json();
                         throw new Error(error.detail || 'Registration failed');
                     }
-	                    document.getElementById('verify-email').value = email;
-	                    showAuthOnly('verify-form');
-	                    showMessage('Overlord created. Check your email for the validation code.', 'success');
+                        if (pendingInvitationToken) {
+                            showAuthOnly('login-form');
+                            document.getElementById('login-email').value = email;
+                            showMessage('Registration complete. Sign in to finish accepting the invitation.', 'success');
+                        } else {
+	                        document.getElementById('verify-email').value = email;
+	                        showAuthOnly('verify-form');
+	                        showMessage('Overlord created. Check your email for the validation code.', 'success');
+                        }
                 } catch (error) {
                     showMessage('Registration failed: ' + error.message, 'error');
 	                } finally {

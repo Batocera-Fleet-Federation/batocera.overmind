@@ -49,6 +49,10 @@ CONTENT_DIR = Path(__file__).resolve().parent.parent.parent / "content"
 OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
 
+
+def use_fake_data_enabled() -> bool:
+    return os.getenv("USE_FAKE_DATA", "").strip().lower() in {"1", "true", "yes", "on"}
+
 app = FastAPI(
     title="Batocera Overmind API",
     description="API for Batocera system management and game tracking",
@@ -236,6 +240,8 @@ def verify_secret_token(token: str, stored_hash: str) -> bool:
 
 
 def send_verification_email(user: dict, code: str, token: str) -> None:
+    if use_fake_data_enabled():
+        print(f"USE_FAKE_DATA registration verification code for {user['email']}: {code}")
     link = f"{emailer.base_url()}/api/auth/verify-email?token={urllib.parse.quote(token)}"
     body_html = emailer.render_email_template(
         "registration_verification.html",
@@ -344,15 +350,30 @@ def device_response(device: dict) -> dict:
 async def register(user_data: UserRegister):
     """Register a new user."""
     if db.user_exists(user_data.email):
+        print(f"Register failed for {user_data.email}: email_already_registered")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
+    invitation = None
+    if user_data.invitation_token:
+        invitation = db.find_invitation_by_token(user_data.invitation_token, verify_secret_token)
+        if not invitation or invitation.get("status") != "pending" or datetime.utcnow() > invitation.get("expires_at"):
+            print(f"Invitation registration rejected for {user_data.email}: invalid_or_expired")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation expired or invalid")
+        if invitation.get("email") != str(user_data.email).lower():
+            print(f"Invitation registration rejected for {user_data.email}: email_mismatch")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invitation email mismatch")
     
     hashed_password = auth.hash_password(user_data.password)
     auto_verify = os.getenv("OVERMIND_AUTO_VERIFY_REGISTRATION", "").strip().lower() in {"1", "true", "yes", "on"}
+    if invitation:
+        auto_verify = True
     user_id = db.create_user(user_data.email, hashed_password, user_data.full_name, verified=auto_verify, auth_provider="password")
     user = db.get_user(user_id)
+    if invitation:
+        db.accept_invitation_for_user(invitation, user_id)
+        print(f"Invitation registration flow completed for {user_data.email}: swarm_id={invitation.get('swarm_id')}")
     if not auto_verify:
         code = f"{secrets.randbelow(1000000):06d}"
         raw_token = secrets.token_urlsafe(32)
@@ -378,6 +399,7 @@ async def login(credentials: UserLogin):
     user = db.get_user_by_email(credentials.email)
     
     if not user or not auth.verify_password(credentials.password, user["password"]):
+        print(f"Login failed for {credentials.email}: invalid_credentials")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
@@ -634,18 +656,50 @@ async def invite_swarm_member(swarm_id: str, payload: SwarmInviteRequest, author
     invited = db.get_user_by_email(str(payload.email))
     if invited and invited.get("is_active"):
         db.accept_invitations_for_email(str(payload.email), invited["id"])
+        print(f"Invitation accepted for existing user {payload.email}: swarm_id={swarm_id}")
     swarm = db.swarms.get(swarm_id) or {}
     send_invitation_email(str(payload.email), swarm, role, raw_token)
+    print(f"Invitation created for {payload.email}: swarm_id={swarm_id} role={role}")
     return {"invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
+
+
+@app.get("/api/invitations/status")
+async def invitation_status(token: str):
+    invite = db.find_invitation_by_token(token, verify_secret_token)
+    if not invite:
+        print("Invitation rejected: invalid")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation expired or invalid")
+    if invite.get("status") != "pending":
+        print(f"Invitation rejected for {invite.get('email')}: already_used")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation already used")
+    if datetime.utcnow() > invite.get("expires_at"):
+        print(f"Invitation rejected for {invite.get('email')}: expired")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation expired or invalid")
+    return {
+        "status": "pending",
+        "email": invite.get("email"),
+        "swarm_id": invite.get("swarm_id"),
+        "role": invite.get("role") or READONLY_ROLE,
+        "registered": bool(db.get_user_by_email(str(invite.get("email") or ""))),
+    }
 
 
 @app.post("/api/invitations/accept")
 async def accept_invitation(payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     token = str(payload.get("token") or "")
-    invite = db.accept_invitation(token, user["id"], verify_secret_token)
+    invite = db.find_invitation_by_token(token, verify_secret_token)
     if not invite:
+        print(f"Invitation rejected for user={user.get('email')}: invalid")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired invitation")
+    if invite.get("email") != str(user.get("email") or "").lower():
+        print(f"Invitation rejected for user={user.get('email')}: email_mismatch invited={invite.get('email')}")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invitation email mismatch")
+    invite = db.accept_invitation_for_user(invite, user["id"])
+    if not invite:
+        print(f"Invitation rejected for user={user.get('email')}: expired_or_used")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired invitation")
+    print(f"Invitation accepted for {user.get('email')}: swarm_id={invite['swarm_id']}")
     return {"status": "accepted", "swarm_id": invite["swarm_id"]}
 
 
@@ -1016,7 +1070,7 @@ async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional
     db.update_device_last_seen(
         device["id"],
         network=payload.get("network") if isinstance(payload.get("network"), dict) else None,
-        rom_systems=payload.get("rom_systems") if isinstance(payload.get("rom_systems"), list) else None,
+        rom_systems=None,
         api_port=payload.get("api_port") if payload.get("api_port") is not None else None,
         scheme=str(payload.get("scheme") or payload.get("protocol") or "").strip() or None,
         reachable_url=str(payload.get("reachable_url") or "").strip() or None,
@@ -1027,13 +1081,37 @@ async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional
     if drone_name:
         db.update_device_name(device_id, drone_name)
     if isinstance(payload.get("rom_metadata"), dict):
-        db.store_rom_metadata(device_id, payload["rom_metadata"])
+        print(f"Heartbeat ROM metadata ignored for {device_id}: use /api/devices/{device_id}/rom-metadata")
+    if isinstance(payload.get("rom_systems"), list):
+        print(f"Heartbeat ROM systems ignored for {device_id}: use /api/devices/{device_id}/rom-metadata")
     if isinstance(payload.get("downloads"), dict):
         db.store_download_state(device_id, payload["downloads"])
     actions = db.claim_pending_device_actions(device_id)
     updated = db.get_device(device["id"])
     swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
     return {"status": "ok", "actions": actions, "action": actions[0] if actions else None, "device": device_response(updated), "swarm": swarm}
+
+
+@app.post("/api/devices/{device_id}/rom-metadata")
+async def upload_drone_rom_metadata(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Receive full ROM metadata snapshots from a Drone outside heartbeat."""
+    get_current_drone(device_id, authorization)
+    payload_device_id = str(payload.get("device_id") or device_id)
+    if payload_device_id != device_id:
+        print(f"ROM metadata upload rejected for {device_id}: payload_device_id={payload_device_id}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload device_id mismatch")
+    roms = payload.get("roms") if isinstance(payload.get("roms"), list) else []
+    db.store_rom_metadata(device_id, payload)
+    print(f"ROM metadata upload accepted for {device_id}: rom_count={len(roms)}")
+    return {"status": "accepted", "device_id": device_id, "rom_count": len(roms)}
+
+
+@app.post("/api/drones/rom-metadata")
+async def upload_drone_rom_metadata_by_payload(payload: dict, authorization: Optional[str] = Header(default=None)):
+    device_id = str(payload.get("device_id") or "").strip()
+    if not device_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_id is required")
+    return await upload_drone_rom_metadata(device_id, payload, authorization)
 
 
 @app.post("/api/devices/{device_id}/events")

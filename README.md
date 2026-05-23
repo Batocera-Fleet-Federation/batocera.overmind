@@ -373,6 +373,31 @@ The project mascot at `content/batocera-swarm-mascot.jpg` is used in the Overmin
 
 The Overmind UI keeps authenticated users signed in while they are active. Mouse, keyboard, touch, scroll, and navigation activity reset a 5 minute inactivity timer. Active sessions periodically refresh their JWT through an authenticated backend endpoint, so normal use does not trip the fixed token lifetime. When the inactivity timer expires, local auth state is cleared, the user is returned to login, and a timeout message is shown. Backend token validation still applies to every API request and token refresh.
 
+## Drone ROM Metadata
+
+Drone heartbeat no longer stores ROM metadata. If an older Drone still sends `rom_metadata` in a heartbeat, Overmind accepts the heartbeat for compatibility, logs that the ROM metadata was ignored, and keeps the heartbeat focused on lightweight health/status fields.
+
+ROM inventory now arrives through Drone-authenticated metadata uploads:
+
+```text
+POST /api/devices/{device_id}/rom-metadata
+POST /api/drones/rom-metadata
+```
+
+The payload is the full ROM metadata snapshot previously used for visibility and sync, including `device_id`, systems, ROM path/name, size, modified time, MD5, and existing ROM display/sync fields. Overmind validates the Drone bearer token, logs accepted or rejected uploads, records the ROM count, and updates the existing ROM storage/display path.
+
+## Fake Data and Invitations
+
+When `USE_FAKE_DATA=true`, registration verification codes are logged for local testing as:
+
+```text
+USE_FAKE_DATA registration verification code for <email>: <code>
+```
+
+Codes are not logged unless fake data mode is enabled. Passwords, auth tokens, invitation tokens, and OAuth secrets are never logged.
+
+Swarm invitation emails contain an accept link. Existing registered users can accept after signing in and are added as Overseer. New users can register from the invite link with password, GitHub, or Google auth; valid invitation registration auto-verifies the new user, accepts the invitation, and adds the user as Overseer without a separate verification email. Invitations remain tied to the invited email address and cannot be claimed by a different account.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

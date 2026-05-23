@@ -76,6 +76,7 @@ class FakeDatabase:
         "create_swarm",
         "invite_to_swarm",
         "accept_invitation",
+        "accept_invitation_for_user",
         "remove_swarm_member",
         "update_swarm_member_role",
         "update_swarm_name",
@@ -341,6 +342,25 @@ class FakeDatabase:
                 invite["accepted_at"] = datetime.utcnow()
                 return invite
         return None
+
+    def find_invitation_by_token(self, token: str, verifier) -> Optional[dict]:
+        for invite in self.invitations.values():
+            if verifier(token, invite.get("token_hash") or ""):
+                return invite
+        return None
+
+    def accept_invitation_for_user(self, invite: dict, user_id: str) -> Optional[dict]:
+        user = self.get_user(user_id)
+        if not user or not invite:
+            return None
+        if invite.get("status") != "pending" or datetime.utcnow() > invite.get("expires_at"):
+            return None
+        if invite.get("email") != str(user.get("email") or "").lower():
+            return None
+        self.swarm_memberships.setdefault(invite["swarm_id"], {})[user_id] = {"user_id": user_id, "role": "overseer", "created_at": datetime.utcnow()}
+        invite["status"] = "accepted"
+        invite["accepted_at"] = datetime.utcnow()
+        return invite
 
     def accept_invitations_for_email(self, email: str, user_id: str) -> None:
         for invite in self.invitations.values():
