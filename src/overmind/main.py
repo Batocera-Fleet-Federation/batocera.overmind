@@ -1524,17 +1524,21 @@ async def startup_event():
     if environment in {"prod", "production"} and not database_url():
         raise RuntimeError("OVERMIND_DATABASE_URL or PostgreSQL environment variables are required in production mode")
     
-    # Validate AWS SES configuration in production
+    # Validate email configuration in production.
     if environment in {"prod", "production"}:
-        aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-        aws_ses_from = os.getenv("AWS_SES_FROM_ADDRESS") or os.getenv("SES_FROM_EMAIL")
-        if not aws_region:
-            raise RuntimeError("AWS_REGION environment variable is required in production mode for AWS SES email")
-        if not aws_ses_from:
-            raise RuntimeError(
-                "AWS_SES_FROM_ADDRESS (or SES_FROM_EMAIL) environment variable is required in production mode. "
-                "Value must be a verified sender email address in AWS SES console (Settings → Verified identities)."
-            )
+        selected_provider = emailer.provider()
+        if selected_provider == "smtp":
+            required = ["EMAIL_FROM", "SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"]
+            missing = [name for name in required if not os.getenv(name)]
+            if missing:
+                raise RuntimeError(f"SMTP email requires environment variable(s) in production: {', '.join(missing)}")
+        elif selected_provider == "ses":
+            aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+            aws_ses_from = os.getenv("EMAIL_FROM") or os.getenv("AWS_SES_FROM_ADDRESS") or os.getenv("SES_FROM_EMAIL")
+            if not aws_region:
+                raise RuntimeError("AWS_REGION environment variable is required in production mode for AWS SES email")
+            if not aws_ses_from:
+                raise RuntimeError("EMAIL_FROM or AWS_SES_FROM_ADDRESS environment variable is required in production mode for AWS SES email.")
     
     key_file, cert_file = ensure_self_signed_cert()
     print("🎮 Batocera Overmind API started")
