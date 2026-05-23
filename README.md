@@ -342,6 +342,37 @@ curl -X POST "http://localhost:8000/api/devices/device-uuid-123/gameplay" \
 7. Implement request validation middleware
 8. Add comprehensive logging
 
+## Runtime Secrets and Email
+
+Overmind can load runtime ENV overrides from AWS Secrets Manager. By default it looks for a JSON object secret named `overmind`; configure another name with `OVERMIND_RUNTIME_SECRET_NAME`. Every JSON key/value pair is applied as an environment variable override, and secret values override container ENV values.
+
+Example secret:
+
+```json
+{
+  "SMTP_USERNAME": "admin@theoutlawoasis.com",
+  "SMTP_PASSWORD": "secret-value",
+  "EMAIL_FROM": "noreply@theoutlawoasis.com",
+  "EMAIL_FROM_DISPLAY_NAME": "Batocera Overmind"
+}
+```
+
+Create or update it manually:
+
+```bash
+aws secretsmanager put-secret-value --secret-id overmind --secret-string file://overmind-secret.json
+```
+
+Secret values are not committed to source control and are never logged. Startup attempts to load the secret once, then a background refresher polls for changes every `OVERMIND_SECRET_REFRESH_SECONDS` seconds, defaulting to 60. Refresh failures do not crash the app; the last successfully loaded values remain active. SMTP/email settings refresh live because they are read when each email is sent. Some settings initialized once by libraries or long-lived clients can still require restart; `SECRET_KEY` and `TOKEN_HASH_SECRET` are explicitly updated when refreshed.
+
+Outbound email supports `EMAIL_FROM_DISPLAY_NAME`. When set with `EMAIL_FROM`, messages are sent as `Display Name <email@domain.com>`. When unset, existing `EMAIL_FROM` behavior is preserved.
+
+## Branding and Sessions
+
+The project mascot at `content/batocera-swarm-mascot.jpg` is used in the Overmind landing/header brand and the Drone header brand for consistent visual identity. Images are responsive and include alt text.
+
+The Overmind UI keeps authenticated users signed in while they are active. Mouse, keyboard, touch, scroll, and navigation activity reset a 5 minute inactivity timer. Active sessions periodically refresh their JWT through an authenticated backend endpoint, so normal use does not trip the fixed token lifetime. When the inactivity timer expires, local auth state is cleared, the user is returned to login, and a timeout message is shown. Backend token validation still applies to every API request and token refresh.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

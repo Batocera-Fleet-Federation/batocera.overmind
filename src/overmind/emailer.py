@@ -5,6 +5,7 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
+from email.utils import formataddr
 from html import escape
 from pathlib import Path
 from typing import Optional
@@ -72,8 +73,17 @@ def _sender(from_email: Optional[str] = None) -> Optional[str]:
     return from_email or os.getenv("EMAIL_FROM") or os.getenv("SMTP_FROM") or os.getenv("AWS_SES_FROM_ADDRESS") or os.getenv("SES_FROM_EMAIL")
 
 
+def sender_header(from_email: Optional[str] = None) -> Optional[str]:
+    sender = _sender(from_email)
+    display_name = os.getenv("EMAIL_FROM_DISPLAY_NAME", "").strip()
+    if sender and display_name:
+        return formataddr((display_name, sender))
+    return sender
+
+
 def _send_smtp_email(to_email: str, subject: str, html_body: str, text_body: str, from_email: Optional[str] = None) -> bool:
     sender = _sender(from_email)
+    formatted_sender = sender_header(from_email)
     host = os.getenv("SMTP_HOST", "").strip()
     username = os.getenv("SMTP_USERNAME", "").strip()
     password = os.getenv("SMTP_PASSWORD", "")
@@ -99,7 +109,7 @@ def _send_smtp_email(to_email: str, subject: str, html_body: str, text_body: str
         return False
 
     message = EmailMessage()
-    message["From"] = sender
+    message["From"] = formatted_sender
     message["To"] = to_email
     message["Subject"] = subject
     message.set_content(text_body)
@@ -145,6 +155,7 @@ def _send_smtp_email(to_email: str, subject: str, html_body: str, text_body: str
 
 def _send_ses_email(to_email: str, subject: str, html_body: str, text_body: str, from_email: Optional[str] = None) -> bool:
     sender = _sender(from_email)
+    formatted_sender = sender_header(from_email)
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
 
     if not sender:
@@ -159,7 +170,7 @@ def _send_ses_email(to_email: str, subject: str, html_body: str, text_body: str,
 
         client = boto3.client("ses", region_name=region)
         client.send_email(
-            Source=sender,
+            Source=formatted_sender,
             Destination={"ToAddresses": [to_email]},
             Message={
                 "Subject": {"Data": subject, "Charset": "UTF-8"},

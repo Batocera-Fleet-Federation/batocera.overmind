@@ -104,6 +104,19 @@ def test_login(client):
     assert data["token_type"] == "bearer"
 
 
+def test_auth_refresh_requires_and_returns_valid_token(client):
+    client.post("/api/auth/register", json={"email": "refresh@example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "refresh@example.com", "password": "testpass123"}).json()["access_token"]
+
+    denied = client.post("/api/auth/refresh")
+    assert denied.status_code == 401
+
+    refreshed = client.post("/api/auth/refresh", headers={"Authorization": f"Bearer {token}"})
+    assert refreshed.status_code == 200
+    assert refreshed.json()["access_token"]
+    assert refreshed.json()["user"]["email"] == "refresh@example.com"
+
+
 def test_invalid_login(client):
     """Test login with invalid credentials."""
     response = client.post(

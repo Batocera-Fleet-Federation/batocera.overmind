@@ -24,6 +24,7 @@ from overmind.models import (
 from overmind.db import db
 from overmind import auth
 from overmind import emailer
+from overmind.runtime_secrets import load_runtime_secret_once
 from overmind.drone_ca import sign_drone_csr
 from overmind.drone_security import generate_drone_token, hash_drone_token
 from overmind.postgres_store import database_url, postgres_store
@@ -53,6 +54,15 @@ app = FastAPI(
     description="API for Batocera system management and game tracking",
     version="0.1.0",
 )
+_RUNTIME_SECRET_REFRESHER = None
+
+
+def apply_runtime_config_side_effects(values: dict[str, str]) -> None:
+    global TOKEN_HASH_SECRET
+    if "SECRET_KEY" in values:
+        auth.SECRET_KEY = values["SECRET_KEY"]
+    if "TOKEN_HASH_SECRET" in values or "SECRET_KEY" in values:
+        TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 
 
 def _tls_file_pair_usable(key_file: Path, cert_file: Path) -> bool:
@@ -373,6 +383,12 @@ async def login(credentials: UserLogin):
             detail="Invalid email or password"
         )
     ensure_active_user(user)
+    return build_login_response(user)
+
+
+@app.post("/api/auth/refresh")
+async def refresh_auth_token(authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
     return build_login_response(user)
 
 
@@ -1520,6 +1536,9 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Print startup message and load fake data if requested."""
+    global _RUNTIME_SECRET_REFRESHER
+    _RUNTIME_SECRET_REFRESHER = load_runtime_secret_once(on_apply=apply_runtime_config_side_effects)
+    _RUNTIME_SECRET_REFRESHER.start()
     environment = (os.getenv("OVERMIND_ENVIRONMENT") or os.getenv("ENVIRONMENT") or "").lower()
     if environment in {"prod", "production"} and not database_url():
         raise RuntimeError("OVERMIND_DATABASE_URL or PostgreSQL environment variables are required in production mode")

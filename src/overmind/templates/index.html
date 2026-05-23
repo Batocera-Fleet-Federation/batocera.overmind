@@ -102,6 +102,15 @@
       border: 1px solid rgba(0, 194, 255, 0.55);
       box-shadow: 0 0 18px rgba(0, 194, 255, 0.24);
       color: var(--admin-sidebar-accent);
+      overflow: hidden;
+    }
+    .landing-shell .landing-brand-mark img,
+    .brand-mark img,
+    .brand-mascot {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
     }
     .landing-shell .hero-actions {
       display: flex;
@@ -325,7 +334,7 @@
       <nav class="landing-nav" aria-label="Landing page navigation">
         <div class="landing-brand-group">
           <a class="landing-brand" href="#/home" onclick="event.preventDefault(); showLandingHome(); history.pushState(null, '', '#/home')">
-            <span class="landing-brand-mark"><i class="bi bi-controller"></i></span>
+            <span class="landing-brand-mark"><img src="/content/batocera-swarm-mascot.jpg" alt="Batocera Fleet Federation mascot"></span>
             <span>Batocera Overmind</span>
           </a>
           <div class="resource-links" aria-label="Project resources">
@@ -1001,6 +1010,7 @@
                 border: 1px solid rgba(0, 194, 255, 0.55);
                 box-shadow: 0 0 18px rgba(0, 194, 255, 0.24);
                 color: var(--admin-sidebar-accent);
+                overflow: hidden;
             }
 
             .menu-label {
@@ -1375,7 +1385,7 @@
                     <div class="sidebar h-100 p-3 d-flex flex-column flex-lg-row align-items-lg-center gap-3">
                         <div class="brand-block pb-3 mb-3 pb-lg-0 mb-lg-0 pe-lg-3">
                             <div class="d-flex align-items-center gap-2">
-                                <span class="brand-mark"><i class="bi bi-controller"></i></span>
+                                <span class="brand-mark"><img src="/content/batocera-swarm-mascot.jpg" alt="Batocera Fleet Federation mascot"></span>
                                 <a href="/#/home" class="h5 mb-0 brand-title text-decoration-none">Batocera Overmind</a>
                             </div>
                             <span class="resource-links" aria-label="Project resources">
@@ -1758,6 +1768,11 @@
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
             let devicesRefreshTimer = null;
+            let inactivityTimer = null;
+            let lastAuthRefreshAt = 0;
+            let authRefreshInFlight = false;
+            const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+            const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
             const MASTER_ROM_PAGE_SIZE = 100;
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
@@ -1768,6 +1783,7 @@
             };
 
             document.addEventListener('DOMContentLoaded', () => {
+                    setupInactivityTracking();
 	                loadAuthProviders();
 	                handleOAuthReturn();
 	                handleAuthHashActions();
@@ -1799,6 +1815,7 @@
             });
 
             window.addEventListener('hashchange', () => {
+                markUserActivity();
                 if (!authToken) {
                     const hash = window.location.hash || '';
                     if (hash === '#/login') {
@@ -2071,16 +2088,68 @@
 	                showMessage('Password updated. You can log in now.', 'success');
 	            }
 
-	            function logout() {
+            function setupInactivityTracking() {
+                ['mousemove', 'mousedown', 'click', 'keydown', 'touchstart', 'touchmove', 'scroll'].forEach(eventName => {
+                    window.addEventListener(eventName, markUserActivity, { passive: true });
+                });
+            }
+
+            function markUserActivity() {
+                if (!authToken) return;
+                resetInactivityTimer();
+                maybeRefreshAuthToken();
+            }
+
+            function resetInactivityTimer() {
+                if (inactivityTimer) clearTimeout(inactivityTimer);
+                inactivityTimer = setTimeout(() => {
+                    logout('You were logged out after 5 minutes of inactivity.', '#/login');
+                }, INACTIVITY_TIMEOUT_MS);
+            }
+
+            function stopInactivityTimer() {
+                if (inactivityTimer) clearTimeout(inactivityTimer);
+                inactivityTimer = null;
+            }
+
+            async function maybeRefreshAuthToken() {
+                const now = Date.now();
+                if (authRefreshInFlight || now - lastAuthRefreshAt < AUTH_REFRESH_INTERVAL_MS) return;
+                authRefreshInFlight = true;
+                try {
+                    const response = await fetch('/api/auth/refresh', {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        authToken = data.access_token;
+                        currentUser = data.user || currentUser;
+                        currentSwarms = data.swarms || currentSwarms;
+                        localStorage.setItem('auth_token', authToken);
+                        lastAuthRefreshAt = now;
+                    } else if (response.status === 401) {
+                        logout('Session expired. Please log in again.', '#/login');
+                    }
+                } catch (error) {
+                    console.warn('Auth refresh failed; keeping current token until backend validation requires login.');
+                } finally {
+                    authRefreshInFlight = false;
+                }
+            }
+
+	            function logout(message = null, nextHash = '#/home') {
                 authToken = null;
                 currentUser = null;
                 currentProfile = null;
                 pendingConnections = [];
                 selectedDeviceId = null;
                 currentDeviceView = 'systems';
+                lastAuthRefreshAt = 0;
                 if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
                 if (devicesRefreshTimer) clearInterval(devicesRefreshTimer);
+                stopInactivityTimer();
                 pendingConnectionTimer = null;
                 actionRefreshTimer = null;
                 devicesRefreshTimer = null;
@@ -2093,7 +2162,13 @@
                 document.getElementById('login-form').style.display = 'block';
                 document.getElementById('register-form').style.display = 'none';
                 setPageChrome('auth');
+                if (nextHash === '#/login') {
+                    window.location.hash = '#/login';
+                    showAuthOnly('login-form');
+                } else {
 	                window.location.href = '/#/home';
+                }
+                if (message) showMessage(message, 'error');
 	            }
 
 	            function showDashboard() {
@@ -2105,6 +2180,7 @@
                 document.getElementById('dashboard-section').style.display = 'block';
                 setPageChrome(currentTab);
                 startPendingConnectionPolling();
+                resetInactivityTimer();
             }
 
             function startPendingConnectionPolling() {
