@@ -1752,6 +1752,7 @@
             let selectedDeviceId = null;
             let currentTab = 'devices';
             let currentDeviceView = 'systems';
+            let currentSwarmView = 'drones';
             let currentDeviceSystems = {};
             let deviceRomSearchQuery = '';
             let masterRomPage = 1;
@@ -2169,6 +2170,8 @@
 	                document.querySelectorAll('.mutate-only').forEach(node => {
 	                    node.style.display = canMutate ? '' : 'none';
 	                });
+	                const tokenPanel = document.getElementById('integration-token-panel');
+	                if (tokenPanel) tokenPanel.style.display = canMutate && currentSwarmView === 'drones' ? '' : 'none';
 	            }
 
 	            function roleLabel(role) {
@@ -2608,6 +2611,7 @@
             }
 
             function setActiveSwarmView(viewName) {
+                currentSwarmView = viewName;
                 document.querySelectorAll('.swarm-view-btn').forEach(btn => {
                     const active = btn.getAttribute('data-swarm-view') === viewName;
                     btn.classList.toggle('active', active);
@@ -2615,6 +2619,7 @@
                 });
                 const pendingPanel = document.getElementById('pending-connections');
                 if (pendingPanel) pendingPanel.style.display = viewName === 'drones' ? '' : 'none';
+                applyRbacUI();
             }
 
             function setSwarmView(viewName) {
