@@ -1498,7 +1498,7 @@
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
                                     <h3 class="mb-0">Drone Swarm</h3>
                                     <div class="btn-group" role="group" aria-label="Swarm views">
-                                        <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="drones" onclick="setSwarmView('drones')"><i class="bi bi-hdd-network me-1"></i>Drones</button>
+                                        <button class="btn btn-outline-primary btn-sm swarm-view-btn active" data-swarm-view="drones" onclick="setSwarmView('drones')"><i class="bi bi-hdd-network me-1"></i>Drones</button>
                                         <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="downloads" onclick="setSwarmView('downloads')"><i class="bi bi-cloud-arrow-down me-1"></i>Downloads</button>
                                         <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="sync-activity" onclick="setSwarmView('sync-activity')"><i class="bi bi-clock-history me-1"></i>Sync Activity</button>
                                         <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="master-list" onclick="setSwarmView('master-list')"><i class="bi bi-list-stars me-1"></i>Master List</button>
@@ -1750,6 +1750,7 @@
         </div>
 
         <script>
+                let currentSwarmView = 'drones';
 	            let currentUser = null;
 	            let currentProfile = null;
 	            let currentDevices = [];
@@ -2512,6 +2513,49 @@
                     showMessage('Notification settings saved.', 'success');
                 } catch (error) {
                     console.error('Error saving notification settings:', error);
+                }
+            }
+
+            function setSwarmView(view) {
+                if (!view || !['drones', 'downloads', 'sync-activity', 'master-list'].includes(view)) {
+                    view = 'drones';
+                }
+
+                currentSwarmView = view;
+
+                document.querySelectorAll('.swarm-view-btn').forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.swarmView === view);
+                });
+
+                const isDronesView = view === 'drones';
+
+                const pendingConnections = document.getElementById('pending-connections');
+                const integrationTokenPanel = document.getElementById('integration-token-panel');
+                const devicesList = document.getElementById('devices-list');
+                const swarmGlobalPanel = document.getElementById('swarm-global-panel');
+
+                if (pendingConnections) pendingConnections.style.display = isDronesView ? '' : 'none';
+                if (integrationTokenPanel) integrationTokenPanel.style.display = isDronesView ? '' : 'none';
+                if (devicesList) devicesList.style.display = isDronesView ? '' : 'none';
+                if (swarmGlobalPanel) swarmGlobalPanel.style.display = isDronesView ? 'none' : '';
+
+                if (view === 'drones') {
+                    loadDevices();
+                    return;
+                }
+
+                if (view === 'downloads') {
+                    loadSwarmDownloads();
+                    return;
+                }
+
+                if (view === 'sync-activity') {
+                    loadSwarmSyncActivity();
+                    return;
+                }
+
+                if (view === 'master-list') {
+                    loadSwarmMasterList();
                 }
             }
 
