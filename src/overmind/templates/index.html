@@ -1244,6 +1244,22 @@
                 border-color: var(--admin-sidebar-accent) !important;
                 color: #fff !important;
             }
+            .source-selector .list-group-item {
+                background: rgba(21, 31, 50, 0.9) !important;
+                color: #c8d7ee !important;
+                border-color: var(--admin-border) !important;
+            }
+            .source-selector .list-group-item:hover,
+            .source-selector .list-group-item:focus {
+                background: rgba(255, 255, 255, 0.06) !important;
+                color: #fff !important;
+            }
+            .source-selector .list-group-item.active {
+                background: var(--admin-sidebar-accent) !important;
+                border-color: var(--admin-sidebar-accent) !important;
+                color: #06111f !important;
+                font-weight: 800;
+            }
             .btn-outline-danger {
                 color: #b42318 !important;
                 border-color: #f1b7b2 !important;
@@ -3141,7 +3157,7 @@
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
                                     <div class="card-header">Log Sources</div>
-                                    <div class="list-group list-group-flush" id="overmindLogSources">
+                                    <div class="list-group list-group-flush source-selector" id="overmindLogSources">
                                         ${sources.map((source, index) => `
                                         <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindLogSource(${index})">
                                             <i class="bi bi-journal-text me-2"></i>${escapeHtml(source.label)}
@@ -3219,7 +3235,7 @@
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
                                     <div class="card-header">Emulators</div>
-                                    <div class="list-group list-group-flush" id="overmindConfigSources">
+                                    <div class="list-group list-group-flush source-selector" id="overmindConfigSources">
                                         ${rows.map((row, index) => `
                                         <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindConfig(${index})">
                                             <i class="bi bi-file-earmark-code me-2"></i>${escapeHtml(row.label)}
