@@ -431,6 +431,29 @@ def test_download_state_and_cancel_rbac(client):
     assert target["active"][0]["source_drone_id"] == "source-a"
     assert target["queued"][0]["queue_position"] == 1
 
+    live_update = client.post(
+        "/api/devices/target-a/downloads",
+        headers={"Authorization": "Bearer drone-token"},
+        json={
+            "target_drone_id": "target-a",
+            "active": [{
+                "job_id": "job-1",
+                "target_drone_id": "target-a",
+                "source_drone_id": "source-a",
+                "file_path": "snes/Game.zip",
+                "file_size": 100,
+                "downloaded_bytes": 75,
+                "percentage": 75,
+                "status": "downloading",
+            }],
+            "queued": [],
+        },
+    )
+    assert live_update.status_code == 200
+    assert live_update.json()["active"] == 1
+    downloads = client.get("/api/downloads", headers={"Authorization": f"Bearer {owner_token}"})
+    assert downloads.json()["targets"][0]["active"][0]["downloaded_bytes"] == 75
+
     cancel = client.post(
         "/api/devices/target-a/downloads/job-2/cancel",
         headers={"Authorization": f"Bearer {owner_token}"},
@@ -701,6 +724,45 @@ def test_integration_token_cannot_register_different_drone(client):
     )
     assert second.status_code == 401
     assert db.get_device_by_device_id("drone-b") is None
+
+
+def test_integration_token_cannot_register_same_id_with_different_certificate(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    user_token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    auth_token = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"label": "cert-bound"},
+    ).json()["token"]["authorization_token"]
+
+    first = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(
+            authorization_token=auth_token,
+            device_id="drone-a",
+            batocera_info={
+                **_device_registration_payload()["batocera_info"],
+                "certificate": {"fingerprint": "cert-a", "public_certificate": "-----BEGIN CERTIFICATE-----\\nA\\n-----END CERTIFICATE-----\\n"},
+            },
+        ),
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(
+            authorization_token=auth_token,
+            device_id="drone-a",
+            batocera_info={
+                **_device_registration_payload()["batocera_info"],
+                "certificate": {"fingerprint": "cert-b", "public_certificate": "-----BEGIN CERTIFICATE-----\\nB\\n-----END CERTIFICATE-----\\n"},
+            },
+        ),
+    )
+    assert second.status_code == 401
 
 
 def test_approval_preserves_bound_token_and_heartbeat_succeeds(client):
@@ -1029,6 +1091,85 @@ def test_swarm_master_list_deduplicates_by_md5_and_activity_search(client):
     activity = client.get("/api/sync-activity?q=Renamed", headers={"Authorization": f"Bearer {token}"})
     assert activity.status_code == 200
     assert activity.json()["activity"][0]["duration_ms"] == 2400
+
+
+def test_drone_sync_activity_endpoint_upserts_by_sync_id(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("test@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    queued = client.post(
+        "/api/devices/drone-a/sync-activity",
+        headers={"Authorization": "Bearer drone-token"},
+        json={
+            "sync_id": "sync-1",
+            "target_drone_id": "drone-a",
+            "system": "snes",
+            "rom_name": "Game.zip",
+            "status": "queued",
+        },
+    )
+    assert queued.status_code == 200
+    completed = client.post(
+        "/api/devices/drone-a/sync-activity",
+        headers={"Authorization": "Bearer drone-token"},
+        json={
+            "sync_id": "sync-1",
+            "source_drone_id": "drone-b",
+            "target_drone_id": "drone-a",
+            "system": "snes",
+            "rom_name": "Game.zip",
+            "relative_path": "Game.zip",
+            "status": "completed",
+            "bytes_transferred": 8,
+            "file_size": 8,
+            "rom_md5": "abc",
+            "duration_ms": 1000,
+        },
+    )
+    assert completed.status_code == 200
+
+    activity = client.get("/api/devices/drone-a/sync-activity", headers={"Authorization": f"Bearer {token}"})
+    assert activity.status_code == 200
+    rows = activity.json()["activity"]
+    assert len(rows) == 1
+    assert rows[0]["id"] == "sync-1"
+    assert rows[0]["status"] == "completed"
+    assert rows[0]["bytes_transferred"] == 8
+    assert rows[0]["rom_md5"] == "abc"
+
+
+def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("test@example.com")
+    db.create_device(user["id"], "source-without-rom", "Source Without ROM", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "source-with-rom", "Source With ROM", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    db.add_roms("source-with-rom", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8}])
+
+    response = client.post(
+        "/api/devices/target-c/sync-rom",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8},
+    )
+    assert response.status_code == 200
+
+    claim = client.post(
+        "/api/devices/target-c/actions/claim",
+        headers={"Authorization": "Bearer c"},
+        json={},
+    )
+    assert claim.status_code == 200
+    action = claim.json()["actions"][0]
+    assert action["payload"]["devices"] == [{"device_id": "source-with-rom", "device_name": "Source With ROM"}]
 
 
 def test_device_action_lifecycle(client):

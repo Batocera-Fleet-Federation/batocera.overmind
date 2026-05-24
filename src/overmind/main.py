@@ -767,13 +767,20 @@ async def update_swarm(swarm_id: str, payload: dict, authorization: Optional[str
 async def register_device(device_data: DeviceRegister, authorization: Optional[str] = Header(default=None)):
     """Register an authorized Drone and return its bearer token."""
     raw_auth_token = device_data.authorization_token or (get_bearer_token(authorization) if authorization else None)
-    claimed_token = db.claim_integration_token(str(device_data.email or ""), raw_auth_token, device_data.device_id)
+    batocera_info = device_data.batocera_info.model_dump()
+    certificate = batocera_info.get("certificate") if isinstance(batocera_info.get("certificate"), dict) else {}
+    device_fingerprint = str(certificate.get("fingerprint") or certificate.get("sha256_fingerprint") or "").strip()
+    claimed_token = db.claim_integration_token(
+        str(device_data.email or ""),
+        raw_auth_token,
+        device_data.device_id,
+        device_fingerprint,
+    )
     if not claimed_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Drone authorization token")
     user = claimed_token["user"]
     integration_token = claimed_token["token"]
 
-    batocera_info = device_data.batocera_info.model_dump()
     if device_data.api_port is not None:
         batocera_info["api_port"] = device_data.api_port
     if device_data.scheme:
@@ -1099,6 +1106,20 @@ async def cancel_device_download(device_id: str, job_id: str, authorization: Opt
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"status": "queued", "action": action}
+
+
+@app.post("/api/devices/{device_id}/downloads")
+async def update_device_downloads(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Persist a live download-state snapshot pushed by a Drone."""
+    get_current_drone(device_id, authorization)
+    state = db.store_download_state(device_id, payload)
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    active_count = len(state.get("active") or [])
+    queued_count = len(state.get("queued") or [])
+    recent_count = len(state.get("recent") or [])
+    print(f"Download state accepted for {device_id}: active={active_count} queued={queued_count} recent={recent_count}")
+    return {"status": "accepted", "device_id": device_id, "active": active_count, "queued": queued_count, "recent": recent_count}
 
 
 @app.post("/api/devices/{device_id}/actions")
@@ -1491,12 +1512,29 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
     rom_path = str(payload.get("file_path") or payload.get("rom_name") or "").strip()
     if not system_name or not rom_path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name and rom path are required")
+    source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
+    if not source_devices:
+        requested_md5 = str(payload.get("rom_md5") or payload.get("md5") or "").strip().lower()
+        requested_path = rom_path.replace("\\", "/").strip().lstrip("./").lower()
+        for row in db.get_master_roms_for_device(device["user_id"], device_id) or []:
+            row_system = str(row.get("system_name") or "").strip().lower()
+            row_path = str(row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+            row_md5 = str(row.get("rom_md5") or "").strip().lower()
+            if row_system != system_name.lower():
+                continue
+            if requested_md5 and row_md5 == requested_md5:
+                source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                break
+            if not requested_md5 and row_path == requested_path:
+                source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                break
     action = db.create_device_action(device["user_id"], device_id, "sync_rom", {
         "system_name": system_name,
         "rom_name": payload.get("rom_name") or rom_path,
         "file_path": rom_path,
         "rom_md5": payload.get("rom_md5"),
         "file_size": payload.get("file_size"),
+        "devices": source_devices,
     })
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")

@@ -1814,6 +1814,8 @@
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
             let devicesRefreshTimer = null;
+            let downloadsRefreshTimer = null;
+            let downloadsRefreshInFlight = false;
             let inactivityTimer = null;
             let lastAuthRefreshAt = 0;
             let authRefreshInFlight = false;
@@ -2259,10 +2261,12 @@
                 if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
                 if (devicesRefreshTimer) clearInterval(devicesRefreshTimer);
+                if (downloadsRefreshTimer) clearInterval(downloadsRefreshTimer);
                 stopInactivityTimer();
                 pendingConnectionTimer = null;
                 actionRefreshTimer = null;
                 devicesRefreshTimer = null;
+                downloadsRefreshTimer = null;
                 localStorage.removeItem('auth_token');
                 document.body.classList.remove('is-authenticated');
                 document.getElementById('auth-section').classList.add('active');
@@ -2916,6 +2920,7 @@
 
             function setActiveSwarmView(viewName) {
                 currentSwarmView = viewName;
+                if (viewName !== 'downloads') stopSwarmDownloadsAutoRefresh();
                 document.querySelectorAll('.swarm-view-btn').forEach(btn => {
                     const active = btn.getAttribute('data-swarm-view') === viewName;
                     btn.classList.toggle('active', active);
@@ -2924,6 +2929,29 @@
                 const pendingPanel = document.getElementById('pending-connections');
                 if (pendingPanel) pendingPanel.style.display = viewName === 'drones' ? '' : 'none';
                 applyRbacUI();
+            }
+
+            function stopSwarmDownloadsAutoRefresh() {
+                if (downloadsRefreshTimer) clearInterval(downloadsRefreshTimer);
+                downloadsRefreshTimer = null;
+                downloadsRefreshInFlight = false;
+            }
+
+            function startSwarmDownloadsAutoRefresh() {
+                if (downloadsRefreshTimer) return;
+                downloadsRefreshTimer = setInterval(async () => {
+                    if (currentTab !== 'devices' || currentSwarmView !== 'downloads') {
+                        stopSwarmDownloadsAutoRefresh();
+                        return;
+                    }
+                    if (downloadsRefreshInFlight) return;
+                    downloadsRefreshInFlight = true;
+                    try {
+                        await showSwarmDownloads(false, {quiet: true});
+                    } finally {
+                        downloadsRefreshInFlight = false;
+                    }
+                }, 5000);
             }
 
             function setSwarmView(viewName) {
@@ -3011,9 +3039,13 @@
                     }).join('')}</tbody></table></div>`;
             }
 
-            async function showSwarmDownloads(updateUrl = true) {
+            async function showSwarmDownloads(updateUrl = true, options = {}) {
                 if (updateUrl) {
                     setSwarmView('downloads');
+                    return;
+                }
+                if (currentTab !== 'devices') {
+                    stopSwarmDownloadsAutoRefresh();
                     return;
                 }
                 setActiveSwarmView('downloads');
@@ -3022,7 +3054,7 @@
                 if (!panel) return;
                 if (list) list.style.display = 'none';
                 panel.style.display = 'block';
-                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading downloads...</div></div>`;
+                if (!options.quiet) panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading downloads...</div></div>`;
                 try {
                     const response = await apiGet('/api/downloads');
                     if (!response.ok) throw new Error('Failed to load downloads');
@@ -3031,6 +3063,7 @@
                     const rows = flattenDownloadTargets(targets);
                     if (!rows.length) {
                         panel.innerHTML = '<div class="empty-state">No downloads in flight.</div>';
+                        startSwarmDownloadsAutoRefresh();
                         return;
                     }
                     panel.innerHTML = `<div class="card"><div class="card-body py-3">
@@ -3041,8 +3074,9 @@
                         ${renderSwarmDownloadsTable(rows)}
                     </div></div>`;
                     applyRbacUI();
+                    startSwarmDownloadsAutoRefresh();
                 } catch (error) {
-                    panel.innerHTML = '<div class="empty-state">Unable to load downloads.</div>';
+                    if (!options.quiet) panel.innerHTML = '<div class="empty-state">Unable to load downloads.</div>';
                 }
             }
 

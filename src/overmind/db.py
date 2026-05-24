@@ -474,9 +474,16 @@ class FakeDatabase:
         claimed = self.claim_integration_token(email, token, None)
         return claimed["user"] if claimed else None
 
-    def claim_integration_token(self, email: Optional[str], token: Optional[str], device_id: Optional[str]) -> Optional[dict]:
+    def claim_integration_token(
+        self,
+        email: Optional[str],
+        token: Optional[str],
+        device_id: Optional[str],
+        device_fingerprint: Optional[str] = None,
+    ) -> Optional[dict]:
         if not token:
             return None
+        fingerprint = str(device_fingerprint or "").strip()
         candidates = []
         if email:
             user = self.get_user_by_email(email)
@@ -495,6 +502,11 @@ class FakeDatabase:
                 bound_device = entry.get("bound_device_id")
                 if bound_device and device_id and bound_device != device_id:
                     return None
+                bound_fingerprint = str(entry.get("bound_device_fingerprint") or "").strip()
+                if bound_fingerprint and fingerprint and bound_fingerprint != fingerprint:
+                    return None
+                if fingerprint and not bound_fingerprint:
+                    entry["bound_device_fingerprint"] = fingerprint
                 if device_id and not bound_device:
                     entry["bound_device_id"] = device_id
                     entry["bound_at"] = datetime.utcnow()
@@ -1271,7 +1283,12 @@ class FakeDatabase:
             if not device:
                 continue
             bucket = self.rom_sync_activity.setdefault(device["id"], [])
-            bucket.append(entry)
+            existing = next((row for row in bucket if row.get("id") == entry["id"]), None)
+            if existing:
+                existing.update({key: value for key, value in entry.items() if value is not None})
+                existing["received_at"] = entry["received_at"]
+            else:
+                bucket.append(entry)
             del bucket[:-200]
         return entry
 
