@@ -4211,6 +4211,33 @@
                 loadDeviceArtworkPanel();
             }
 
+            function toggleArtworkDropdown(event, id) {
+                event.preventDefault();
+                event.stopPropagation();
+                const menu = document.getElementById(`${id}-menu`);
+                const button = document.getElementById(`${id}-button`);
+                if (!menu || !button) return;
+                const willOpen = !menu.classList.contains('show');
+                document.querySelectorAll('.artwork-filter-menu.show').forEach(openMenu => {
+                    if (openMenu !== menu) {
+                        openMenu.classList.remove('show');
+                        const openButtonId = openMenu.id.replace(/-menu$/, '-button');
+                        document.getElementById(openButtonId)?.setAttribute('aria-expanded', 'false');
+                    }
+                });
+                menu.classList.toggle('show', willOpen);
+                button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+            }
+
+            function closeArtworkDropdowns() {
+                document.querySelectorAll('.artwork-filter-menu.show').forEach(menu => {
+                    menu.classList.remove('show');
+                    const buttonId = menu.id.replace(/-menu$/, '-button');
+                    document.getElementById(buttonId)?.setAttribute('aria-expanded', 'false');
+                });
+            }
+            document.addEventListener('click', closeArtworkDropdowns);
+
             function renderArtworkCheckboxDropdown({id, label, allLabel, allValue, items, selectedValues, inputClass, onChange}) {
                 const selected = normalizeArtworkSelection(selectedValues, allValue);
                 const activeLabel = selected.length ? `${selected.length} selected` : allLabel;
@@ -4228,8 +4255,8 @@
                     <div style="min-width:190px">
                         <label class="form-label" for="${id}-button">${escapeHtml(label)}</label>
                         <div class="dropdown">
-                            <button id="${id}-button" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" aria-expanded="false">${escapeHtml(activeLabel)}</button>
-                            <div class="dropdown-menu p-2" style="max-height:320px;overflow:auto;min-width:260px">
+                            <button id="${id}-button" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" onclick="toggleArtworkDropdown(event, '${id}')" aria-expanded="false">${escapeHtml(activeLabel)}</button>
+                            <div id="${id}-menu" class="dropdown-menu artwork-filter-menu p-2" style="max-height:320px;overflow:auto;min-width:260px" onclick="event.stopPropagation()">
                                 <label class="dropdown-item form-check mb-0">
                                     <input class="form-check-input ${inputClass}" type="checkbox" value="${escapeHtml(allValue)}" ${selected.length ? '' : 'checked'} onchange="${onChange}(event)">
                                     <span class="form-check-label ms-1">${escapeHtml(allLabel)}</span>
