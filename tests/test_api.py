@@ -1172,6 +1172,40 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     assert action["payload"]["devices"] == [{"device_id": "source-with-rom", "device_name": "Source With ROM"}]
 
 
+def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
+    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("test@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "drone-b", "Drone B", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.create_device(user["id"], "drone-c", "Drone C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    db.add_roms("drone-a", "snes", [{"rom_name": "A.zip", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 8}])
+    db.add_roms("drone-b", "snes", [{"rom_name": "B.zip", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 9}])
+    db.add_roms("drone-c", "snes", [{"rom_name": "C.zip", "file_path": "C.zip", "rom_md5": "ccc", "file_size": 10}])
+
+    response = client.post(
+        "/api/bulk-sync",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"device_ids": ["drone-a", "drone-b"], "systems": ["snes"]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action_count"] == 2
+    assert payload["queued_rom_count"] == 2
+
+    claim_a = client.post("/api/devices/drone-a/actions/claim", headers={"Authorization": "Bearer a"}, json={})
+    claim_b = client.post("/api/devices/drone-b/actions/claim", headers={"Authorization": "Bearer b"}, json={})
+    assert claim_a.status_code == 200
+    assert claim_b.status_code == 200
+    assert claim_a.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "B.zip"
+    assert claim_a.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-b", "device_name": "Drone B"}]
+    assert claim_b.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "A.zip"
+    assert claim_b.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
+
+
 def test_device_action_lifecycle(client):
     db.populate_fake_data()
     login_response = client.post(

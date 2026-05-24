@@ -3176,10 +3176,20 @@
                 params.set('per_page', '250');
                 panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading swarm master list...</div></div>`;
                 try {
+                    if (!currentDevices.length) await loadDevices();
                     const response = await apiGet('/api/master-roms' + (params.toString() ? `?${params.toString()}` : ''));
                     if (!response.ok) throw new Error('Failed to load master list');
                     const payload = await response.json();
                     const rows = payload.roms || [];
+                    const systemsResp = await apiGet('/api/systems');
+                    const systemsPayload = systemsResp.ok ? await systemsResp.json() : {systems: []};
+                    const systemOptions = (systemsPayload.systems || [])
+                        .map(row => row.system_name)
+                        .filter(Boolean)
+                        .sort((a, b) => a.localeCompare(b));
+                    const bulkDevices = currentDevices
+                        .filter(device => device && device.device_id)
+                        .sort((a, b) => String(a.device_name || a.device_id).localeCompare(String(b.device_name || b.device_id)));
                     panel.innerHTML = `<div class="card"><div class="card-body py-2">
                         <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
                             <div style="flex:1;min-width:240px">
@@ -3187,6 +3197,39 @@
                                 <input id="swarm-master-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="System, ROM, md5, Drone">
                             </div>
                             <button class="btn btn-primary" onclick="showSwarmMasterList(false)">Search</button>
+                        </div>
+                        <div class="border rounded p-3 mb-3" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.35)">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <div>
+                                    <strong>Bulk Sync</strong>
+                                    <div class="small text-muted">Select two or more Drones and one or more systems. Each selected Drone will receive ROMs it is missing from the selected group.</div>
+                                </div>
+                                <button class="btn btn-outline-primary btn-sm" onclick="queueBulkSwarmSync()">Queue Bulk Sync</button>
+                            </div>
+                            <div class="row g-3">
+                                <div class="col-12 col-lg-6">
+                                    <div class="small text-muted mb-1">Drones</div>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        ${bulkDevices.map(device => `
+                                            <label class="form-check form-check-inline mb-0">
+                                                <input class="form-check-input bulk-sync-drone" type="checkbox" value="${escapeHtml(device.device_id)}">
+                                                <span class="form-check-label">${escapeHtml(device.device_name || device.device_id)}</span>
+                                            </label>
+                                        `).join('') || '<span class="small text-muted">No Drones available.</span>'}
+                                    </div>
+                                </div>
+                                <div class="col-12 col-lg-6">
+                                    <div class="small text-muted mb-1">Systems</div>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        ${systemOptions.map(system => `
+                                            <label class="form-check form-check-inline mb-0">
+                                                <input class="form-check-input bulk-sync-system" type="checkbox" value="${escapeHtml(system)}">
+                                                <span class="form-check-label">${escapeHtml(system)}</span>
+                                            </label>
+                                        `).join('') || '<span class="small text-muted">No systems reported yet.</span>'}
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                         <div class="small text-muted mb-2">${payload.total || rows.length} unique ROMs across approved Drones</div>
                         <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
@@ -3211,6 +3254,32 @@
                     });
                 } catch (error) {
                     panel.innerHTML = '<div class="empty-state">Unable to load swarm master list.</div>';
+                }
+            }
+
+            async function queueBulkSwarmSync() {
+                const deviceIds = Array.from(document.querySelectorAll('.bulk-sync-drone:checked')).map(input => input.value);
+                const systems = Array.from(document.querySelectorAll('.bulk-sync-system:checked')).map(input => input.value);
+                if (deviceIds.length < 2) {
+                    showMessage('Select at least two Drones for bulk sync.', 'error');
+                    return;
+                }
+                if (!systems.length) {
+                    showMessage('Select at least one system for bulk sync.', 'error');
+                    return;
+                }
+                try {
+                    const response = await fetch('/api/bulk-sync', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
+                        body: JSON.stringify({device_ids: deviceIds, systems})
+                    });
+                    if (!response.ok) throw new Error('Failed to queue bulk sync');
+                    const payload = await response.json();
+                    showMessage(`Bulk sync queued: ${payload.action_count || 0} action(s), ${payload.queued_rom_count || 0} ROM transfer(s).`, 'success');
+                } catch (error) {
+                    console.error('Error queuing bulk sync:', error);
+                    showMessage('Failed to queue bulk sync.', 'error');
                 }
             }
 

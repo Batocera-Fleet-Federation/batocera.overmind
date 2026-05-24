@@ -1580,6 +1580,111 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
     return {"action": action}
 
 
+@app.post("/api/bulk-sync")
+async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Queue sync actions so selected Drones converge for the selected systems."""
+    user = get_current_user(authorization)
+    raw_device_ids = payload.get("device_ids") if isinstance(payload.get("device_ids"), list) else []
+    raw_systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
+    device_ids = []
+    for item in raw_device_ids:
+        device_id = str(item or "").strip()
+        if device_id and device_id not in device_ids:
+            device_ids.append(device_id)
+    systems = sorted({str(item or "").strip() for item in raw_systems if str(item or "").strip()})
+    if len(device_ids) < 2:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Select at least two Drones")
+    if not systems:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Select at least one system")
+
+    devices = {}
+    for device_id in device_ids:
+        device = db.user_can_access_device(user["id"], device_id)
+        if not device:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Device not found: {device_id}")
+        require_swarm_role(user, device["swarm_id"], {"overlord"})
+        devices[device_id] = device
+
+    system_set = {system.lower() for system in systems}
+    selected_roms_by_device = {
+        device_id: [
+            rom for rom in db.roms.get(device["id"], [])
+            if str(rom.get("system_name") or "").strip().lower() in system_set
+        ]
+        for device_id, device in devices.items()
+    }
+    union: dict[tuple, dict] = {}
+    for source_id, roms in selected_roms_by_device.items():
+        for rom in roms:
+            key = db._rom_key(rom)
+            if not key[0] or not key[1]:
+                continue
+            row = union.setdefault(key, {
+                "system_name": rom.get("system_name"),
+                "rom_name": rom.get("rom_name") or rom.get("file_path"),
+                "file_path": rom.get("file_path") or rom.get("rom_name"),
+                "rom_md5": rom.get("rom_md5"),
+                "file_size": rom.get("file_size"),
+                "devices": [],
+            })
+            info = devices[source_id].get("system_info") or {}
+            if not any(item.get("device_id") == source_id for item in row["devices"]):
+                row["devices"].append({
+                    "device_id": source_id,
+                    "device_name": devices[source_id].get("device_name") or info.get("hostname") or source_id,
+                })
+            if not row.get("rom_md5") and rom.get("rom_md5"):
+                row["rom_md5"] = rom.get("rom_md5")
+            if not row.get("file_size") and rom.get("file_size"):
+                row["file_size"] = rom.get("file_size")
+
+    actions = []
+    queued_roms = 0
+    for target_id, target_roms in selected_roms_by_device.items():
+        target_keys = {db._rom_key(rom) for rom in target_roms}
+        missing_by_system: dict[str, list] = {}
+        for key, row in union.items():
+            if key in target_keys:
+                continue
+            source_devices = [
+                source for source in row.get("devices", [])
+                if source.get("device_id") and source.get("device_id") != target_id
+            ]
+            if not source_devices:
+                continue
+            system_name = str(row.get("system_name") or "").strip()
+            if not system_name:
+                continue
+            missing_by_system.setdefault(system_name, []).append({**row, "devices": source_devices})
+        for system_name, missing in sorted(missing_by_system.items()):
+            action = db.create_device_action(
+                devices[target_id]["user_id"],
+                target_id,
+                "sync_system",
+                {"system_name": system_name, "roms": missing},
+            )
+            if action:
+                actions.append(action)
+                queued_roms += len(missing)
+                db.add_rom_sync_activity(target_id, {
+                    "sync_id": action["id"],
+                    "target_drone_id": target_id,
+                    "system": system_name,
+                    "rom_name": "*",
+                    "action": "download",
+                    "status": "pending",
+                })
+
+    return {
+        "status": "queued",
+        "device_count": len(device_ids),
+        "systems": systems,
+        "action_count": len(actions),
+        "queued_rom_count": queued_roms,
+        "actions": actions,
+    }
+
+
 @app.post("/api/devices/{device_id}/sync-activity")
 async def add_device_sync_activity(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     get_current_drone(device_id, authorization)
