@@ -1776,6 +1776,100 @@ async def sync_device_artwork(device_id: str, payload: dict, authorization: Opti
     return {"action": action}
 
 
+@app.post("/api/devices/{device_id}/sync-artwork-bulk")
+async def sync_device_artwork_bulk(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    require_device_admin(user, device)
+
+    raw_systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
+    systems = {
+        str(item or "").strip().lower()
+        for item in raw_systems
+        if str(item or "").strip() and str(item or "").strip().lower() != "all"
+    }
+    raw_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
+    source_device_ids = {
+        str(item.get("device_id") if isinstance(item, dict) else item or "").strip()
+        for item in raw_devices
+        if str(item.get("device_id") if isinstance(item, dict) else item or "").strip()
+        and str(item.get("device_id") if isinstance(item, dict) else item or "").strip().lower() != "any"
+    }
+    artwork_type = str(payload.get("artwork_type") or "").strip().lower()
+
+    rows = db.get_master_artwork_for_device(device["user_id"], device_id) or []
+    actions = []
+    queued_assets = 0
+    skipped_assets = 0
+    for row in rows:
+        system_name = str(row.get("system_name") or row.get("system") or "").strip()
+        rom_path = str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").strip()
+        row_type = str(row.get("artwork_type") or "").strip()
+        if not system_name or not rom_path or not row_type:
+            skipped_assets += 1
+            continue
+        if systems and system_name.lower() not in systems:
+            continue
+        if artwork_type and row_type.lower() != artwork_type:
+            continue
+        if row.get("present_on_selected"):
+            continue
+
+        available_sources = row.get("devices") if isinstance(row.get("devices"), list) else []
+        source_devices = [
+            source for source in available_sources
+            if source.get("device_id") and source.get("device_id") != device_id
+        ]
+        if source_device_ids:
+            source_devices = [
+                source for source in source_devices
+                if source.get("device_id") in source_device_ids
+            ]
+        if not source_devices:
+            skipped_assets += 1
+            continue
+
+        action = db.create_device_action(device["user_id"], device_id, "sync_artwork", {
+            "asset_type": "artwork",
+            "system_name": system_name,
+            "system": system_name,
+            "rom_name": row.get("rom_name") or rom_path,
+            "rom_path": rom_path,
+            "file_path": rom_path,
+            "artwork_type": row_type,
+            "devices": source_devices,
+        })
+        if not action:
+            skipped_assets += 1
+            continue
+        actions.append(action)
+        queued_assets += 1
+        db.add_rom_sync_activity(device_id, {
+            "sync_id": action["id"],
+            "asset_type": "artwork",
+            "target_drone_id": device_id,
+            "system": system_name,
+            "rom_name": row.get("rom_name") or rom_path,
+            "rom_path": rom_path,
+            "relative_path": rom_path,
+            "artwork_type": row_type,
+            "action": "download",
+            "status": "pending",
+        })
+
+    return {
+        "status": "queued",
+        "systems": sorted(systems) if systems else ["all"],
+        "source_device_ids": sorted(source_device_ids) if source_device_ids else ["any"],
+        "action_count": len(actions),
+        "queued_artwork_count": queued_assets,
+        "skipped_artwork_count": skipped_assets,
+        "actions": actions,
+    }
+
+
 @app.post("/api/devices/{device_id}/sync-system")
 async def sync_device_system(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)

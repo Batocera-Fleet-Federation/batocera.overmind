@@ -1824,6 +1824,8 @@
             let artworkSearchQuery = '';
             let artworkStatusFilter = '';
             let artworkTypeFilter = '';
+            let artworkSourceDeviceFilter = [];
+            let artworkSystemFilter = [];
             let masterArtworkPage = 1;
             let systemPageState = {};
             let pendingConnectionTimer = null;
@@ -4176,10 +4178,81 @@
                 loadDeviceArtworkPanel();
             }
 
+            function normalizeArtworkSelection(values, allValue) {
+                const unique = [];
+                (values || []).forEach(value => {
+                    const text = String(value || '').trim();
+                    if (text && text !== allValue && !unique.includes(text)) unique.push(text);
+                });
+                return unique;
+            }
+
+            function handleArtworkSourceFilter(event) {
+                const input = event.target;
+                if (!input) return;
+                if (input.value === 'any') {
+                    artworkSourceDeviceFilter = [];
+                } else {
+                    const checked = Array.from(document.querySelectorAll('.artwork-source-filter:checked')).map(el => el.value);
+                    artworkSourceDeviceFilter = normalizeArtworkSelection(checked, 'any');
+                }
+                loadDeviceArtworkPanel();
+            }
+
+            function handleArtworkSystemFilter(event) {
+                const input = event.target;
+                if (!input) return;
+                if (input.value === 'all') {
+                    artworkSystemFilter = [];
+                } else {
+                    const checked = Array.from(document.querySelectorAll('.artwork-system-filter:checked')).map(el => el.value);
+                    artworkSystemFilter = normalizeArtworkSelection(checked, 'all');
+                }
+                loadDeviceArtworkPanel();
+            }
+
+            function renderArtworkCheckboxDropdown({id, label, allLabel, allValue, items, selectedValues, inputClass, onChange}) {
+                const selected = normalizeArtworkSelection(selectedValues, allValue);
+                const activeLabel = selected.length ? `${selected.length} selected` : allLabel;
+                const options = (items || []).map(item => {
+                    const value = typeof item === 'string' ? item : item.value;
+                    const text = typeof item === 'string' ? item : item.label;
+                    return `
+                        <label class="dropdown-item form-check mb-0">
+                            <input class="form-check-input ${inputClass}" type="checkbox" value="${escapeHtml(value)}" ${selected.includes(value) ? 'checked' : ''} onchange="${onChange}(event)">
+                            <span class="form-check-label ms-1">${escapeHtml(text)}</span>
+                        </label>
+                    `;
+                }).join('');
+                return `
+                    <div style="min-width:190px">
+                        <label class="form-label" for="${id}-button">${escapeHtml(label)}</label>
+                        <div class="dropdown">
+                            <button id="${id}-button" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" aria-expanded="false">${escapeHtml(activeLabel)}</button>
+                            <div class="dropdown-menu p-2" style="max-height:320px;overflow:auto;min-width:260px">
+                                <label class="dropdown-item form-check mb-0">
+                                    <input class="form-check-input ${inputClass}" type="checkbox" value="${escapeHtml(allValue)}" ${selected.length ? '' : 'checked'} onchange="${onChange}(event)">
+                                    <span class="form-check-label ms-1">${escapeHtml(allLabel)}</span>
+                                </label>
+                                <div class="dropdown-divider"></div>
+                                ${options || '<div class="dropdown-item small text-muted">No options available.</div>'}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            function selectedArtworkSourceDevicesForRow(row) {
+                const sources = Array.isArray(row?.devices) ? row.devices : [];
+                if (!artworkSourceDeviceFilter.length) return sources;
+                return sources.filter(source => artworkSourceDeviceFilter.includes(source.device_id));
+            }
+
             async function loadDeviceArtworkPanel() {
                 const container = document.getElementById('device-artwork-panel');
                 if (!container || !selectedDeviceId) return;
                 try {
+                    if (!currentDevices.length) await loadDevices();
                     const params = new URLSearchParams();
                     if ((artworkSearchQuery || '').trim()) params.set('q', artworkSearchQuery.trim());
                     if (artworkStatusFilter) params.set('status', artworkStatusFilter);
@@ -4196,6 +4269,40 @@
                     const pageCount = Math.max(1, Math.ceil(total / perPage));
                     masterArtworkPage = page;
                     const missingCount = rows.filter(row => !row.present_on_selected).length;
+                    let systemOptions = Array.from(new Set(rows.map(row => row.system_name || row.system).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+                    try {
+                        const systemsResponse = await apiGet('/api/systems');
+                        if (systemsResponse.ok) {
+                            const systemsPayload = await systemsResponse.json();
+                            systemOptions = Array.from(new Set((systemsPayload.systems || []).map(row => row.system_name).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+                        }
+                    } catch (error) {
+                        // Keep page-derived system options when the global systems list is unavailable.
+                    }
+                    const sourceOptions = currentDevices
+                        .filter(device => device && device.device_id && device.device_id !== selectedDeviceId)
+                        .sort((a, b) => String(a.device_name || a.device_id).localeCompare(String(b.device_name || b.device_id)))
+                        .map(device => ({value: device.device_id, label: device.device_name || device.device_id}));
+                    const sourceDropdown = renderArtworkCheckboxDropdown({
+                        id: 'device-artwork-source-filter',
+                        label: 'Sync from',
+                        allLabel: 'Any source',
+                        allValue: 'any',
+                        items: sourceOptions,
+                        selectedValues: artworkSourceDeviceFilter,
+                        inputClass: 'artwork-source-filter',
+                        onChange: 'handleArtworkSourceFilter',
+                    });
+                    const systemDropdown = renderArtworkCheckboxDropdown({
+                        id: 'device-artwork-system-filter',
+                        label: 'Systems to sync',
+                        allLabel: 'All systems',
+                        allValue: 'all',
+                        items: systemOptions,
+                        selectedValues: artworkSystemFilter,
+                        inputClass: 'artwork-system-filter',
+                        onChange: 'handleArtworkSystemFilter',
+                    });
                     const typeOptions = ['', 'image', 'thumbnail', 'marquee', 'fanart', 'boxart', 'video', 'wheel', 'manual'].map(value => {
                         const label = value || 'All types';
                         return `<option value="${escapeHtml(value)}" ${artworkTypeFilter === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
@@ -4225,6 +4332,12 @@
                                     <option value="present" ${artworkStatusFilter === 'present' ? 'selected' : ''}>Present</option>
                                 </select>
                             </div>
+                            ${sourceDropdown}
+                            ${systemDropdown}
+                            <div style="min-width:170px">
+                                <label class="form-label d-block">&nbsp;</label>
+                                <button class="btn btn-primary w-100" onclick="syncAllArtwork()">Sync All ROMs</button>
+                            </div>
                         </div>
                         <div class="card"><div class="card-body py-2">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
@@ -4244,8 +4357,9 @@
                                 ${rows.map(row => {
                                     const present = !!row.present_on_selected;
                                     const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
-                                    const showSync = !present && row.devices && row.devices.length;
-                                    const rowData = Object.assign({}, row);
+                                    const selectedSources = selectedArtworkSourceDevicesForRow(row);
+                                    const showSync = !present && selectedSources.length;
+                                    const rowData = Object.assign({}, row, { devices: selectedSources });
                                     return `
                                         <tr>
                                             <td style="min-width:280px">
@@ -4269,12 +4383,39 @@
                 }
             }
 
+            async function syncAllArtwork() {
+                if (!selectedDeviceId) return;
+                try {
+                    const payload = {
+                        systems: artworkSystemFilter,
+                        devices: artworkSourceDeviceFilter,
+                    };
+                    if (artworkTypeFilter) payload.artwork_type = artworkTypeFilter;
+                    const response = await fetch(`/api/devices/${selectedDeviceId}/sync-artwork-bulk`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
+                        body: JSON.stringify(payload)
+                    });
+                    if (!response.ok) throw new Error('Failed to queue artwork sync');
+                    const result = await response.json();
+                    const count = Number(result.queued_artwork_count || result.action_count || 0);
+                    showMessage(count ? `Queued ${count} artwork sync${count === 1 ? '' : 's'}.` : 'No missing artwork matched those selections.', 'success');
+                    await loadSyncActivityPanel();
+                    await loadDeviceArtworkPanel();
+                } catch (error) {
+                    console.error('Error queuing bulk artwork sync:', error);
+                    showMessage('Failed to queue bulk artwork sync.', 'error');
+                }
+            }
+
             async function syncArtwork(row) {
                 try {
+                    const selectedSources = selectedArtworkSourceDevicesForRow(row);
+                    const payload = Object.assign({}, row, { devices: selectedSources });
                     const response = await fetch(`/api/devices/${selectedDeviceId}/sync-artwork`, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                        body: JSON.stringify(row)
+                        body: JSON.stringify(payload)
                     });
                     if (!response.ok) throw new Error('Failed to queue artwork sync');
                     showMessage('Artwork sync queued. The Drone will choose the source peer automatically.', 'success');

@@ -1345,6 +1345,52 @@ def test_sync_artwork_action_payload_includes_only_source_devices_with_artwork(c
     assert action["payload"]["artwork_type"] == "image"
 
 
+def test_bulk_sync_artwork_filters_sources_and_systems(client):
+    client.post("/api/auth/register", json={"email": "bulk-artwork@example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "bulk-artwork@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("bulk-artwork@example.com")
+    db.create_device(user["id"], "source-a", "Source A", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "source-b", "Source B", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    db.add_artwork("source-a", [{
+        "system": "snes",
+        "rom_path": "Game.zip",
+        "rom_name": "Game.zip",
+        "artwork_types": ["image"],
+    }])
+    db.add_artwork("source-b", [{
+        "system": "gba",
+        "rom_path": "Other.gba",
+        "rom_name": "Other.gba",
+        "artwork_types": ["image"],
+    }])
+
+    response = client.post(
+        "/api/devices/target-c/sync-artwork-bulk",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"systems": ["snes"], "devices": ["source-a"]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action_count"] == 1
+    assert payload["queued_artwork_count"] == 1
+
+    claim = client.post(
+        "/api/devices/target-c/actions/claim",
+        headers={"Authorization": "Bearer c"},
+        json={},
+    )
+    assert claim.status_code == 200
+    action = claim.json()["actions"][0]
+    assert action["action"] == "sync_artwork"
+    assert action["payload"]["system_name"] == "snes"
+    assert action["payload"]["rom_path"] == "Game.zip"
+    assert action["payload"]["devices"] == [{"device_id": "source-a", "device_name": "Source A"}]
+
+
 def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
     token = client.post(
