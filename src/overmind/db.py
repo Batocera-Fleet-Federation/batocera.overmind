@@ -255,7 +255,8 @@ class FakeDatabase:
         return swarm
 
     def ensure_personal_swarm(self, user_id: str) -> dict:
-        existing = self.get_user_swarms(user_id)
+        existing = [swarm for swarm in self.swarms.values() if swarm.get("owner_id") == user_id]
+        existing.sort(key=lambda row: str(row.get("created_at") or ""))
         if existing:
             return existing[0]
         user = self.get_user(user_id) or {}
@@ -293,6 +294,10 @@ class FakeDatabase:
         return member
 
     def default_swarm_id(self, user_id: str) -> Optional[str]:
+        owned = [swarm for swarm in self.swarms.values() if swarm.get("owner_id") == user_id]
+        owned.sort(key=lambda row: str(row.get("created_at") or ""))
+        if owned:
+            return owned[0]["id"]
         swarms = self.get_user_swarms(user_id)
         return swarms[0]["id"] if swarms else None
 

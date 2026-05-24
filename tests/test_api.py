@@ -239,6 +239,44 @@ def test_swarm_roles_gate_invites_and_mutations(client):
     assert viewer_member["role"] == "overseer"
 
 
+def test_swarms_marks_users_home_swarm(client):
+    client.post("/api/auth/register", json={"email": "owner-home@example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "owner-home@example.com", "password": "testpass123"}).json()["access_token"]
+
+    response = client.get("/api/swarms", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    swarms = response.json()["swarms"]
+    assert swarms
+    assert sum(1 for swarm in swarms if swarm.get("current")) == 1
+    assert swarms[0]["current"] is True
+
+
+def test_invited_overseer_home_swarm_is_their_owned_swarm(client):
+    client.post("/api/auth/register", json={"email": "owner-home@example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner-home@example.com", "password": "testpass123"}).json()["access_token"]
+    owner_swarm_id = db.default_swarm_id(db.get_user_by_email("owner-home@example.com")["id"])
+
+    invite = client.post(
+        f"/api/swarms/{owner_swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "overseer-home@example.com"},
+    )
+    assert invite.status_code == 200
+
+    client.post("/api/auth/register", json={"email": "overseer-home@example.com", "password": "testpass123"})
+    overseer_token = client.post("/api/auth/login", json={"email": "overseer-home@example.com", "password": "testpass123"}).json()["access_token"]
+
+    response = client.get("/api/swarms", headers={"Authorization": f"Bearer {overseer_token}"})
+
+    assert response.status_code == 200
+    swarms = response.json()["swarms"]
+    current_swarms = [swarm for swarm in swarms if swarm.get("current")]
+    assert len(current_swarms) == 1
+    assert current_swarms[0]["owner_id"] == db.get_user_by_email("overseer-home@example.com")["id"]
+    assert current_swarms[0]["id"] != owner_swarm_id
+
+
 def test_drone_ownership_claim_success_and_owner_actions(client, capsys):
     client.post("/api/auth/register", json={"email": "claim-owner@example.com", "password": "claimpass123"})
     token = client.post("/api/auth/login", json={"email": "claim-owner@example.com", "password": "claimpass123"}).json()["access_token"]
@@ -1088,6 +1126,29 @@ def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     assert "loadDeviceConfigs({queue: true})" in html
 
 
+def test_invite_registration_ui_clears_pending_token_before_login():
+    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    assert "pendingInvitationToken = null;" in html
+    assert "sessionStorage.removeItem('pending_invitation_token');" in html
+    assert "Registration complete. Sign in to view the swarm." in html
+
+
+def test_shared_swarm_navigation_state_is_reflected_in_ui_routes():
+    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    assert "document.addEventListener('DOMContentLoaded', async () =>" in html
+    assert "routeSwarmId = parseRoute().swarmId || null;" in html
+    assert "await loadSwarms();" in html
+    assert "goToMySwarm()" in html
+    assert "shared-swarm-nav-btn" in html
+    assert "openSelectedSharedSwarm()" in html
+    assert "`#/devices${swarmPath}/swarm/${swarmView}`" in html
+    assert "`#/devices${swarmPath}/device/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`" in html
+    assert "parts[3] === 'swarm'" in html
+    assert "parts[3] === 'device'" in html
+    assert "row.can_view && !row.current" in html
+    assert "Use My Swarm to view your own swarm." in html
+
+
 def test_drone_alive_claims_data_action_and_stores_result(client):
     db.populate_fake_data()
     login_response = client.post(
@@ -1297,6 +1358,47 @@ def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):
     new_user = db.get_user_by_email("new-user@example.com")
     assert new_user["email_verified"] is True
     assert db.get_swarm_member(swarm_id, new_user["id"])["role"] == "overseer"
+
+
+def test_invitation_accept_is_idempotent_after_invite_registration(client):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    swarm_id = db.default_swarm_id(db.get_user_by_email("owner@example.com")["id"])
+
+    client.post(
+        f"/api/swarms/{swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "new-overseer@example.com"},
+    )
+    invite = next(row for row in db.invitations.values() if row["email"] == "new-overseer@example.com")
+    import secrets
+    raw_token = secrets.token_urlsafe(16)
+    invite["token_hash"] = auth_utils.hash_password(f"{TOKEN_HASH_SECRET}:{raw_token}")
+
+    registered = client.post(
+        "/api/auth/register",
+        json={"email": "new-overseer@example.com", "password": "testpass123", "invitation_token": raw_token},
+    )
+    assert registered.status_code == 200
+
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "new-overseer@example.com", "password": "testpass123"},
+    )
+    assert login.status_code == 200
+    overseer_token = login.json()["access_token"]
+
+    status_response = client.get(f"/api/invitations/status?token={raw_token}")
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "accepted"
+
+    accept_again = client.post(
+        "/api/invitations/accept",
+        headers={"Authorization": f"Bearer {overseer_token}"},
+        json={"token": raw_token},
+    )
+    assert accept_again.status_code == 200
+    assert accept_again.json()["status"] == "accepted"
 
 
 def test_overmind_manufactures_and_reuses_certificate(tmp_path, monkeypatch):

@@ -626,7 +626,8 @@ def get_current_drone(device_id: str, authorization: Optional[str]) -> dict:
 @app.get("/api/swarms")
 async def list_swarms(authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
-    return {"swarms": db.get_user_swarms(user["id"])}
+    default_swarm_id = db.default_swarm_id(user["id"])
+    return {"swarms": [{**swarm, "current": swarm.get("id") == default_swarm_id} for swarm in db.get_user_swarms(user["id"])]}
 
 
 @app.post("/api/swarms")
@@ -677,6 +678,15 @@ async def invitation_status(token: str):
         print("Invitation rejected: invalid")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation expired or invalid")
     if invite.get("status") != "pending":
+        invited_user = db.get_user_by_email(str(invite.get("email") or ""))
+        if invite.get("status") == "accepted" and invited_user and db.get_swarm_member(invite.get("swarm_id"), invited_user["id"]):
+            return {
+                "status": "accepted",
+                "email": invite.get("email"),
+                "swarm_id": invite.get("swarm_id"),
+                "role": invite.get("role") or READONLY_ROLE,
+                "registered": True,
+            }
         print(f"Invitation rejected for {invite.get('email')}: already_used")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation already used")
     if datetime.utcnow() > invite.get("expires_at"):
@@ -702,6 +712,8 @@ async def accept_invitation(payload: dict, authorization: Optional[str] = Header
     if invite.get("email") != str(user.get("email") or "").lower():
         print(f"Invitation rejected for user={user.get('email')}: email_mismatch invited={invite.get('email')}")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invitation email mismatch")
+    if invite.get("status") == "accepted" and db.get_swarm_member(invite.get("swarm_id"), user["id"]):
+        return {"status": "accepted", "swarm_id": invite["swarm_id"]}
     invite = db.accept_invitation_for_user(invite, user["id"])
     if not invite:
         print(f"Invitation rejected for user={user.get('email')}: expired_or_used")

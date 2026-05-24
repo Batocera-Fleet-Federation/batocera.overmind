@@ -640,6 +640,20 @@
                 border-color: #ffffff !important;
             }
 
+            .top-nav .nav-btn.shared-swarm-nav {
+                color: #10233a !important;
+                background: #f6c85f !important;
+                border-color: #f6c85f !important;
+                font-weight: 700;
+            }
+
+            .top-nav .nav-btn.shared-swarm-nav:hover,
+            .top-nav .nav-btn.shared-swarm-nav.active {
+                color: #06111f !important;
+                background: #ffd978 !important;
+                border-color: #ffd978 !important;
+            }
+
             .profile-chip {
                 background: transparent;
                 border: none;
@@ -1108,6 +1122,12 @@
 
             .nav-actions {
                 align-items: center;
+                flex: 1 1 auto;
+                justify-content: flex-end;
+            }
+
+            .nav-actions .shared-swarm-nav {
+                margin-right: auto;
             }
 
             .topbar {
@@ -1412,7 +1432,8 @@
                         </div>
                         <div class="menu-label mb-2 d-lg-none">Navigation</div>
                         <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
-                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); selectedDeviceId = null; setRoute('devices', null, 'systems')"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
+                            <a href="#" role="button" class="btn nav-btn shared-swarm-nav requires-auth" id="shared-swarm-nav-btn" data-tab="shared-swarm" style="display:none" onclick="event.preventDefault(); openSelectedSharedSwarm()"><i class="bi bi-share me-2"></i><span id="shared-swarm-nav-label">Shared Swarm</span></a>
+                            <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); goToMySwarm()"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
                             <a href="#/hive" role="button" class="btn nav-btn requires-auth" data-tab="hive" onclick="event.preventDefault(); switchTab('hive', this)"><i class="bi bi-diagram-3 me-2"></i>The Hive</a>
 
                             <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i><span id="profile-nav-label">Profile</span></a>
@@ -1785,6 +1806,7 @@
             let selectedDeviceId = null;
             let currentTab = 'devices';
             let currentDeviceView = 'systems';
+            let routeSwarmId = null;
             let currentDeviceSystems = {};
             let deviceRomSearchQuery = '';
             let masterRomPage = 1;
@@ -1808,7 +1830,7 @@
                 help: ['Help', 'Install, connect, and configure Drones'],
             };
 
-            document.addEventListener('DOMContentLoaded', () => {
+            document.addEventListener('DOMContentLoaded', async () => {
                     setupInactivityTracking();
 	                loadAuthProviders();
 	                handleOAuthReturn();
@@ -1816,8 +1838,9 @@
                 const token = localStorage.getItem('auth_token');
                 if (token) {
 	                    authToken = token;
+                    routeSwarmId = parseRoute().swarmId || null;
 	                    showDashboard();
-	                    loadSwarms();
+	                    await loadSwarms();
 	                    loadProfile();
                     loadDevices();
                     loadPendingConnections();
@@ -2112,9 +2135,11 @@
                         throw new Error(error.detail || 'Registration failed');
                     }
                         if (pendingInvitationToken) {
+                            pendingInvitationToken = null;
+                            sessionStorage.removeItem('pending_invitation_token');
                             showAuthOnly('login-form');
                             document.getElementById('login-email').value = email;
-                            showMessage('Registration complete. Sign in to finish accepting the invitation.', 'success');
+                            showMessage('Registration complete. Sign in to view the swarm.', 'success');
                         } else {
 	                        document.getElementById('verify-email').value = email;
 	                        showAuthOnly('verify-form');
@@ -2293,27 +2318,87 @@
 	                const response = await apiGet('/api/swarms');
 	                const data = await response.json();
 	                currentSwarms = data.swarms || [];
-	                if (!selectedSwarmId || !currentSwarms.some(s => s.id === selectedSwarmId)) {
+                    const previousSwarmId = selectedSwarmId;
+	                if (routeSwarmId && currentSwarms.some(s => s.id === routeSwarmId)) {
+	                    selectedSwarmId = routeSwarmId;
+	                } else if (!selectedSwarmId || !currentSwarms.some(s => s.id === selectedSwarmId)) {
 	                    selectedSwarmId = currentSwarms[0] ? currentSwarms[0].id : null;
 	                }
 	                if (selectedSwarmId) localStorage.setItem('selected_swarm_id', selectedSwarmId);
 	                renderSwarmSelector();
 	                renderProfileUI();
 	                applyRbacUI();
+                    updateSharedSwarmNavButton();
+                    if (selectedSwarmId && selectedSwarmId !== previousSwarmId && currentTab === 'devices') {
+                        await loadDevices();
+                        await loadPendingConnections();
+                    }
 	            }
 
 	            function renderSwarmSelector() {
 	                return;
 	            }
 
-	            async function selectSwarm(swarmId) {
+	            async function selectSwarm(swarmId, options = {}) {
 	                selectedSwarmId = swarmId;
 	                localStorage.setItem('selected_swarm_id', selectedSwarmId);
 	                selectedDeviceId = null;
+                    currentDeviceView = 'systems';
+                    if (options.updateRoute !== false) setRoute('devices', null, 'systems', 'drones');
 	                renderProfileUI();
+                    updateSharedSwarmNavButton();
 	                await loadDevices();
 	                await loadPendingConnections();
 	            }
+
+            function homeSwarmId() {
+                const home = currentSwarms.find(s => s.current) || currentSwarms.find(s => s.role === 'overlord') || currentSwarms[0];
+                return home ? home.id : null;
+            }
+
+            function isSharedSwarmSelected() {
+                return !!selectedSwarmId && !!homeSwarmId() && selectedSwarmId !== homeSwarmId();
+            }
+
+            function selectedSwarm() {
+                return currentSwarms.find(s => s.id === selectedSwarmId) || null;
+            }
+
+            function updateSharedSwarmNavButton() {
+                const btn = document.getElementById('shared-swarm-nav-btn');
+                const label = document.getElementById('shared-swarm-nav-label');
+                const mySwarmBtn = document.querySelector('.nav-btn[data-tab="devices"]');
+                if (!btn) return;
+                const swarm = selectedSwarm();
+                const show = currentTab === 'devices' && isSharedSwarmSelected() && swarm;
+                btn.style.display = show ? '' : 'none';
+                if (label && swarm) label.textContent = swarm.name || 'Shared Swarm';
+                btn.classList.toggle('active', !!show);
+                if (mySwarmBtn && currentTab === 'devices') mySwarmBtn.classList.toggle('active', !show);
+            }
+
+            async function goToMySwarm() {
+                const homeId = homeSwarmId();
+                if (homeId) {
+                    await selectSwarm(homeId);
+                } else {
+                    selectedDeviceId = null;
+                    currentDeviceView = 'systems';
+                    setRoute('devices', null, 'systems', 'drones');
+                }
+                routeSwarmId = null;
+                selectedDeviceId = null;
+                updateSharedSwarmNavButton();
+            }
+
+            function openSelectedSharedSwarm() {
+                if (!isSharedSwarmSelected()) {
+                    goToMySwarm();
+                    return;
+                }
+                selectedDeviceId = null;
+                setRoute('devices', null, 'systems', 'drones');
+            }
 
 	            function selectedSwarmRole() {
 	                const swarm = currentSwarms.find(s => s.id === selectedSwarmId);
@@ -2375,7 +2460,7 @@
 	                                ${row.viewer_role ? `<span class="badge text-bg-primary">${escapeHtml(roleLabel(row.viewer_role))}</span>` : '<span class="badge text-bg-secondary">Public</span>'}
 	                                ${row.swarm_id === selectedSwarmId ? '<span class="badge text-bg-success">Selected</span>' : ''}
 	                            </div>
-                                <button class="btn btn-outline-primary btn-sm mt-3" type="button" ${row.can_view ? '' : 'disabled'} onclick="openHiveSwarm('${escapeHtml(row.swarm_id)}')">${row.can_view ? 'Open Swarm' : 'Private'}</button>
+                                <button class="btn btn-outline-primary btn-sm mt-3" type="button" ${row.can_view && !row.current ? '' : 'disabled'} onclick="openHiveSwarm('${escapeHtml(row.swarm_id)}')">${row.current ? 'My Swarm' : row.can_view ? 'Open Swarm' : 'Private'}</button>
 	                        </div>
 	                    </div></div>
 	                `).join('');
@@ -2387,8 +2472,11 @@
                     showMessage('This swarm is private.', 'error');
                     return;
                 }
+                if (swarmId === homeSwarmId()) {
+                    showMessage('Use My Swarm to view your own swarm.', 'success');
+                    return;
+                }
                 await selectSwarm(swarmId);
-                setRoute('devices', null, 'systems', 'drones');
             }
 
 	            function toggleAuthForm() {
@@ -3921,8 +4009,11 @@
 
             function setRoute(tabName, deviceId = selectedDeviceId, deviceView = currentDeviceView, swarmView = null) {
                 let hash = `#/${tabName}`;
-                if (tabName === 'devices' && !deviceId && swarmView) hash = `#/devices/swarm/${swarmView}`;
-                if (tabName === 'devices' && deviceId) hash = `#/devices/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`;
+                if (tabName === 'devices') {
+                    const swarmPath = isSharedSwarmSelected() ? `/swarm/${encodeURIComponent(selectedSwarmId)}` : '';
+                    if (!deviceId && swarmView) hash = `#/devices${swarmPath}/swarm/${swarmView}`;
+                    if (deviceId) hash = `#/devices${swarmPath}/device/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`;
+                }
                 if (window.location.hash !== hash) window.location.hash = hash; else applyRouteFromHash();
             }
 
@@ -3936,8 +4027,18 @@
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 if (tab === 'devices' && parts[1] === 'swarm') {
+                    if (parts[3] === 'swarm') {
+                        const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
+                        return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[4]) ? parts[4] : 'drones' };
+                    }
+                    if (parts[3] === 'device') {
+                        return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[5]) ? parts[5] : 'systems', swarmView: 'drones' };
+                    }
                     const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
                     return { tab, deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[2]) ? parts[2] : 'drones' };
+                }
+                if (tab === 'devices' && parts[1] === 'device') {
+                    return { tab, deviceId: parts[2] ? decodeURIComponent(parts[2]) : null, deviceView: ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[3]) ? parts[3] : 'systems', swarmView: 'drones' };
                 }
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
                 const deviceView = tab === 'devices' && ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
@@ -3946,6 +4047,11 @@
 
             function applyRouteFromHash() {
                 const route = parseRoute();
+                routeSwarmId = route.swarmId || null;
+                if (route.tab === 'devices' && route.swarmId && currentSwarms.some(s => s.id === route.swarmId)) {
+                    selectedSwarmId = route.swarmId;
+                    localStorage.setItem('selected_swarm_id', selectedSwarmId);
+                }
                 if (route.tab === 'devices' && !route.deviceId) {
                     selectedDeviceId = null;
                 } else if (route.deviceId && currentDevices.some(d => d.device_id === route.deviceId)) {
@@ -3963,6 +4069,7 @@
                     else if (view === 'master-list') showSwarmMasterList(false);
                     else showSwarmHome(false);
                 }
+                updateSharedSwarmNavButton();
             }
 
             async function loadDeviceActions() {
@@ -4130,6 +4237,7 @@
                 updateSelectedDeviceSummary();
                 applyRbacUI();
                 setPageChrome(tabName);
+                updateSharedSwarmNavButton();
                 if (updateUrl) setRoute(tabName);
             }
 
