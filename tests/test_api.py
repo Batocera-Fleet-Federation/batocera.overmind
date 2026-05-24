@@ -1318,13 +1318,51 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
     )
     assert metadata_response.status_code == 200
     assert metadata_response.json()["rom_count"] == 2
+    repeat_response = client.post(
+        "/api/devices/arcade-cabinet-001/rom-metadata",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={
+            "device_id": "arcade-cabinet-001",
+            "type": "rom_metadata",
+            "roms_root": "/userdata/roms",
+            "systems": [{"name": "snes", "rom_count": 2}],
+            "roms": [
+                {"system": "snes", "name": "Super Metroid", "rom_file": "Super Metroid (USA).zip", "byte_count": 32, "rom_md5": "aaa"},
+                {"system": "snes", "name": "Chrono Trigger", "rom_file": "Chrono Trigger (USA).zip", "byte_count": 32, "rom_md5": "bbb"},
+            ],
+            "gamelists": [],
+        },
+    )
+    assert repeat_response.status_code == 200
 
     roms_response = client.get(
         "/api/devices/arcade-cabinet-001/roms",
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert len(roms_response.json()["systems"]["snes"]) == 2
+    snes_roms = roms_response.json()["systems"]["snes"]
+    assert len(snes_roms) == 2
+    assert {rom["rom_md5"] for rom in snes_roms} == {"aaa", "bbb"}
+    assert {rom["file_path"] for rom in snes_roms} == {"Super Metroid (USA).zip", "Chrono Trigger (USA).zip"}
     assert len(roms_response.json()["systems"]["snes"]) != before_snes_count
+
+    empty_response = client.post(
+        "/api/devices/arcade-cabinet-001/rom-metadata",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={
+            "device_id": "arcade-cabinet-001",
+            "type": "rom_metadata",
+            "roms_root": "/userdata/roms",
+            "systems": [{"name": "snes", "rom_count": 0}],
+            "roms": [],
+            "gamelists": [],
+        },
+    )
+    assert empty_response.status_code == 200
+    roms_response = client.get(
+        "/api/devices/arcade-cabinet-001/roms",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert roms_response.json()["systems"].get("snes", []) == []
 
 
 def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):

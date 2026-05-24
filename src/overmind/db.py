@@ -988,12 +988,21 @@ class FakeDatabase:
         device["rom_metadata"] = metadata
 
         grouped: Dict[str, list] = {}
+        reported_systems = set()
+        for system in systems:
+            if isinstance(system, dict):
+                system_name = str(system.get("name") or system.get("system_name") or "").strip()
+            else:
+                system_name = str(system or "").strip()
+            if system_name:
+                reported_systems.add(system_name)
         for item in metadata.get("roms") if isinstance(metadata.get("roms"), list) else []:
             if not isinstance(item, dict):
                 continue
             system_name = str(item.get("system") or item.get("system_name") or "").strip()
             if not system_name:
                 continue
+            reported_systems.add(system_name)
             rom_name = str(item.get("rom_name") or item.get("name") or item.get("title") or "").strip()
             file_path = str(item.get("file_path") or item.get("relative_path") or item.get("rom_path") or item.get("rom_file") or rom_name).strip()
             grouped.setdefault(system_name, []).append({
@@ -1005,8 +1014,8 @@ class FakeDatabase:
                 "source": item.get("source"),
                 "modified_time": item.get("modified_time") or item.get("mtime"),
             })
-        for system_name, roms in grouped.items():
-            self.add_roms(device_id, system_name, roms)
+        for system_name in reported_systems:
+            self.add_roms(device_id, system_name, grouped.get(system_name, []))
 
     def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)

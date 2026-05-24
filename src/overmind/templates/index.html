@@ -3537,7 +3537,14 @@
                                 <details>
                                     <summary>${systemName} (${roms.length} ROMs, ${totalMb} MB)</summary>
                                     <ul class="list-unstyled ms-3 mt-2">
-                                        ${pageRoms.map(rom => `<li class="py-1 border-bottom small">${rom.rom_name}${rom.file_size ? ` <span class="text-muted">(${(rom.file_size / 1024 / 1024).toFixed(2)} MB)</span>` : ''}</li>`).join('')}
+                                        ${pageRoms.map(rom => {
+                                            const path = rom.file_path || rom.relative_path || rom.rom_name || '';
+                                            const size = rom.file_size ? ` ${(rom.file_size / 1024 / 1024).toFixed(2)} MB` : '';
+                                            return `<li class="py-1 border-bottom small">
+                                                <div>${escapeHtml(rom.rom_name || path)}</div>
+                                                <div class="text-muted">${escapeHtml(path)}${size ? ` <span>(${size.trim()})</span>` : ''}${rom.rom_md5 ? ` <span class="mono">md5: ${escapeHtml(rom.rom_md5)}</span>` : ''}</div>
+                                            </li>`;
+                                        }).join('')}
                                     </ul>
                                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 ms-3 mt-2 small text-muted">
                                         <span>Showing ${roms.length ? start + 1 : 0}-${Math.min(start + ROMS_PER_PAGE, roms.length)} of ${roms.length}</span>
