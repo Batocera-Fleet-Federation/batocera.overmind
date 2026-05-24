@@ -19,8 +19,10 @@ def client(monkeypatch):
     db.users.clear()
     db.user_by_email.clear()
     db.devices.clear()
+    db.device_admin_claims.clear()
     db.user_devices.clear()
     db.roms.clear()
+    db.bios.clear()
     db.gamelogs.clear()
     db.device_actions.clear()
     db.speed_samples.clear()
@@ -292,8 +294,8 @@ def test_drone_ownership_claim_success_and_owner_actions(client, capsys):
         },
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "approved"
-    assert response.json()["drone_token"]
+    assert response.json()["status"] == "claimed"
+    assert response.json()["drone_token"] is None
     assert "claimpass123" not in capsys.readouterr().out
 
     devices = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
@@ -303,9 +305,17 @@ def test_drone_ownership_claim_success_and_owner_actions(client, capsys):
     assert action.status_code == 200
 
 
-def test_drone_ownership_claim_invalid_credentials_and_already_owned(client, capsys):
+def test_drone_ownership_claim_invalid_credentials_and_cross_swarm_admin(client, capsys):
     client.post("/api/auth/register", json={"email": "first-owner@example.com", "password": "claimpass123"})
     client.post("/api/auth/register", json={"email": "second-owner@example.com", "password": "otherpass123"})
+    first_token = client.post(
+        "/api/auth/login",
+        json={"email": "first-owner@example.com", "password": "claimpass123"},
+    ).json()["access_token"]
+    second_token = client.post(
+        "/api/auth/login",
+        json={"email": "second-owner@example.com", "password": "otherpass123"},
+    ).json()["access_token"]
 
     bad = client.post(
         "/api/drones/claim-ownership",
@@ -322,11 +332,24 @@ def test_drone_ownership_claim_invalid_credentials_and_already_owned(client, cap
     )
     assert claimed.status_code == 200
 
-    denied = client.post(
+    second_claim = client.post(
         "/api/drones/claim-ownership",
         json={"device_id": "owned-drone", "email": "second-owner@example.com", "password": "otherpass123"},
     )
-    assert denied.status_code == 409
+    assert second_claim.status_code == 200
+    assert second_claim.json()["drone_token"] is None
+
+    first_devices = client.get("/api/devices", headers={"Authorization": f"Bearer {first_token}"})
+    second_devices = client.get("/api/devices", headers={"Authorization": f"Bearer {second_token}"})
+    assert {row["device_id"] for row in first_devices.json()["devices"]} == {"owned-drone"}
+    assert {row["device_id"] for row in second_devices.json()["devices"]} == {"owned-drone"}
+
+    action = client.post(
+        "/api/devices/owned-drone/actions",
+        headers={"Authorization": f"Bearer {second_token}"},
+        json={"action": "restart"},
+    )
+    assert action.status_code == 200
 
 
 def test_hive_lists_public_swarms_without_private_owner_data(client):
@@ -1170,6 +1193,74 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     assert claim.status_code == 200
     action = claim.json()["actions"][0]
     assert action["payload"]["devices"] == [{"device_id": "source-with-rom", "device_name": "Source With ROM"}]
+
+
+def test_rom_metadata_upload_persists_bios_and_master_bios(client):
+    client.post("/api/auth/register", json={"email": "bios@example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "bios@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("bios@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    db.create_device(user["id"], "drone-b", "Drone B", {"ip_address": "10.0.0.3"}, raw_token="drone-token-b")
+
+    response = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "rom_metadata",
+            "roms": [],
+            "systems": [],
+            "bios": [{"name": "flash.bin", "path": "dc/flash.bin", "byte_count": 9, "md5": "bios-md5"}],
+            "gamelists": [],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["bios_count"] == 1
+
+    bios_response = client.get("/api/devices/drone-a/bios", headers={"Authorization": f"Bearer {token}"})
+    assert bios_response.status_code == 200
+    assert bios_response.json()["bios"][0]["file_path"] == "dc/flash.bin"
+    assert bios_response.json()["bios"][0]["bios_md5"] == "bios-md5"
+
+    master_response = client.get("/api/devices/drone-b/master-bios", headers={"Authorization": f"Bearer {token}"})
+    assert master_response.status_code == 200
+    row = master_response.json()["bios"][0]
+    assert row["file_path"] == "dc/flash.bin"
+    assert row["present_on_selected"] is False
+    assert row["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
+
+
+def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client):
+    client.post("/api/auth/register", json={"email": "sync-bios@example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "sync-bios@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("sync-bios@example.com")
+    db.create_device(user["id"], "source-without-bios", "Source Without BIOS", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "source-with-bios", "Source With BIOS", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    db.add_bios("source-with-bios", [{"bios_name": "flash.bin", "file_path": "dc/flash.bin", "bios_md5": "bios-md5", "file_size": 8}])
+
+    response = client.post(
+        "/api/devices/target-c/sync-bios",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"file_path": "dc/flash.bin", "bios_md5": "bios-md5", "file_size": 8},
+    )
+    assert response.status_code == 200
+
+    claim = client.post(
+        "/api/devices/target-c/actions/claim",
+        headers={"Authorization": "Bearer c"},
+        json={},
+    )
+    assert claim.status_code == 200
+    action = claim.json()["actions"][0]
+    assert action["action"] == "sync_bios"
+    assert action["payload"]["devices"] == [{"device_id": "source-with-bios", "device_name": "Source With BIOS"}]
 
 
 def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):

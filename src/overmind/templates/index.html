@@ -1569,6 +1569,9 @@
                                             <button class="btn btn-outline-primary btn-sm device-view-btn active" data-device-view="systems" onclick="switchDeviceView('systems', this)">
                                                 <i class="bi bi-grid me-1"></i>Systems
                                             </button>
+                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="bios" onclick="switchDeviceView('bios', this)">
+                                                <i class="bi bi-cpu me-1"></i>Bios
+                                            </button>
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="metadata" onclick="switchDeviceView('metadata', this)">
                                                 <i class="bi bi-info-circle me-1"></i>Metadata
                                             </button>
@@ -1584,9 +1587,9 @@
                                         </div>
                                     </div>
                                 </div>
+                                <div id="drone-sync-activity-panel" class="mb-3"></div>
                                 <div id="device-systems-panel" class="device-subpanel">
                                     <div id="drone-auto-sync-panel" class="mb-3"></div>
-                                    <div id="drone-sync-activity-panel" class="mb-3"></div>
                                     <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
                                         <div style="flex:1;min-width:220px">
                                             <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
@@ -1610,6 +1613,7 @@
                                     <div id="swarm-rom-availability-panel" class="mb-3"></div>
                                     <div id="systems-list"></div>
                                 </div>
+                                <div id="device-bios-panel" class="device-subpanel" style="display:none;"></div>
                                 <div id="device-metadata-panel" class="device-subpanel" style="display:none;"></div>
                                 <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">
                                     <div id="gamelogs-list"></div>
@@ -1810,6 +1814,9 @@
             let currentDeviceSystems = {};
             let deviceRomSearchQuery = '';
             let masterRomPage = 1;
+            let biosSearchQuery = '';
+            let biosStatusFilter = '';
+            let masterBiosPage = 1;
             let systemPageState = {};
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
@@ -4016,6 +4023,125 @@
                 await loadSyncActivityPanel();
             }
 
+            function setMasterBiosPage(page) {
+                masterBiosPage = Math.max(1, page);
+                loadDeviceBiosPanel();
+            }
+
+            function handleBiosSearch(event) {
+                biosSearchQuery = event.target.value || '';
+                masterBiosPage = 1;
+                loadDeviceBiosPanel();
+            }
+
+            function handleBiosStatusFilter(event) {
+                biosStatusFilter = event.target.value || '';
+                masterBiosPage = 1;
+                loadDeviceBiosPanel();
+            }
+
+            async function loadDeviceBiosPanel() {
+                const container = document.getElementById('device-bios-panel');
+                if (!container || !selectedDeviceId) return;
+                try {
+                    const params = new URLSearchParams();
+                    if ((biosSearchQuery || '').trim()) params.set('q', biosSearchQuery.trim());
+                    if (biosStatusFilter) params.set('status', biosStatusFilter);
+                    params.set('page', String(masterBiosPage));
+                    params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
+                    if (!response.ok) throw new Error('Failed to load BIOS inventory');
+                    const payload = await response.json();
+                    const rows = payload.bios || [];
+                    const total = payload.total || rows.length;
+                    const page = payload.page || masterBiosPage;
+                    const perPage = payload.per_page || MASTER_ROM_PAGE_SIZE;
+                    const pageCount = Math.max(1, Math.ceil(total / perPage));
+                    masterBiosPage = page;
+                    const missingCount = rows.filter(row => !row.present_on_selected).length;
+                    const pagination = `
+                        <div class="btn-group" role="group" aria-label="BIOS pagination">
+                            <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterBiosPage(${Math.max(1, page - 1)})">Previous</button>
+                            <button class="btn btn-sm btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
+                            <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterBiosPage(${Math.min(pageCount, page + 1)})">Next</button>
+                        </div>
+                    `;
+                    container.innerHTML = `
+                        <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
+                            <div style="flex:1;min-width:220px">
+                                <label class="form-label" for="device-bios-search">Search BIOS files</label>
+                                <input id="device-bios-search" class="form-control" type="search" placeholder="Type to filter BIOS files" value="${escapeHtml(biosSearchQuery)}" oninput="handleBiosSearch(event)">
+                            </div>
+                            <div style="min-width:160px">
+                                <label class="form-label" for="device-bios-status-filter">Status</label>
+                                <select id="device-bios-status-filter" class="form-select" onchange="handleBiosStatusFilter(event)">
+                                    <option value="" ${!biosStatusFilter ? 'selected' : ''}>All</option>
+                                    <option value="missing" ${biosStatusFilter === 'missing' ? 'selected' : ''}>Missing</option>
+                                    <option value="present" ${biosStatusFilter === 'present' ? 'selected' : ''}>Present</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="card"><div class="card-body py-2">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <div class="d-flex gap-2 align-items-center">
+                                    <strong>BIOS (Master List)</strong>
+                                    <div class="small text-muted">${total} files · ${missingCount} missing here</div>
+                                </div>
+                                ${pagination}
+                            </div>
+                            <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                                <th>BIOS</th>
+                                <th>Size</th>
+                                <th>Source</th>
+                                <th>Status</th>
+                                <th></th>
+                            </tr></thead><tbody>
+                                ${rows.map(row => {
+                                    const present = !!row.present_on_selected;
+                                    const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
+                                    const sizeText = row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '';
+                                    const showSync = !present && row.devices && row.devices.length;
+                                    const rowData = Object.assign({}, row);
+                                    return `
+                                        <tr>
+                                            <td style="min-width:260px">
+                                                <div>${escapeHtml(row.file_path || row.bios_name || '')}</div>
+                                                ${row.bios_md5 ? `<div class="small fst-italic text-muted mono">md5: ${escapeHtml(row.bios_md5)}</div>` : ''}
+                                            </td>
+                                            <td class="text-muted">${escapeHtml(sizeText)}</td>
+                                            <td class="text-muted">${escapeHtml(sources)}</td>
+                                            <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${present ? 'Present' : (row.devices && row.devices.length ? 'Missing' : 'Unavailable')}</span></td>
+                                            <td>${showSync ? `<button class="btn btn-primary btn-sm" onclick='syncBios(${JSON.stringify(rowData).replace(/'/g, "'")})'>Sync</button>` : ''}</td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody></table></div>
+                            ${total ? '' : '<div class="small text-muted">No BIOS files found for this filter.</div>'}
+                        </div></div>
+                    `;
+                } catch (error) {
+                    console.error('Error loading BIOS inventory:', error);
+                    container.innerHTML = '<div class="empty-state">Unable to load BIOS files.</div>';
+                }
+            }
+
+            async function syncBios(row) {
+                try {
+                    const response = await fetch(`/api/devices/${selectedDeviceId}/sync-bios`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
+                        body: JSON.stringify(row)
+                    });
+                    if (!response.ok) throw new Error('Failed to queue BIOS sync');
+                    showMessage('BIOS sync queued. The Drone will choose the source peer automatically.', 'success');
+                    await loadSyncActivityPanel();
+                    await loadDeviceBiosPanel();
+                } catch (error) {
+                    console.error('Error queuing BIOS sync:', error);
+                    showMessage('Failed to queue BIOS sync.', 'error');
+                }
+            }
+
             async function loadSyncActivityPanel() {
                 const container = document.getElementById('drone-sync-activity-panel');
                 if (!container || !selectedDeviceId) return;
@@ -4023,23 +4149,23 @@
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/sync-activity`);
                     if (!response.ok) throw new Error('Failed to load sync activity');
                     const rows = ((await response.json()).activity || []).slice(0, 20);
-                    container.innerHTML = `<div class="card"><div class="card-body py-2"><strong>ROM Sync Activity</strong>
+                    container.innerHTML = `<div class="card"><div class="card-body py-2"><strong>Sync Activity</strong>
                         ${rows.length ? rows.map(row => {
                             const duration = formatDuration(row);
                             const durationText = duration ? (row.status === 'failed' ? `Failed after ${duration}` : row.status === 'completed' ? `Completed in ${duration}` : duration) : '';
                             const refreshText = row.inventory_refresh_status ? `Inventory ${row.inventory_refresh_status}${row.inventory_refresh_duration_ms !== undefined && row.inventory_refresh_duration_ms !== null ? ` in ${row.inventory_refresh_duration_ms}ms` : ''}` : '';
                             return `<div class="mt-2 small">
                             <span class="badge ${row.status === 'completed' ? 'text-bg-success' : row.status === 'failed' ? 'text-bg-danger' : 'text-bg-secondary'}">${escapeHtml(row.status || 'pending')}</span>
-                            ${escapeHtml(row.system || '')} / ${escapeHtml(row.rom_name || '')}
+                            ${escapeHtml(row.asset_type === 'bios' ? 'bios' : (row.system || ''))} / ${escapeHtml(row.bios_name || row.rom_name || row.relative_path || '')}
                             ${row.source_drone_id ? `from ${escapeHtml(row.source_drone_id)}` : ''}
                             ${durationText ? `<span class="text-muted ms-1">${escapeHtml(durationText)}</span>` : ''}
                             ${refreshText ? `<div class="text-muted">${escapeHtml(refreshText)}</div>` : ''}
                             ${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}
                         </div>`;
-                        }).join('') : '<div class="small text-muted mt-1">No ROM sync activity yet.</div>'}
+                        }).join('') : '<div class="small text-muted mt-1">No sync activity yet.</div>'}
                     </div></div>`;
                 } catch (error) {
-                    container.innerHTML = '<div class="empty-state">Unable to load ROM sync activity.</div>';
+                    container.innerHTML = '<div class="empty-state">Unable to load sync activity.</div>';
                 }
             }
 
@@ -4086,23 +4212,29 @@
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['gamelogs', 'configs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
+                currentDeviceView = ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
                 if (activeBtn) activeBtn.classList.add('active');
 
                 const systemsPanel = document.getElementById('device-systems-panel');
+                const syncActivityPanel = document.getElementById('drone-sync-activity-panel');
+                const biosPanel = document.getElementById('device-bios-panel');
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
                 const configsPanel = document.getElementById('device-configs-panel');
                 const actionsPanel = document.getElementById('device-actions-panel');
                 const metadataPanel = document.getElementById('device-metadata-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
+                if (syncActivityPanel) syncActivityPanel.style.display = (currentDeviceView === 'systems' || currentDeviceView === 'bios') ? 'block' : 'none';
+                if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
                 if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
                 if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
                 if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
 
                 if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
+                if (currentDeviceView === 'systems' || currentDeviceView === 'bios') loadSyncActivityPanel();
+                if (currentDeviceView === 'bios') loadDeviceBiosPanel();
                 if (currentDeviceView === 'gamelogs') loadGameLogs({queue: true});
                 if (currentDeviceView === 'configs') loadDeviceConfigs({queue: true});
                 if (currentDeviceView === 'metadata') {
@@ -4132,7 +4264,7 @@
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
                 const allowed = ['devices', 'hive', 'profile', 'help'];
-                if ((parts[0] === 'systems' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
+                if ((parts[0] === 'systems' || parts[0] === 'bios' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
@@ -4142,16 +4274,16 @@
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[4]) ? parts[4] : 'drones' };
                     }
                     if (parts[3] === 'device') {
-                        return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[5]) ? parts[5] : 'systems', swarmView: 'drones' };
+                        return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[5]) ? parts[5] : 'systems', swarmView: 'drones' };
                     }
                     const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
                     return { tab, deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[2]) ? parts[2] : 'drones' };
                 }
                 if (tab === 'devices' && parts[1] === 'device') {
-                    return { tab, deviceId: parts[2] ? decodeURIComponent(parts[2]) : null, deviceView: ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[3]) ? parts[3] : 'systems', swarmView: 'drones' };
+                    return { tab, deviceId: parts[2] ? decodeURIComponent(parts[2]) : null, deviceView: ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[3]) ? parts[3] : 'systems', swarmView: 'drones' };
                 }
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
-                const deviceView = tab === 'devices' && ['gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
+                const deviceView = tab === 'devices' && ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
                 return { tab, deviceId, deviceView, swarmView: 'drones' };
             }
 

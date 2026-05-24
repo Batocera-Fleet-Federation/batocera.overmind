@@ -38,6 +38,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "collect_log_sources",
     "sync_rom",
     "sync_system",
+    "sync_bios",
     "cancel_download",
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
@@ -306,6 +307,12 @@ def require_swarm_role(user: dict, swarm_id: str, roles: set[str]) -> dict:
     if not member:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient swarm permission")
     return member
+
+
+def require_device_admin(user: dict, device: dict) -> dict:
+    if db.user_has_device_admin_claim(user["id"], device.get("device_id")):
+        return {"user_id": user["id"], "role": "overlord", "source": "device_ownership_claim"}
+    return require_swarm_role(user, device["swarm_id"], {"overlord"})
 
 
 def public_swarm_name(swarm: dict) -> str:
@@ -860,11 +867,6 @@ async def claim_drone_ownership(payload: dict):
         print(f"Drone ownership claim failed: device_id={device_id} reason=invalid_credentials")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
-    existing = db.get_device_by_device_id(device_id)
-    if existing and existing.get("user_id") != user["id"]:
-        print(f"Drone ownership claim failed: device_id={device_id} reason=already_owned")
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Drone is already owned")
-
     batocera_info = payload.get("batocera_info") if isinstance(payload.get("batocera_info"), dict) else {}
     if not batocera_info:
         batocera_info = {
@@ -877,18 +879,16 @@ async def claim_drone_ownership(payload: dict):
             "certificate": payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
         }
 
+    existing = db.get_device_by_device_id(device_id)
     if existing:
         existing["device_name"] = device_name or existing.get("device_name") or device_id
         existing["approval_status"] = "approved"
-        existing["swarm_id"] = db.default_swarm_id(user["id"]) or db.ensure_personal_swarm(user["id"])["id"]
-        rotated = db.rotate_device_token(user["id"], device_id)
-        drone_token = rotated["token"] if rotated else generate_drone_token()
     else:
-        drone_token = generate_drone_token()
-        db.create_device(user["id"], device_id, device_name, batocera_info, raw_token=drone_token)
+        db.create_device(user["id"], device_id, device_name, batocera_info, raw_token=generate_drone_token())
+    db.add_device_admin_claim(user["id"], device_id)
     db.pending_drone_connections.pop(device_id, None)
     print(f"Drone ownership claim succeeded: device_id={device_id} user_id={user['id']}")
-    return {"status": "approved", "device_id": device_id, "drone_token": drone_token}
+    return {"status": "claimed", "device_id": device_id, "drone_token": None}
 
 
 @app.get("/api/integration-tokens")
@@ -954,7 +954,7 @@ async def deny_drone_connection(device_id: str, authorization: Optional[str] = H
 async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List all devices for the authenticated user."""
     user = get_current_user(authorization)
-    sid = selected_swarm_id(user, swarm_id)
+    sid = selected_swarm_id(user, swarm_id) if swarm_id else None
     devices = db.get_user_devices(user["id"], sid)
     
     return {
@@ -1029,7 +1029,7 @@ async def rotate_device_token(device_id: str, authorization: Optional[str] = Hea
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    require_device_admin(user, device)
     rotated = db.rotate_device_token(device["user_id"], device_id)
     if not rotated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
@@ -1047,7 +1047,7 @@ async def update_device_auto_sync(
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    require_device_admin(user, device)
     systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
     policy = db.update_device_auto_sync_policy(device["user_id"], device_id, bool(payload.get("enabled")), systems)
     if policy is None:
@@ -1062,8 +1062,8 @@ async def delete_device(device_id: str, authorization: Optional[str] = Header(de
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
-    if not db.delete_device(user["id"], device_id):
+    require_device_admin(user, device)
+    if not db.delete_device(device["user_id"], device_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"message": "Device deleted successfully", "device_id": device_id}
 
@@ -1101,7 +1101,7 @@ async def cancel_device_download(device_id: str, job_id: str, authorization: Opt
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    require_device_admin(user, device)
     action = db.create_device_action(device["user_id"], device_id, "cancel_download", {"job_id": job_id})
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
@@ -1133,7 +1133,7 @@ async def create_device_action(
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    require_device_admin(user, device)
     action_type = str(payload.get("action") or "").strip().lower()
     if action_type == "reboot":
         action_type = "restart"
@@ -1191,9 +1191,10 @@ async def upload_drone_rom_metadata(device_id: str, payload: dict, authorization
         print(f"ROM metadata upload rejected for {device_id}: payload_device_id={payload_device_id}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload device_id mismatch")
     roms = payload.get("roms") if isinstance(payload.get("roms"), list) else []
+    bios = payload.get("bios") if isinstance(payload.get("bios"), list) else []
     db.store_rom_metadata(device_id, payload)
-    print(f"ROM metadata upload accepted for {device_id}: rom_count={len(roms)}")
-    return {"status": "accepted", "device_id": device_id, "rom_count": len(roms)}
+    print(f"ROM metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)}")
+    return {"status": "accepted", "device_id": device_id, "rom_count": len(roms), "bios_count": len(bios)}
 
 
 @app.post("/api/drones/rom-metadata")
@@ -1367,7 +1368,7 @@ async def update_device_roms(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    require_device_admin(user, device)
     
     rom_ids = db.add_roms(device_id, rom_data.system_name, rom_data.roms)
     
@@ -1501,13 +1502,90 @@ async def get_swarm_master_roms(
     return {"roms": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
 
 
+@app.get("/api/devices/{device_id}/bios")
+async def get_device_bios(device_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"bios": db.get_device_bios(device_id)}
+
+
+@app.get("/api/devices/{device_id}/master-bios")
+async def get_device_master_bios(
+    device_id: str,
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 100,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    rows = db.get_master_bios_for_device(device["user_id"], device_id)
+    if rows is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    filtered = rows
+    if q:
+        q_low = q.strip().lower()
+        filtered = [
+            row for row in filtered
+            if q_low in " ".join(str(value or "") for value in [
+                row.get("bios_name"),
+                row.get("file_path"),
+                row.get("bios_md5"),
+                " ".join((d.get("device_name") or d.get("device_id") or "") for d in (row.get("devices") or [])),
+            ]).lower()
+        ]
+    if status:
+        stat = status.strip().lower()
+        if stat == "missing":
+            filtered = [row for row in filtered if not row.get("present_on_selected")]
+        elif stat == "present":
+            filtered = [row for row in filtered if row.get("present_on_selected")]
+    page = max(1, page)
+    per_page = max(1, min(per_page, 500))
+    total = len(filtered)
+    start = (page - 1) * per_page
+    return {"bios": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
+
+
+@app.get("/api/master-bios")
+async def get_swarm_master_bios(
+    q: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 100,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = get_current_user(authorization)
+    rows = db.get_swarm_master_bios(user["id"])
+    filtered = rows
+    if q:
+        q_low = q.strip().lower()
+        filtered = [
+            row for row in filtered
+            if q_low in " ".join(str(value or "") for value in [
+                row.get("bios_name"), row.get("file_path"), row.get("bios_md5"),
+                " ".join(row.get("filenames") or []),
+                " ".join((d.get("device_name") or d.get("device_id") or "") for d in (row.get("devices") or [])),
+            ]).lower()
+        ]
+    page = max(1, page)
+    per_page = max(1, min(per_page, 500))
+    total = len(filtered)
+    start = (page - 1) * per_page
+    return {"bios": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
+
+
 @app.post("/api/devices/{device_id}/sync-rom")
 async def sync_device_rom(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    require_device_admin(user, device)
     system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
     rom_path = str(payload.get("file_path") or payload.get("rom_name") or "").strip()
     if not system_name or not rom_path:
@@ -1551,13 +1629,61 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
     return {"action": action}
 
 
+@app.post("/api/devices/{device_id}/sync-bios")
+async def sync_device_bios(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_device_admin(user, device)
+    bios_path = str(payload.get("file_path") or payload.get("relative_path") or payload.get("bios_name") or payload.get("name") or "").strip()
+    if not bios_path:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="BIOS path is required")
+    source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
+    if not source_devices:
+        requested_md5 = str(payload.get("bios_md5") or payload.get("md5") or "").strip().lower()
+        requested_path = bios_path.replace("\\", "/").strip().lstrip("./").lower()
+        for row in db.get_master_bios_for_device(device["user_id"], device_id) or []:
+            row_path = str(row.get("file_path") or row.get("bios_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+            row_md5 = str(row.get("bios_md5") or row.get("md5") or "").strip().lower()
+            if requested_md5 and row_md5 == requested_md5:
+                source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                break
+            if not requested_md5 and row_path == requested_path:
+                source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                break
+    action = db.create_device_action(device["user_id"], device_id, "sync_bios", {
+        "bios_name": payload.get("bios_name") or bios_path,
+        "file_path": bios_path,
+        "relative_path": bios_path,
+        "bios_md5": payload.get("bios_md5") or payload.get("md5"),
+        "file_size": payload.get("file_size"),
+        "devices": source_devices,
+    })
+    if not action:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    db.add_rom_sync_activity(device_id, {
+        "sync_id": action["id"],
+        "asset_type": "bios",
+        "target_drone_id": device_id,
+        "system": "bios",
+        "bios_name": bios_path,
+        "relative_path": bios_path,
+        "action": "download",
+        "status": "pending",
+        "file_size": payload.get("file_size"),
+        "bios_md5": payload.get("bios_md5") or payload.get("md5"),
+    })
+    return {"action": action}
+
+
 @app.post("/api/devices/{device_id}/sync-system")
 async def sync_device_system(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    require_device_admin(user, device)
     system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
     if not system_name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name is required")
@@ -1602,7 +1728,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
         device = db.user_can_access_device(user["id"], device_id)
         if not device:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Device not found: {device_id}")
-        require_swarm_role(user, device["swarm_id"], {"overlord"})
+        require_device_admin(user, device)
         devices[device_id] = device
 
     system_set = {system.lower() for system in systems}
@@ -1749,7 +1875,7 @@ async def log_gameplay(
             detail="Device not found"
         )
     
-    require_swarm_role(user, device["swarm_id"], {"overlord"})
+    require_device_admin(user, device)
     gamelog_id = db.log_gameplay(
         device_id,
         gameplay_data.system_name,

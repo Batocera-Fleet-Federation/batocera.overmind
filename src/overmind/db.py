@@ -16,8 +16,10 @@ class FakeDatabase:
         "users",
         "user_by_email",
         "devices",
+        "device_admin_claims",
         "user_devices",
         "roms",
+        "bios",
         "gamelogs",
         "device_actions",
         "speed_samples",
@@ -48,6 +50,7 @@ class FakeDatabase:
         "accept_pending_drone_connection",
         "deny_pending_drone_connection",
         "create_device",
+        "add_device_admin_claim",
         "update_device_last_seen",
         "verify_device_token",
         "rotate_device_token",
@@ -65,6 +68,7 @@ class FakeDatabase:
         "add_device_event",
         "add_peer_checks",
         "add_roms",
+        "add_bios",
         "add_rom_sync_activity",
         "store_download_state",
         "log_gameplay",
@@ -97,8 +101,10 @@ class FakeDatabase:
         self.users: Dict[str, dict] = {}
         self.user_by_email: Dict[str, str] = {}  # email -> user_id
         self.devices: Dict[str, dict] = {}
+        self.device_admin_claims: Dict[str, list] = {}  # internal device_id -> user_ids with direct admin claim
         self.user_devices: Dict[str, List[str]] = {}  # user_id -> list of device_ids
         self.roms: Dict[str, list] = {}  # device_id -> list of roms
+        self.bios: Dict[str, list] = {}  # device_id -> list of bios files
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
         self.device_actions: Dict[str, list] = {}  # internal device_id -> queued actions
         self.speed_samples: Dict[str, list] = {}  # internal device_id -> speed samples
@@ -679,6 +685,7 @@ class FakeDatabase:
         }
         self.user_devices[user_id].append(internal_id)
         self.roms[internal_id] = []
+        self.bios[internal_id] = []
         self.gamelogs[internal_id] = []
         self.device_actions[internal_id] = []
         self.speed_samples[internal_id] = []
@@ -686,6 +693,22 @@ class FakeDatabase:
         self.peer_checks[internal_id] = []
         self.rom_sync_activity[internal_id] = []
         return internal_id
+
+    def add_device_admin_claim(self, user_id: str, device_id: str) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        bucket = self.device_admin_claims.setdefault(device["id"], [])
+        if user_id not in bucket:
+            bucket.append(user_id)
+        device["admin_claimed_at"] = datetime.utcnow()
+        return {"device_id": device_id, "user_id": user_id, "role": "overlord"}
+
+    def user_has_device_admin_claim(self, user_id: str, device_id: str) -> bool:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return False
+        return user_id in set(self.device_admin_claims.get(device["id"], []))
 
     def _clean_device_certificate(self, certificate: Optional[dict]) -> Optional[dict]:
         if not isinstance(certificate, dict):
@@ -713,7 +736,12 @@ class FakeDatabase:
         visible_swarm_ids = {swarm_id} if swarm_id else {row["id"] for row in self.get_user_swarms(user_id)}
         return [
             device for device in self.devices.values()
-            if device.get("swarm_id") in visible_swarm_ids and device.get("approval_status", "approved") == "approved"
+            if device.get("approval_status", "approved") == "approved"
+            and (
+                device.get("swarm_id") in visible_swarm_ids
+                or (not swarm_id and user_id in set(self.device_admin_claims.get(device["id"], [])))
+                or (swarm_id and device.get("swarm_id") == swarm_id and user_id in set(self.device_admin_claims.get(device["id"], [])))
+            )
         ]
 
     def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
@@ -722,7 +750,7 @@ class FakeDatabase:
             return None
         if swarm_id and device.get("swarm_id") != swarm_id:
             return None
-        if not self.get_swarm_member(device.get("swarm_id"), user_id):
+        if not self.get_swarm_member(device.get("swarm_id"), user_id) and not self.user_has_device_admin_claim(user_id, device_id):
             return None
         return device
     
@@ -1028,6 +1056,8 @@ class FakeDatabase:
             })
         for system_name in reported_systems:
             self.add_roms(device_id, system_name, grouped.get(system_name, []))
+        if isinstance(metadata.get("bios"), list):
+            self.add_bios(device_id, metadata.get("bios") or [])
 
     def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)
@@ -1178,6 +1208,120 @@ class FakeDatabase:
         path = str(rom.get("file_path") or rom.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
         return (system, path)
 
+    def add_bios(self, device_id: str, bios_entries: list) -> List[str]:
+        """Replace BIOS metadata for a device. Returns list of BIOS row IDs."""
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        internal_id = internal_device["id"]
+        row_ids = []
+        self.bios[internal_id] = []
+        for item in bios_entries:
+            if not isinstance(item, dict):
+                continue
+            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("path") or item.get("name") or "").strip()
+            if not file_path:
+                continue
+            row_id = str(uuid.uuid4())
+            entry = {
+                "id": row_id,
+                "device_id": device_id,
+                "bios_name": item.get("bios_name") or item.get("name") or file_path,
+                "file_path": file_path,
+                "relative_path": file_path,
+                "bios_md5": item.get("bios_md5") or item.get("md5") or item.get("hash"),
+                "md5": item.get("bios_md5") or item.get("md5") or item.get("hash"),
+                "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
+                "byte_count": item.get("byte_count") or item.get("file_size") or item.get("size"),
+                "unique_id": item.get("unique_id"),
+                "modified_time": item.get("modified_time") or item.get("mtime"),
+                "added_at": datetime.utcnow(),
+                "last_seen": datetime.utcnow(),
+            }
+            self.bios[internal_id].append(entry)
+            row_ids.append(row_id)
+        return row_ids
+
+    def _bios_key(self, bios: dict) -> tuple:
+        md5 = str(bios.get("bios_md5") or bios.get("md5") or "").strip().lower()
+        if md5:
+            return ("md5", md5)
+        path = str(bios.get("file_path") or bios.get("relative_path") or bios.get("bios_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+        return ("path", path)
+
+    def get_device_bios(self, device_id: str) -> List[dict]:
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        return self.bios.get(internal_device["id"], [])
+
+    def get_master_bios_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
+        selected = self.get_device_by_device_id(selected_device_id)
+        if not selected or selected["user_id"] != user_id:
+            return None
+        devices = {device["device_id"]: device for device in self.get_user_devices(user_id)}
+        selected_keys = {self._bios_key(row) for row in self.bios.get(selected["id"], [])}
+        master: Dict[tuple, dict] = {}
+        for device in devices.values():
+            for bios in self.bios.get(device["id"], []):
+                key = self._bios_key(bios)
+                if not key[1]:
+                    continue
+                row = master.setdefault(key, {
+                    "bios_name": bios.get("bios_name") or bios.get("file_path"),
+                    "file_path": bios.get("file_path") or bios.get("bios_name"),
+                    "relative_path": bios.get("relative_path") or bios.get("file_path"),
+                    "bios_md5": bios.get("bios_md5") or bios.get("md5"),
+                    "md5": bios.get("bios_md5") or bios.get("md5"),
+                    "file_size": bios.get("file_size") or bios.get("byte_count"),
+                    "last_seen": bios.get("last_seen") or bios.get("added_at"),
+                    "devices": [],
+                    "present_on_selected": key in selected_keys,
+                })
+                info = device.get("system_info") or {}
+                row["devices"].append({
+                    "device_id": device["device_id"],
+                    "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
+                })
+                if not row.get("bios_md5") and (bios.get("bios_md5") or bios.get("md5")):
+                    row["bios_md5"] = bios.get("bios_md5") or bios.get("md5")
+                    row["md5"] = row["bios_md5"]
+                if not row.get("file_size") and (bios.get("file_size") or bios.get("byte_count")):
+                    row["file_size"] = bios.get("file_size") or bios.get("byte_count")
+        rows = list(master.values())
+        rows.sort(key=lambda row: str(row.get("file_path") or "").lower())
+        return rows
+
+    def get_swarm_master_bios(self, user_id: str) -> List[dict]:
+        master: Dict[tuple, dict] = {}
+        for device in self.get_user_devices(user_id):
+            for bios in self.bios.get(device["id"], []):
+                key = self._bios_key(bios)
+                if not key[1]:
+                    continue
+                row = master.setdefault(key, {
+                    "bios_name": bios.get("bios_name") or bios.get("file_path"),
+                    "file_path": bios.get("file_path") or bios.get("bios_name"),
+                    "relative_path": bios.get("relative_path") or bios.get("file_path"),
+                    "filenames": [],
+                    "bios_md5": bios.get("bios_md5") or bios.get("md5"),
+                    "md5": bios.get("bios_md5") or bios.get("md5"),
+                    "file_size": bios.get("file_size") or bios.get("byte_count"),
+                    "last_seen": bios.get("last_seen") or bios.get("added_at"),
+                    "devices": [],
+                })
+                filename = bios.get("file_path") or bios.get("bios_name")
+                if filename and filename not in row["filenames"]:
+                    row["filenames"].append(filename)
+                info = device.get("system_info") or {}
+                row["devices"].append({
+                    "device_id": device["device_id"],
+                    "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
+                })
+        rows = list(master.values())
+        rows.sort(key=lambda row: str(row.get("file_path") or "").lower())
+        return rows
+
     def get_master_roms_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)
         if not selected or selected["user_id"] != user_id:
@@ -1253,17 +1397,21 @@ class FakeDatabase:
             return None
         entry = {
             "id": payload.get("sync_id") or str(uuid.uuid4()),
+            "asset_type": payload.get("asset_type") or ("bios" if payload.get("bios_name") or payload.get("bios_md5") else "rom"),
+            "file_type": payload.get("file_type"),
             "source_drone_id": payload.get("source_drone_id"),
             "target_drone_id": payload.get("target_drone_id") or device_id,
             "system": payload.get("system"),
-            "rom_name": payload.get("rom_name") or payload.get("rom_path"),
-            "relative_path": payload.get("relative_path") or payload.get("rom_path"),
+            "rom_name": payload.get("rom_name") or payload.get("rom_path") or payload.get("bios_name"),
+            "bios_name": payload.get("bios_name"),
+            "relative_path": payload.get("relative_path") or payload.get("rom_path") or payload.get("bios_name"),
             "action": payload.get("action") or "download",
             "status": payload.get("status") or "pending",
             "selected_peer_reason": payload.get("selected_peer_reason"),
             "bytes_transferred": payload.get("bytes_transferred"),
             "file_size": payload.get("file_size"),
             "rom_md5": payload.get("rom_md5") or payload.get("md5"),
+            "bios_md5": payload.get("bios_md5") or (payload.get("md5") if payload.get("asset_type") == "bios" else None),
             "download_started_at": payload.get("download_started_at") or payload.get("started_at"),
             "download_completed_at": payload.get("download_completed_at") or payload.get("completed_at"),
             "started_at": payload.get("started_at") or payload.get("download_started_at") or datetime.utcnow(),
@@ -1359,7 +1507,7 @@ class FakeDatabase:
             def haystack(row: dict) -> str:
                 return " ".join(str(row.get(field) or "") for field in (
                     "source_drone_id", "target_drone_id", "system", "rom_name", "relative_path",
-                    "rom_md5", "status", "failure_reason", "duration_ms", "duration_seconds",
+                    "rom_md5", "bios_md5", "asset_type", "status", "failure_reason", "duration_ms", "duration_seconds",
                     "started_at", "completed_at", "download_started_at", "download_completed_at",
                 )).lower()
             rows = [row for row in rows if q in haystack(row)]
