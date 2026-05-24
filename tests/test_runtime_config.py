@@ -127,10 +127,10 @@ def test_secret_refresh_failure_keeps_last_known_good(monkeypatch):
 
 
 def test_overmind_ui_contains_inactivity_timeout_hooks():
-    html = (Path(__file__).resolve().parents[1] / "src" / "overmind" / "templates" / "index.html").read_text(encoding="utf-8")
+    js = (Path(__file__).resolve().parents[1] / "src" / "overmind" / "static" / "js" / "overmind.js").read_text(encoding="utf-8")
 
-    assert "const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000" in html
-    assert "function markUserActivity()" in html
-    assert "resetInactivityTimer()" in html
-    assert "/api/auth/refresh" in html
-    assert "You were logged out after 5 minutes of inactivity." in html
+    assert "const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000" in js
+    assert "function markUserActivity()" in js
+    assert "resetInactivityTimer()" in js
+    assert "/api/auth/refresh" in js
+    assert "You were logged out after 5 minutes of inactivity." in js

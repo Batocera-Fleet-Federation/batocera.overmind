@@ -47,6 +47,7 @@ TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONTENT_DIR = Path(__file__).resolve().parent.parent.parent / "content"
 OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
@@ -175,6 +176,8 @@ app.add_middleware(
 # Mount the content directory for static assets like main.jpeg
 if CONTENT_DIR.exists():
     app.mount("/content", StaticFiles(directory=str(CONTENT_DIR)), name="content")
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 OAUTH_PROVIDERS = {
     "google": {

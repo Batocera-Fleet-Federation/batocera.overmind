@@ -1511,36 +1511,38 @@ def test_shutdown_action_is_rejected_by_api(client):
 
 def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     assert "queueDeviceAction('shutdown')" not in html
     assert ">Shutdown<" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_log_sources')\"" not in html
-    assert "loadGameLogs({queue: true})" in html
-    assert "loadDeviceConfigs({queue: true})" in html
+    assert "loadGameLogs({queue: true})" in js
+    assert "loadDeviceConfigs({queue: true})" in js
 
 
 def test_invite_registration_ui_clears_pending_token_before_login():
-    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
-    assert "pendingInvitationToken = null;" in html
-    assert "sessionStorage.removeItem('pending_invitation_token');" in html
-    assert "Registration complete. Sign in to view the swarm." in html
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    assert "pendingInvitationToken = null;" in js
+    assert "sessionStorage.removeItem('pending_invitation_token');" in js
+    assert "Registration complete. Sign in to view the swarm." in js
 
 
 def test_shared_swarm_navigation_state_is_reflected_in_ui_routes():
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
-    assert "document.addEventListener('DOMContentLoaded', async () =>" in html
-    assert "routeSwarmId = parseRoute().swarmId || null;" in html
-    assert "await loadSwarms();" in html
-    assert "goToMySwarm()" in html
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    assert "document.addEventListener('DOMContentLoaded', async () =>" in js
+    assert "routeSwarmId = parseRoute().swarmId || null;" in js
+    assert "await loadSwarms();" in js
+    assert "goToMySwarm()" in js
     assert "shared-swarm-nav-btn" in html
     assert "openSelectedSharedSwarm()" in html
-    assert "`#/devices${swarmPath}/swarm/${swarmView}`" in html
-    assert "`#/devices${swarmPath}/device/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`" in html
-    assert "parts[3] === 'swarm'" in html
-    assert "parts[3] === 'device'" in html
-    assert "row.can_view && !row.current" in html
-    assert "Use My Swarm to view your own swarm." in html
+    assert "`#/devices${swarmPath}/swarm/${swarmView}`" in js
+    assert "`#/devices${swarmPath}/device/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`" in js
+    assert "parts[3] === 'swarm'" in js
+    assert "parts[3] === 'device'" in js
+    assert "row.can_view && !row.current" in js
+    assert "Use My Swarm to view your own swarm." in js
 
 
 def test_drone_alive_claims_data_action_and_stores_result(client):
