@@ -20,6 +20,7 @@ class FakeDatabase:
         "user_devices",
         "roms",
         "bios",
+        "artwork",
         "gamelogs",
         "device_actions",
         "speed_samples",
@@ -69,6 +70,7 @@ class FakeDatabase:
         "add_peer_checks",
         "add_roms",
         "add_bios",
+        "add_artwork",
         "add_rom_sync_activity",
         "store_download_state",
         "log_gameplay",
@@ -105,6 +107,7 @@ class FakeDatabase:
         self.user_devices: Dict[str, List[str]] = {}  # user_id -> list of device_ids
         self.roms: Dict[str, list] = {}  # device_id -> list of roms
         self.bios: Dict[str, list] = {}  # device_id -> list of bios files
+        self.artwork: Dict[str, list] = {}  # device_id -> gamelist artwork availability rows
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
         self.device_actions: Dict[str, list] = {}  # internal device_id -> queued actions
         self.speed_samples: Dict[str, list] = {}  # internal device_id -> speed samples
@@ -686,6 +689,7 @@ class FakeDatabase:
         self.user_devices[user_id].append(internal_id)
         self.roms[internal_id] = []
         self.bios[internal_id] = []
+        self.artwork[internal_id] = []
         self.gamelogs[internal_id] = []
         self.device_actions[internal_id] = []
         self.speed_samples[internal_id] = []
@@ -1006,7 +1010,7 @@ class FakeDatabase:
     def store_action_result(self, device: dict, result: dict) -> None:
         """Persist returned action data on the device record for UI use."""
         result_type = result.get("type")
-        if result_type == "rom_metadata":
+        if result_type in {"rom_metadata", "asset_metadata"}:
             self.store_rom_metadata(device.get("device_id"), result)
         if result_type == "emulator_configs":
             device["emulator_configs"] = result
@@ -1014,7 +1018,7 @@ class FakeDatabase:
             device["log_sources"] = result
         if result_type == "game_logs":
             device["game_logs"] = result
-        if result_type == "rom_sync":
+        if result_type in {"rom_sync", "bios_sync", "artwork_sync"}:
             for activity in result.get("activity") if isinstance(result.get("activity"), list) else []:
                 if isinstance(activity, dict):
                     self.add_rom_sync_activity(device.get("device_id"), activity)
@@ -1058,6 +1062,8 @@ class FakeDatabase:
             self.add_roms(device_id, system_name, grouped.get(system_name, []))
         if isinstance(metadata.get("bios"), list):
             self.add_bios(device_id, metadata.get("bios") or [])
+        if isinstance(metadata.get("artwork"), list):
+            self.add_artwork(device_id, metadata.get("artwork") or [])
 
     def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)
@@ -1322,6 +1328,87 @@ class FakeDatabase:
         rows.sort(key=lambda row: str(row.get("file_path") or "").lower())
         return rows
 
+    def add_artwork(self, device_id: str, artwork_entries: list) -> List[str]:
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        internal_id = internal_device["id"]
+        row_ids = []
+        self.artwork[internal_id] = []
+        for item in artwork_entries:
+            if not isinstance(item, dict):
+                continue
+            system = str(item.get("system") or item.get("system_name") or "").strip()
+            rom_path = str(item.get("rom_path") or item.get("file_path") or item.get("rom_name") or "").strip()
+            types = item.get("artwork_types") if isinstance(item.get("artwork_types"), list) else []
+            types = sorted({str(value).strip() for value in types if str(value).strip()})
+            if not system or not rom_path or not types:
+                continue
+            row_id = str(uuid.uuid4())
+            row = {
+                "id": row_id,
+                "device_id": device_id,
+                "asset_type": "artwork",
+                "system_name": system,
+                "system": system,
+                "rom_name": item.get("rom_name") or rom_path,
+                "rom_path": rom_path,
+                "file_path": rom_path,
+                "title": item.get("title") or item.get("rom_name") or rom_path,
+                "artwork_types": types,
+                "metadata_source": item.get("metadata_source") or "gamelist.xml",
+                "added_at": datetime.utcnow(),
+                "last_seen": datetime.utcnow(),
+            }
+            self.artwork[internal_id].append(row)
+            row_ids.append(row_id)
+        return row_ids
+
+    def _artwork_key(self, row: dict, artwork_type: str) -> tuple:
+        return (
+            str(row.get("system_name") or row.get("system") or "").strip().lower(),
+            str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
+            str(artwork_type or "").strip().lower(),
+        )
+
+    def get_master_artwork_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
+        selected = self.get_device_by_device_id(selected_device_id)
+        if not selected or selected["user_id"] != user_id:
+            return None
+        devices = {device["device_id"]: device for device in self.get_user_devices(user_id)}
+        selected_keys = {
+            self._artwork_key(row, artwork_type)
+            for row in self.artwork.get(selected["id"], [])
+            for artwork_type in row.get("artwork_types", [])
+        }
+        master: Dict[tuple, dict] = {}
+        for device in devices.values():
+            for item in self.artwork.get(device["id"], []):
+                for artwork_type in item.get("artwork_types", []):
+                    key = self._artwork_key(item, artwork_type)
+                    if not key[0] or not key[1] or not key[2]:
+                        continue
+                    row = master.setdefault(key, {
+                        "asset_type": "artwork",
+                        "system_name": item.get("system_name") or item.get("system"),
+                        "system": item.get("system_name") or item.get("system"),
+                        "rom_name": item.get("rom_name") or item.get("rom_path"),
+                        "rom_path": item.get("rom_path") or item.get("file_path"),
+                        "file_path": item.get("rom_path") or item.get("file_path"),
+                        "title": item.get("title"),
+                        "artwork_type": artwork_type,
+                        "devices": [],
+                        "present_on_selected": key in selected_keys,
+                    })
+                    info = device.get("system_info") or {}
+                    row["devices"].append({
+                        "device_id": device["device_id"],
+                        "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
+                    })
+        rows = list(master.values())
+        rows.sort(key=lambda row: (str(row.get("system_name") or "").lower(), str(row.get("rom_path") or "").lower(), str(row.get("artwork_type") or "").lower()))
+        return rows
+
     def get_master_roms_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)
         if not selected or selected["user_id"] != user_id:
@@ -1397,13 +1484,15 @@ class FakeDatabase:
             return None
         entry = {
             "id": payload.get("sync_id") or str(uuid.uuid4()),
-            "asset_type": payload.get("asset_type") or ("bios" if payload.get("bios_name") or payload.get("bios_md5") else "rom"),
+            "asset_type": payload.get("asset_type") or ("artwork" if payload.get("artwork_type") else ("bios" if payload.get("bios_name") or payload.get("bios_md5") else "rom")),
             "file_type": payload.get("file_type"),
             "source_drone_id": payload.get("source_drone_id"),
             "target_drone_id": payload.get("target_drone_id") or device_id,
             "system": payload.get("system"),
             "rom_name": payload.get("rom_name") or payload.get("rom_path") or payload.get("bios_name"),
+            "rom_path": payload.get("rom_path"),
             "bios_name": payload.get("bios_name"),
+            "artwork_type": payload.get("artwork_type"),
             "relative_path": payload.get("relative_path") or payload.get("rom_path") or payload.get("bios_name"),
             "action": payload.get("action") or "download",
             "status": payload.get("status") or "pending",
@@ -1507,7 +1596,7 @@ class FakeDatabase:
             def haystack(row: dict) -> str:
                 return " ".join(str(row.get(field) or "") for field in (
                     "source_drone_id", "target_drone_id", "system", "rom_name", "relative_path",
-                    "rom_md5", "bios_md5", "asset_type", "status", "failure_reason", "duration_ms", "duration_seconds",
+                    "rom_path", "artwork_type", "rom_md5", "bios_md5", "asset_type", "status", "failure_reason", "duration_ms", "duration_seconds",
                     "started_at", "completed_at", "download_started_at", "download_completed_at",
                 )).lower()
             rows = [row for row in rows if q in haystack(row)]

@@ -39,6 +39,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "sync_rom",
     "sync_system",
     "sync_bios",
+    "sync_artwork",
     "cancel_download",
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
@@ -1184,17 +1185,18 @@ async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional
 
 @app.post("/api/devices/{device_id}/rom-metadata")
 async def upload_drone_rom_metadata(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
-    """Receive full ROM metadata snapshots from a Drone outside heartbeat."""
+    """Receive full asset metadata snapshots from a Drone outside heartbeat."""
     get_current_drone(device_id, authorization)
     payload_device_id = str(payload.get("device_id") or device_id)
     if payload_device_id != device_id:
-        print(f"ROM metadata upload rejected for {device_id}: payload_device_id={payload_device_id}")
+        print(f"Asset metadata upload rejected for {device_id}: payload_device_id={payload_device_id}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload device_id mismatch")
     roms = payload.get("roms") if isinstance(payload.get("roms"), list) else []
     bios = payload.get("bios") if isinstance(payload.get("bios"), list) else []
+    artwork = payload.get("artwork") if isinstance(payload.get("artwork"), list) else []
     db.store_rom_metadata(device_id, payload)
-    print(f"ROM metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)}")
-    return {"status": "accepted", "device_id": device_id, "rom_count": len(roms), "bios_count": len(bios)}
+    print(f"Asset metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)} artwork_count={len(artwork)}")
+    return {"status": "accepted", "device_id": device_id, "rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork)}
 
 
 @app.post("/api/drones/rom-metadata")
@@ -1579,6 +1581,53 @@ async def get_swarm_master_bios(
     return {"bios": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
 
 
+@app.get("/api/devices/{device_id}/master-artwork")
+async def get_device_master_artwork(
+    device_id: str,
+    q: Optional[str] = None,
+    system: Optional[str] = None,
+    artwork_type: Optional[str] = None,
+    status: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 100,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    rows = db.get_master_artwork_for_device(device["user_id"], device_id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    filtered = rows
+    if q:
+        q_low = q.strip().lower()
+        filtered = [
+            row for row in filtered
+            if q_low in " ".join(str(value or "") for value in [
+                row.get("system_name"), row.get("rom_name"), row.get("rom_path"), row.get("title"), row.get("artwork_type"),
+                " ".join((d.get("device_name") or d.get("device_id") or "") for d in (row.get("devices") or [])),
+            ]).lower()
+        ]
+    if system:
+        s_low = system.strip().lower()
+        filtered = [row for row in filtered if str(row.get("system_name") or "").lower() == s_low]
+    if artwork_type:
+        t_low = artwork_type.strip().lower()
+        filtered = [row for row in filtered if str(row.get("artwork_type") or "").lower() == t_low]
+    if status:
+        stat = status.strip().lower()
+        if stat == "missing":
+            filtered = [row for row in filtered if not row.get("present_on_selected")]
+        elif stat == "present":
+            filtered = [row for row in filtered if row.get("present_on_selected")]
+    page = max(1, page)
+    per_page = max(1, min(per_page, 500))
+    total = len(filtered)
+    start = (page - 1) * per_page
+    return {"artwork": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
+
+
 @app.post("/api/devices/{device_id}/sync-rom")
 async def sync_device_rom(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
@@ -1673,6 +1722,56 @@ async def sync_device_bios(device_id: str, payload: dict, authorization: Optiona
         "status": "pending",
         "file_size": payload.get("file_size"),
         "bios_md5": payload.get("bios_md5") or payload.get("md5"),
+    })
+    return {"action": action}
+
+
+@app.post("/api/devices/{device_id}/sync-artwork")
+async def sync_device_artwork(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    require_device_admin(user, device)
+    system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
+    rom_path = str(payload.get("rom_path") or payload.get("file_path") or payload.get("rom_name") or "").strip()
+    artwork_type = str(payload.get("artwork_type") or "").strip()
+    if not system_name or not rom_path or not artwork_type:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name, rom_path, and artwork_type are required")
+    source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
+    if not source_devices:
+        requested_path = rom_path.replace("\\", "/").strip().lstrip("./").lower()
+        requested_type = artwork_type.strip().lower()
+        for row in db.get_master_artwork_for_device(device["user_id"], device_id) or []:
+            row_system = str(row.get("system_name") or "").strip().lower()
+            row_path = str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+            row_type = str(row.get("artwork_type") or "").strip().lower()
+            if row_system == system_name.lower() and row_path == requested_path and row_type == requested_type:
+                source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                break
+    action = db.create_device_action(device["user_id"], device_id, "sync_artwork", {
+        "asset_type": "artwork",
+        "system_name": system_name,
+        "system": system_name,
+        "rom_name": payload.get("rom_name") or rom_path,
+        "rom_path": rom_path,
+        "file_path": rom_path,
+        "artwork_type": artwork_type,
+        "devices": source_devices,
+    })
+    if not action:
+        raise HTTPException(status_code=404, detail="Device not found")
+    db.add_rom_sync_activity(device_id, {
+        "sync_id": action["id"],
+        "asset_type": "artwork",
+        "target_drone_id": device_id,
+        "system": system_name,
+        "rom_name": payload.get("rom_name") or rom_path,
+        "rom_path": rom_path,
+        "relative_path": rom_path,
+        "artwork_type": artwork_type,
+        "action": "download",
+        "status": "pending",
     })
     return {"action": action}
 
