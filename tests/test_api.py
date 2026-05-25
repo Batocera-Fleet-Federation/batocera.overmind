@@ -192,6 +192,40 @@ def test_expired_verification_code_fails(client, monkeypatch):
     assert response.status_code == 400
 
 
+def test_resend_verification_replaces_old_code(client, monkeypatch):
+    monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
+    sent = []
+    monkeypatch.setattr("overmind.main.send_verification_email", lambda user, code, token: sent.append((user["email"], code, token)))
+
+    client.post("/api/auth/register", json={"email": "resend@example.com", "password": "testpass123"})
+    user = db.get_user_by_email("resend@example.com")
+    old_code = db.email_verifications[user["id"]]["code"]
+
+    response = client.post("/api/auth/resend-verification", json={"email": "resend@example.com"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "sent"
+    new_code = db.email_verifications[user["id"]]["code"]
+    assert new_code != old_code
+    assert sent[-1][0] == "resend@example.com"
+    assert sent[-1][1] == new_code
+
+    old_verify = client.post("/api/auth/verify-email", json={"email": "resend@example.com", "code": old_code})
+    assert old_verify.status_code == 400
+
+    new_verify = client.post("/api/auth/verify-email", json={"email": "resend@example.com", "code": new_code})
+    assert new_verify.status_code == 200
+
+
+def test_resend_verification_noops_for_verified_user(client):
+    client.post("/api/auth/register", json={"email": "verified@example.com", "password": "testpass123"})
+    user = db.get_user_by_email("verified@example.com")
+    assert user["email_verified"] is True
+
+    response = client.post("/api/auth/resend-verification", json={"email": "verified@example.com"})
+    assert response.status_code == 200
+    assert user["id"] not in db.email_verifications
+
+
 def test_forgot_password_token_resets_password(client, monkeypatch):
     from datetime import datetime, timedelta
 

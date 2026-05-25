@@ -242,7 +242,10 @@
 	                                <div class="form-group"><label>Validation Code</label><input type="text" id="verify-code" inputmode="numeric" required></div>
 	                                <button class="btn btn-primary" type="submit">Verify</button>
 	                            </form>
-	                            <div class="toggle-form"><button class="btn btn-outline-secondary" type="button" onclick="showLoginForm()">Back to Login</button></div>
+	                            <div class="toggle-form d-flex flex-wrap gap-2 justify-content-center">
+	                                <button class="btn btn-outline-primary" type="button" id="resend-verification-btn" onclick="handleResendVerificationCode(event)">Resend Code</button>
+	                                <button class="btn btn-outline-secondary" type="button" onclick="showLoginForm()">Back to Login</button>
+	                            </div>
 	                        </div>
 	                        <div id="forgot-form" style="display: none;">
 	                            <h2>Forgot Password</h2>

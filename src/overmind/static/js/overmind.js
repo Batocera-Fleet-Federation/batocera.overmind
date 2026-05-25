@@ -180,15 +180,26 @@
                     landing.removeAttribute('aria-hidden');
                 }
             }
+            async function handleApiAuthFailure(response) {
+                if (response.status === 401) {
+                    logout('Session expired. Please log in again.', '#/login');
+                    throw new Error('Unauthorized');
+                }
+                if (response.status === 403) {
+                    const payload = await response.clone().json().catch(() => ({}));
+                    const detail = String(payload.detail || '').toLowerCase();
+                    if (detail.includes('email verification')) {
+                        logout('Email verification required. Please verify your account and log in again.', '#/login');
+                        throw new Error('Forbidden');
+                    }
+                }
+            }
+
 	            async function apiGet(path) {
                 const response = await fetch(path, {
                     headers: { 'Authorization': `Bearer ${authToken}` }
                 });
-                if (response.status === 401) {
-                    logout();
-                    showMessage('Session expired. Please log in again.', 'error');
-                    throw new Error('Unauthorized');
-                }
+                await handleApiAuthFailure(response);
 	                return response;
 	            }
 
@@ -207,11 +218,7 @@
                     },
                     body: JSON.stringify(payload)
                 });
-                if (response.status === 401) {
-                    logout();
-                    showMessage('Session expired. Please log in again.', 'error');
-                    throw new Error('Unauthorized');
-                }
+                await handleApiAuthFailure(response);
                 return response;
             }
 
@@ -220,11 +227,7 @@
                     method: 'DELETE',
                     headers: { 'Authorization': `Bearer ${authToken}` }
                 });
-                if (response.status === 401) {
-                    logout();
-                    showMessage('Session expired. Please log in again.', 'error');
-                    throw new Error('Unauthorized');
-                }
+                await handleApiAuthFailure(response);
                 return response;
             }
 
@@ -435,7 +438,31 @@
 	                showMessage('Email verified. You can log in now.', 'success');
 	            }
 
-	            async function handleForgotPassword(e) {
+            async function handleResendVerificationCode(e) {
+                const btn = e && e.target ? e.target : document.getElementById('resend-verification-btn');
+                const email = document.getElementById('verify-email').value.trim();
+                if (!email) {
+                    showMessage('Enter your email address first.', 'error');
+                    return;
+                }
+                if (btn) btn.disabled = true;
+                try {
+                    const response = await fetch('/api/auth/resend-verification', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email })
+                    });
+                    if (!response.ok) throw new Error('Unable to resend code');
+                    document.getElementById('verify-code').value = '';
+                    showMessage('A new validation code has been sent. Older codes are no longer valid.', 'success');
+                } catch (error) {
+                    showMessage(error.message || 'Unable to resend code.', 'error');
+                } finally {
+                    if (btn) btn.disabled = false;
+                }
+            }
+
+            async function handleForgotPassword(e) {
 	                e.preventDefault();
 	                const email = document.getElementById('forgot-email').value;
 	                await fetch('/api/auth/forgot-password', {
@@ -504,7 +531,7 @@
                         currentSwarms = data.swarms || currentSwarms;
                         localStorage.setItem('auth_token', authToken);
                         lastAuthRefreshAt = now;
-                    } else if (response.status === 401) {
+                    } else if (response.status === 401 || response.status === 403) {
                         logout('Session expired. Please log in again.', '#/login');
                     }
                 } catch (error) {
@@ -584,6 +611,7 @@
 	            async function loadSwarms() {
 	                if (!authToken) return;
 	                const response = await apiGet('/api/swarms');
+	                if (!response.ok) throw new Error('Failed to load swarms');
 	                const data = await response.json();
 	                currentSwarms = data.swarms || [];
                     const previousSwarmId = selectedSwarmId;
@@ -768,6 +796,20 @@
                 }
             }
 
+            function ensureProfileState() {
+                if (currentProfile) return currentProfile;
+                currentProfile = {
+                    id: currentUser && currentUser.id ? currentUser.id : null,
+                    email: currentUser && currentUser.email ? currentUser.email : '',
+                    username: currentUser && currentUser.username ? currentUser.username : '',
+                    full_name: currentUser && currentUser.full_name ? currentUser.full_name : '',
+                    avatar_data_url: '',
+                    fleet_settings: {},
+                    notification_settings: {}
+                };
+                return currentProfile;
+            }
+
             function renderProfileUI() {
                 if (!currentProfile) return;
                 const profileLabel = document.getElementById('profile-nav-label');
@@ -861,23 +903,28 @@
                 document.getElementById('avatar-cancel-btn').onclick = () => overlay.remove();
                 document.getElementById('avatar-accept-btn').onclick = () => {
                     const canvas = document.getElementById('avatar-crop-canvas');
-                    currentProfile.avatar_data_url = canvas.toDataURL('image/png');
+                    const avatarDataUrl = canvas.toDataURL('image/png');
+                    ensureProfileState().avatar_data_url = avatarDataUrl;
                     renderProfileUI();
                     overlay.remove();
+                    saveProfile(avatarDataUrl);
                 };
             }
 
             async function saveProfile(avatarDataUrlOverride = null) {
                 try {
+                    const profile = ensureProfileState();
+                    const usernameInput = document.getElementById('profile-username-input');
                     const payload = {
-                        username: document.getElementById('profile-username-input').value.trim() || null,
+                        username: usernameInput ? usernameInput.value.trim() || null : profile.username || null,
                     };
-                    const avatarValue = avatarDataUrlOverride !== null ? avatarDataUrlOverride : currentProfile.avatar_data_url;
+                    const avatarValue = avatarDataUrlOverride !== null ? avatarDataUrlOverride : profile.avatar_data_url;
                     if (avatarValue) payload.avatar_data_url = avatarValue;
                     const response = await apiPatch('/api/profile', payload);
                     if (!response.ok) throw new Error('Failed to save profile');
                     currentProfile = await response.json();
-                    const swarmName = document.getElementById('profile-swarm-name-input').value.trim();
+                    const swarmNameInput = document.getElementById('profile-swarm-name-input');
+                    const swarmName = swarmNameInput ? swarmNameInput.value.trim() : '';
                     if (selectedSwarmId && canMutateSwarm() && swarmName) {
                         const swarmResponse = await apiPatch(`/api/swarms/${selectedSwarmId}`, { name: swarmName });
                         if (!swarmResponse.ok) throw new Error('Failed to save swarm name');
@@ -1030,7 +1077,11 @@
             }
 
             async function loadPendingConnections() {
-                if (!authToken) return;
+                if (!authToken || !canMutateSwarm()) {
+                    pendingConnections = [];
+                    displayPendingConnections();
+                    return;
+                }
                 try {
 	                    const response = await apiGet(withSwarm('/api/drone-connections'));
                     if (!response.ok) throw new Error('Failed to load drone connections');

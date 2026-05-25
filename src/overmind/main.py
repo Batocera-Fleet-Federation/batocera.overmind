@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 from overmind.models import (
     UserRegister, UserLogin, User, DeviceRegister,
     RomListUpdate, GamePlayLog, SocialAuthRequest,
-    EmailVerificationRequest, ForgotPasswordRequest, ResetPasswordRequest,
+    EmailVerificationRequest, EmailVerificationResendRequest, ForgotPasswordRequest, ResetPasswordRequest,
     SwarmCreateRequest, SwarmInviteRequest,
 )
 from overmind.db import db
@@ -263,6 +263,18 @@ def send_verification_email(user: dict, code: str, token: str) -> None:
     emailer.send_email(user["email"], "Verify your Batocera Overmind account", html_body, text_body)
 
 
+def create_and_send_verification(user: dict) -> None:
+    code = f"{secrets.randbelow(1000000):06d}"
+    raw_token = secrets.token_urlsafe(32)
+    db.create_email_verification(
+        user["id"],
+        code,
+        hash_secret_token(raw_token),
+        datetime.utcnow() + timedelta(minutes=VERIFICATION_TTL_MINUTES),
+    )
+    send_verification_email(user, code, raw_token)
+
+
 def send_password_reset_email(user: dict, token: str) -> None:
     link = f"{emailer.base_url()}/#reset-password={urllib.parse.quote(token)}"
     body_html = emailer.render_email_template(
@@ -395,15 +407,7 @@ async def register(user_data: UserRegister):
         db.accept_invitation_for_user(invitation, user_id)
         print(f"Invitation registration flow completed for {user_data.email}: swarm_id={invitation.get('swarm_id')}")
     if not auto_verify:
-        code = f"{secrets.randbelow(1000000):06d}"
-        raw_token = secrets.token_urlsafe(32)
-        db.create_email_verification(
-            user_id,
-            code,
-            hash_secret_token(raw_token),
-            datetime.utcnow() + timedelta(minutes=VERIFICATION_TTL_MINUTES),
-        )
-        send_verification_email(user, code, raw_token)
+        create_and_send_verification(user)
     
     return User(
         id=user["id"],
@@ -437,6 +441,14 @@ async def verify_email_code(payload: EmailVerificationRequest):
     if not db.verify_email_code(str(payload.email), payload.code):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code")
     return {"status": "verified"}
+
+
+@app.post("/api/auth/resend-verification")
+async def resend_verification_email(payload: EmailVerificationResendRequest):
+    user = db.get_user_by_email(str(payload.email))
+    if user and not user.get("email_verified"):
+        create_and_send_verification(user)
+    return {"status": "sent"}
 
 
 @app.get("/api/auth/verify-email")

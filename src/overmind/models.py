@@ -49,6 +49,10 @@ class EmailVerificationRequest(BaseModel):
     code: str
 
 
+class EmailVerificationResendRequest(BaseModel):
+    email: EmailStr
+
+
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
