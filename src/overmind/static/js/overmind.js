@@ -593,7 +593,7 @@
             async function handleRegister(e) {
                 e.preventDefault();
                 const email = document.getElementById('register-email').value;
-                const full_name = document.getElementById('register-name').value || null;
+                const username = document.getElementById('register-username').value.trim();
                 const password = document.getElementById('register-password').value;
                 const btn = e.target.querySelector('button');
                 btn.disabled = true;
@@ -601,7 +601,7 @@
                     const response = await fetch('/api/auth/register', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email, password, full_name, invitation_token: pendingInvitationToken })
+                        body: JSON.stringify({ email, username, password, invitation_token: pendingInvitationToken })
                     });
                     if (!response.ok) {
                         const error = await response.json();
@@ -1214,8 +1214,8 @@
                         <div class="table-responsive"><table class="table table-sm align-middle">
                             <thead><tr><th>Email</th><th>Role</th><th>Registration</th><th>Status</th><th></th></tr></thead>
                             <tbody>
-                                ${members.map(m => `<tr><td>${escapeHtml(m.email || '')}</td><td>${escapeHtml(roleLabel(m.role))}</td><td>registered</td><td>${escapeHtml(m.status || 'accepted')}</td><td>${canMutateSwarm() && m.role !== 'overlord' ? `<button class="btn btn-outline-danger btn-sm" onclick="removeSwarmMember('${escapeHtml(m.user_id)}')">Remove</button>` : ''}</td></tr>`).join('')}
-                                ${invites.map(i => `<tr><td>${escapeHtml(i.email || '')}</td><td>${escapeHtml(roleLabel(i.role))}</td><td>${escapeHtml(i.registration_status || 'invited')}</td><td>${escapeHtml(i.status || 'pending')}</td><td></td></tr>`).join('')}
+                                ${members.map(m => `<tr><td>${escapeHtml(m.email || '')}</td><td>${escapeHtml(roleLabel(m.role))}</td><td>registered</td><td>${escapeHtml(m.status || 'accepted')}</td><td>${canMutateSwarm() && m.role === 'overseer' ? `<button class="btn btn-outline-danger btn-sm" title="Remove this Overseer from the swarm" onclick="removeSwarmMember('${escapeHtml(m.user_id)}')"><i class="bi bi-person-x me-1"></i>Remove Overseer</button>` : ''}</td></tr>`).join('')}
+                                ${invites.map(i => `<tr><td>${escapeHtml(i.email || '')}</td><td>${escapeHtml(roleLabel(i.role))}</td><td>${escapeHtml(i.registration_status || 'invited')}</td><td>${escapeHtml(i.status || 'pending')}</td><td>${canMutateSwarm() && i.status === 'pending' ? `<button class="btn btn-outline-primary btn-sm" title="Send a new Overseer invitation link" onclick="resendOverseerInvite('${escapeHtml(i.id)}')"><i class="bi bi-envelope-arrow-up me-1"></i>Resend Invite</button>` : ''}</td></tr>`).join('')}
                             </tbody>
                         </table></div>
                     `;
@@ -1244,14 +1244,30 @@
             }
 
             async function removeSwarmMember(userId) {
-                if (!selectedSwarmId || !window.confirm('Remove this user from the swarm?')) return;
+                if (!selectedSwarmId || !window.confirm('Remove this Overseer from the swarm? They will lose access to this swarm immediately.')) return;
                 const response = await apiDelete(`/api/swarms/${selectedSwarmId}/members/${userId}`);
                 if (!response.ok) {
-                    showMessage('Unable to remove user.', 'error');
+                    showMessage('Unable to remove Overseer.', 'error');
                     return;
                 }
                 await loadSwarmAccess();
-                showMessage('Swarm access removed.', 'success');
+                showMessage('Overseer removed from the swarm.', 'success');
+            }
+
+            async function resendOverseerInvite(invitationId) {
+                if (!selectedSwarmId || !window.confirm('Resend this Overseer invitation? The previous invitation link will no longer work.')) return;
+                try {
+                    const response = await fetch(`/api/swarms/${selectedSwarmId}/invitations/${encodeURIComponent(invitationId)}/resend`, {
+                        method: 'POST',
+                        headers: {'Authorization': `Bearer ${authToken}`}
+                    });
+                    await handleApiAuthFailure(response);
+                    if (!response.ok) throw new Error('Unable to resend invitation');
+                    await loadSwarmAccess();
+                    showMessage('Overseer invitation resent.', 'success');
+                } catch (error) {
+                    showMessage(error.message || 'Unable to resend invitation.', 'error');
+                }
             }
 
             async function saveNotificationSettings() {

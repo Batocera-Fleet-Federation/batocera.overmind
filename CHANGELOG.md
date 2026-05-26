@@ -13,3 +13,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release script for local creation
 - Drone actions now provide remote restart and Kiosk mode controls; completed actions leave the queue and appear as notifications.
 - Swarm Drone tiles now show the reported Batocera version instead of the internal Drone ID.
+- Profile Swarm Access now provides an explicit Remove Overseer action that revokes shared swarm access immediately.
+- Pending Overseer invitations can now be resent from Profile Swarm Access, rotating the invitation link and refreshing its expiry.
+- Password signup now requires a unique username, with duplicate prevention also enforced on Profile username changes.

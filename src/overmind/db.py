@@ -91,6 +91,7 @@ class FakeDatabase:
         "consume_password_reset",
         "create_swarm",
         "invite_to_swarm",
+        "rotate_pending_invitation",
         "accept_invitation",
         "accept_invitation_for_user",
         "remove_swarm_member",
@@ -342,7 +343,7 @@ class FakeDatabase:
                 )
     
     # User operations
-    def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None, verified: bool = False, auth_provider: str = "password") -> str:
+    def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None, verified: bool = False, auth_provider: str = "password", username: Optional[str] = None) -> str:
         """Create a new user."""
         user_id = str(uuid.uuid4())
         self.users[user_id] = {
@@ -352,7 +353,7 @@ class FakeDatabase:
             "email_verified": bool(verified),
             "is_active": bool(verified),
             "auth_provider": auth_provider,
-            "username": None,
+            "username": username,
             "full_name": full_name,
             "avatar_data_url": None,
             "fleet_settings": {
@@ -382,13 +383,16 @@ class FakeDatabase:
             existing["auth_provider"] = existing.get("auth_provider") or provider
             if full_name and not existing.get("full_name"):
                 existing["full_name"] = full_name
+            if not existing.get("username"):
+                existing["username"] = self.available_username(full_name or email.split("@", 1)[0], exclude_user_id=existing["id"])
             existing["email_verified"] = True
             existing["is_active"] = True
             self.ensure_personal_swarm(existing["id"])
             self.accept_invitations_for_email(email, existing["id"])
             return existing
 
-        user_id = self.create_user(email, auth.hash_password(str(uuid.uuid4())), full_name, verified=True, auth_provider=provider)
+        username = self.available_username(full_name or email.split("@", 1)[0])
+        user_id = self.create_user(email, auth.hash_password(str(uuid.uuid4())), full_name, verified=True, auth_provider=provider, username=username)
         user = self.users[user_id]
         user["auth_provider"] = provider
         user["email_verified"] = True
@@ -513,6 +517,15 @@ class FakeDatabase:
         self.invitations[invite_id] = invite
         return invite
 
+    def rotate_pending_invitation(self, swarm_id: str, invitation_id: str, token_hash: str, expires_at: datetime) -> Optional[dict]:
+        invite = self.invitations.get(invitation_id)
+        if not invite or invite.get("swarm_id") != swarm_id or invite.get("status") != "pending":
+            return None
+        invite["token_hash"] = token_hash
+        invite["expires_at"] = expires_at
+        invite["resent_at"] = datetime.utcnow()
+        return invite
+
     def list_swarm_access(self, swarm_id: str) -> dict:
         members = []
         for user_id, member in self.swarm_memberships.get(swarm_id, {}).items():
@@ -608,6 +621,24 @@ class FakeDatabase:
     def user_exists(self, email: str) -> bool:
         """Check if user exists by email."""
         return email in self.user_by_email
+
+    def username_exists(self, username: str, exclude_user_id: Optional[str] = None) -> bool:
+        normalized = str(username or "").strip().casefold()
+        if not normalized:
+            return False
+        return any(
+            user_id != exclude_user_id and str(user.get("username") or "").strip().casefold() == normalized
+            for user_id, user in self.users.items()
+        )
+
+    def available_username(self, preferred: str, exclude_user_id: Optional[str] = None) -> str:
+        base = str(preferred or "").strip() or "user"
+        candidate = base
+        suffix = 2
+        while self.username_exists(candidate, exclude_user_id=exclude_user_id):
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        return candidate
 
     def update_user_profile(
         self,

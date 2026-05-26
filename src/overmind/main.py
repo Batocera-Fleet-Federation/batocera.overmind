@@ -246,6 +246,7 @@ def build_login_response(user: dict) -> dict:
         "user": {
             "id": user["id"],
             "email": user["email"],
+            "username": user.get("username"),
             "full_name": user["full_name"]
         },
         "swarms": db.get_user_swarms(user["id"]),
@@ -333,6 +334,11 @@ def notify_sync_triggered(user: dict, device: dict, sync_type: str, nature: str,
 @app.post("/api/auth/register", response_model=User)
 async def register(user_data: UserRegister):
     """Register a new user."""
+    username = user_data.username.strip()
+    if not username:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username is required")
+    if db.username_exists(username):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already registered")
     if db.user_exists(user_data.email):
         print(f"Register failed for {user_data.email}: email_already_registered")
         raise HTTPException(
@@ -353,7 +359,7 @@ async def register(user_data: UserRegister):
     auto_verify = os.getenv("OVERMIND_AUTO_VERIFY_REGISTRATION", "").strip().lower() in {"1", "true", "yes", "on"}
     if invitation:
         auto_verify = True
-    user_id = db.create_user(user_data.email, hashed_password, user_data.full_name, verified=auto_verify, auth_provider="password")
+    user_id = db.create_user(user_data.email, hashed_password, user_data.full_name, verified=auto_verify, auth_provider="password", username=username)
     user = db.get_user(user_id)
     if invitation:
         db.accept_invitation_for_user(invitation, user_id)
@@ -364,6 +370,7 @@ async def register(user_data: UserRegister):
     return User(
         id=user["id"],
         email=user["email"],
+        username=user["username"],
         full_name=user["full_name"],
         created_at=user["created_at"]
     )
@@ -720,6 +727,31 @@ async def invite_swarm_member(swarm_id: str, payload: SwarmInviteRequest, author
     send_invitation_email(str(payload.email), swarm, role, raw_token)
     print(f"Invitation created for {payload.email}: swarm_id={swarm_id} role={role}")
     return {"invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
+
+
+@app.post("/api/swarms/{swarm_id}/invitations/{invitation_id}/resend")
+async def resend_swarm_invitation(swarm_id: str, invitation_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    selected_swarm_id(user, swarm_id)
+    require_swarm_role(user, swarm_id, {OWNER_ROLE})
+    invite = db.invitations.get(invitation_id)
+    if not invite or invite.get("swarm_id") != swarm_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
+    if invite.get("status") != "pending":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only pending invitations can be resent")
+    raw_token = secrets.token_urlsafe(32)
+    invite = db.rotate_pending_invitation(
+        swarm_id,
+        invitation_id,
+        hash_secret_token(raw_token),
+        datetime.utcnow() + timedelta(days=int(os.getenv("INVITATION_EXPIRE_DAYS", "7"))),
+    )
+    if not invite:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
+    swarm = db.swarms.get(swarm_id) or {}
+    send_invitation_email(str(invite.get("email") or ""), swarm, READONLY_ROLE, raw_token)
+    print(f"Invitation resent for {invite.get('email')}: swarm_id={swarm_id}")
+    return {"status": "sent", "invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
 
 
 @app.get("/api/invitations/status")
@@ -1353,6 +1385,14 @@ async def update_profile(payload: dict, authorization: Optional[str] = Header(de
     """Update profile and user settings."""
     user = get_current_user(authorization)
     user_id = user["id"]
+
+    if "username" in payload:
+        username = str(payload.get("username") or "").strip()
+        if not username:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username is required")
+        if db.username_exists(username, exclude_user_id=user_id):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already registered")
+        payload["username"] = username
 
     if "username" in payload or "full_name" in payload or "avatar_data_url" in payload:
         db.update_user_profile(

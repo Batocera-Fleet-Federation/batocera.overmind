@@ -104,6 +104,7 @@ def test_register_user(client):
         "/api/auth/register",
         json={
             "email": "test@example.com",
+            "username": "test-at-example.com",
             "password": "testpass123",
             "full_name": "Test User"
         }
@@ -111,7 +112,29 @@ def test_register_user(client):
     assert response.status_code == 200
     data = response.json()
     assert data["email"] == "test@example.com"
+    assert data["username"] == "test-at-example.com"
     assert "id" in data
+
+
+def test_registration_requires_unique_username(client):
+    missing = client.post(
+        "/api/auth/register",
+        json={"email": "missing-name@example.com", "password": "testpass123"},
+    )
+    assert missing.status_code == 422
+
+    first = client.post(
+        "/api/auth/register",
+        json={"email": "first@example.com", "username": "CabinetMaster", "password": "testpass123"},
+    )
+    assert first.status_code == 200
+
+    duplicate = client.post(
+        "/api/auth/register",
+        json={"email": "second@example.com", "username": "cabinetmaster", "password": "testpass123"},
+    )
+    assert duplicate.status_code == 400
+    assert duplicate.json()["detail"] == "Username already registered"
 
 
 def test_duplicate_registration(client):
@@ -121,6 +144,7 @@ def test_duplicate_registration(client):
         "/api/auth/register",
         json={
             "email": "test@example.com",
+            "username": "test-at-example.com",
             "password": "testpass123",
         }
     )
@@ -130,6 +154,7 @@ def test_duplicate_registration(client):
         "/api/auth/register",
         json={
             "email": "test@example.com",
+            "username": "test-at-example.com",
             "password": "testpass123",
         }
     )
@@ -143,6 +168,7 @@ def test_login(client):
         "/api/auth/register",
         json={
             "email": "test@example.com",
+            "username": "test-at-example.com",
             "password": "testpass123",
         }
     )
@@ -152,6 +178,7 @@ def test_login(client):
         "/api/auth/login",
         json={
             "email": "test@example.com",
+            "username": "test-at-example.com",
             "password": "testpass123"
         }
     )
@@ -162,8 +189,8 @@ def test_login(client):
 
 
 def test_auth_refresh_requires_and_returns_valid_token(client):
-    client.post("/api/auth/register", json={"email": "refresh@example.com", "password": "testpass123"})
-    token = client.post("/api/auth/login", json={"email": "refresh@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "refresh@example.com", "username": "refresh-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "refresh@example.com", "username": "refresh-at-example.com", "password": "testpass123"}).json()["access_token"]
 
     denied = client.post("/api/auth/refresh")
     assert denied.status_code == 401
@@ -175,8 +202,8 @@ def test_auth_refresh_requires_and_returns_valid_token(client):
 
 
 def test_notifications_capture_master_list_add_and_read(client):
-    client.post("/api/auth/register", json={"email": "notify@example.com", "password": "testpass123"})
-    token = client.post("/api/auth/login", json={"email": "notify@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "notify@example.com", "username": "notify-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "notify@example.com", "username": "notify-at-example.com", "password": "testpass123"}).json()["access_token"]
     user = db.get_user_by_email("notify@example.com")
     db.create_device(user["id"], "notify-drone", "Notify Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
 
@@ -207,8 +234,8 @@ def test_notifications_capture_master_list_add_and_read(client):
 
 
 def test_notifications_capture_drone_status_transition_and_sync_trigger(client):
-    client.post("/api/auth/register", json={"email": "syncnotify@example.com", "password": "testpass123"})
-    token = client.post("/api/auth/login", json={"email": "syncnotify@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "syncnotify@example.com", "username": "syncnotify-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "syncnotify@example.com", "username": "syncnotify-at-example.com", "password": "testpass123"}).json()["access_token"]
     user = db.get_user_by_email("syncnotify@example.com")
     db.create_device(user["id"], "source-drone", "Source Drone", {"ip_address": "10.0.0.2"}, raw_token="source-token")
     db.create_device(user["id"], "target-drone", "Target Drone", {"ip_address": "10.0.0.3"}, raw_token="target-token")
@@ -243,8 +270,8 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
 
     monkeypatch.setattr(db_module.notification_delivery.emailer, "send_email", fake_send_email)
     monkeypatch.setattr(db_module.notification_delivery, "post_webhook", fake_post_webhook)
-    client.post("/api/auth/register", json={"email": "mailnotify@example.com", "password": "testpass123"})
-    token = client.post("/api/auth/login", json={"email": "mailnotify@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "mailnotify@example.com", "username": "mailnotify-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "mailnotify@example.com", "username": "mailnotify-at-example.com", "password": "testpass123"}).json()["access_token"]
     user = db.get_user_by_email("mailnotify@example.com")
     swarm_id = db.default_swarm_id(user["id"])
 
@@ -336,7 +363,7 @@ def test_fake_data_populates_demo_notifications(client):
     db.populate_fake_notifications()
     token = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     ).json()["access_token"]
 
     response = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"})
@@ -353,6 +380,7 @@ def test_invalid_login(client):
         "/api/auth/login",
         json={
             "email": "test@example.com",
+            "username": "test-at-example.com",
             "password": "wrongpassword"
         }
     )
@@ -372,7 +400,7 @@ def test_social_auth_activates_existing_unverified_user(client, monkeypatch):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
     monkeypatch.setenv("GITHUB_CLIENT_ID", "github-client")
     monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
-    client.post("/api/auth/register", json={"email": "social-existing@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "social-existing@example.com", "username": "social-existing-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("social-existing@example.com")
     assert user["email_verified"] is False
     assert user["is_active"] is False
@@ -458,19 +486,20 @@ def test_social_auth_callback_completes_github_with_private_primary_email(client
     assert response.headers["location"].startswith("/#oauth_token=")
     user = db.get_user_by_email("social-github@example.com")
     assert user["full_name"] == "octo"
+    assert user["username"] == "octo"
     assert user["auth_provider"] == "github"
 
 
 def test_super_admin_overview_and_delete_permissions(client):
-    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr_jerrodh-at-hotmail.com", "password": "testpass123"})
     admin_token = client.post(
         "/api/auth/login",
-        json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"},
+        json={"email": "mr_jerrodh@hotmail.com", "username": "mr_jerrodh-at-hotmail.com", "password": "testpass123"},
     ).json()["access_token"]
-    client.post("/api/auth/register", json={"email": "regular@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "regular@example.com", "username": "regular-at-example.com", "password": "testpass123"})
     regular_token = client.post(
         "/api/auth/login",
-        json={"email": "regular@example.com", "password": "testpass123"},
+        json={"email": "regular@example.com", "username": "regular-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     regular_user = db.get_user_by_email("regular@example.com")
     db.create_device(regular_user["id"], "admin-visible-drone", "Admin Visible Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
@@ -496,12 +525,12 @@ def test_super_admin_overview_and_delete_permissions(client):
 
 
 def test_super_admin_delete_user_removes_owned_swarms_and_drones(client):
-    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr_jerrodh-at-hotmail.com", "password": "testpass123"})
     admin_token = client.post(
         "/api/auth/login",
-        json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"},
+        json={"email": "mr_jerrodh@hotmail.com", "username": "mr_jerrodh-at-hotmail.com", "password": "testpass123"},
     ).json()["access_token"]
-    client.post("/api/auth/register", json={"email": "remove-me@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "remove-me@example.com", "username": "remove-me-at-example.com", "password": "testpass123"})
     target = db.get_user_by_email("remove-me@example.com")
     swarm_id = db.default_swarm_id(target["id"])
     db.create_device(target["id"], "remove-me-drone", "Remove Me Drone", {"ip_address": "10.0.0.3"}, raw_token="drone-token")
@@ -517,22 +546,22 @@ def test_email_registration_requires_verification(client, monkeypatch):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
     response = client.post(
         "/api/auth/register",
-        json={"email": "verify@example.com", "password": "testpass123"},
+        json={"email": "verify@example.com", "username": "verify-at-example.com", "password": "testpass123"},
     )
     assert response.status_code == 200
     assert db.get_user_by_email("verify@example.com")["is_active"] is False
-    assert client.post("/api/auth/login", json={"email": "verify@example.com", "password": "testpass123"}).status_code == 403
+    assert client.post("/api/auth/login", json={"email": "verify@example.com", "username": "verify-at-example.com", "password": "testpass123"}).status_code == 403
 
     code = db.email_verifications[db.get_user_by_email("verify@example.com")["id"]]["code"]
     verify = client.post("/api/auth/verify-email", json={"email": "verify@example.com", "code": code})
     assert verify.status_code == 200
-    assert client.post("/api/auth/login", json={"email": "verify@example.com", "password": "testpass123"}).status_code == 200
+    assert client.post("/api/auth/login", json={"email": "verify@example.com", "username": "verify-at-example.com", "password": "testpass123"}).status_code == 200
 
 
 def test_fake_data_does_not_log_registration_verification_code(client, monkeypatch, capsys):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
     monkeypatch.setenv("USE_FAKE_DATA", "true")
-    response = client.post("/api/auth/register", json={"email": "fake-code@example.com", "password": "testpass123"})
+    response = client.post("/api/auth/register", json={"email": "fake-code@example.com", "username": "fake-code-at-example.com", "password": "testpass123"})
     assert response.status_code == 200
     captured = capsys.readouterr()
     assert "registration verification code for fake-code@example.com" not in captured.out
@@ -541,7 +570,7 @@ def test_fake_data_does_not_log_registration_verification_code(client, monkeypat
 def test_normal_mode_does_not_log_registration_verification_code(client, monkeypatch, capsys):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
     monkeypatch.delenv("USE_FAKE_DATA", raising=False)
-    response = client.post("/api/auth/register", json={"email": "real-code@example.com", "password": "testpass123"})
+    response = client.post("/api/auth/register", json={"email": "real-code@example.com", "username": "real-code-at-example.com", "password": "testpass123"})
     assert response.status_code == 200
     captured = capsys.readouterr()
     assert "registration verification code for real-code@example.com" not in captured.out
@@ -551,7 +580,7 @@ def test_expired_verification_code_fails(client, monkeypatch):
     from datetime import datetime, timedelta
 
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
-    client.post("/api/auth/register", json={"email": "expired@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "expired@example.com", "username": "expired-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("expired@example.com")
     db.email_verifications[user["id"]]["expires_at"] = datetime.utcnow() - timedelta(seconds=1)
     code = db.email_verifications[user["id"]]["code"]
@@ -564,7 +593,7 @@ def test_resend_verification_replaces_old_code(client, monkeypatch):
     sent = []
     monkeypatch.setattr("overmind.main.send_verification_email", lambda user, code, token: sent.append((user["email"], code, token)))
 
-    client.post("/api/auth/register", json={"email": "resend@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "resend@example.com", "username": "resend-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("resend@example.com")
     old_code = db.email_verifications[user["id"]]["code"]
 
@@ -584,7 +613,7 @@ def test_resend_verification_replaces_old_code(client, monkeypatch):
 
 
 def test_resend_verification_noops_for_verified_user(client):
-    client.post("/api/auth/register", json={"email": "verified@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "verified@example.com", "username": "verified-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("verified@example.com")
     assert user["email_verified"] is True
 
@@ -597,7 +626,7 @@ def test_forgot_password_token_resets_password(client, monkeypatch):
     from datetime import datetime, timedelta
 
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
-    client.post("/api/auth/register", json={"email": "reset@example.com", "password": "oldpass123"})
+    client.post("/api/auth/register", json={"email": "reset@example.com", "username": "reset-at-example.com", "password": "oldpass123"})
     user = db.get_user_by_email("reset@example.com")
     db.set_user_verified(user["id"])
 
@@ -607,12 +636,12 @@ def test_forgot_password_token_resets_password(client, monkeypatch):
     db.create_password_reset(user["id"], auth_utils.hash_password(f"{TOKEN_HASH_SECRET}:{raw_token}"), datetime.utcnow() + timedelta(minutes=30))
     reset = client.post("/api/auth/reset-password", json={"token": raw_token, "password": "newpass123"})
     assert reset.status_code == 200
-    assert client.post("/api/auth/login", json={"email": "reset@example.com", "password": "newpass123"}).status_code == 200
+    assert client.post("/api/auth/login", json={"email": "reset@example.com", "username": "reset-at-example.com", "password": "newpass123"}).status_code == 200
 
 
 def test_swarm_roles_gate_invites_and_mutations(client):
-    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
-    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"}).json()["access_token"]
     swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {owner_token}"}).json()["swarms"][0]["id"]
 
     invite = client.post(
@@ -623,8 +652,8 @@ def test_swarm_roles_gate_invites_and_mutations(client):
     assert invite.status_code == 200
     assert invite.json()["invitation"]["role"] == "overseer"
 
-    client.post("/api/auth/register", json={"email": "viewer@example.com", "password": "testpass123"})
-    viewer_token = client.post("/api/auth/login", json={"email": "viewer@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "viewer@example.com", "username": "viewer-at-example.com", "password": "testpass123"})
+    viewer_token = client.post("/api/auth/login", json={"email": "viewer@example.com", "username": "viewer-at-example.com", "password": "testpass123"}).json()["access_token"]
     denied = client.post(
         f"/api/swarms/{swarm_id}/invitations",
         headers={"Authorization": f"Bearer {viewer_token}"},
@@ -643,9 +672,76 @@ def test_swarm_roles_gate_invites_and_mutations(client):
     assert viewer_member["role"] == "overseer"
 
 
+def test_overlord_can_remove_overseer_from_swarm(client):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"}).json()["access_token"]
+    owner = db.get_user_by_email("owner@example.com")
+    swarm_id = db.default_swarm_id(owner["id"])
+
+    client.post("/api/auth/register", json={"email": "overseer@example.com", "username": "overseer-at-example.com", "password": "testpass123"})
+    overseer = db.get_user_by_email("overseer@example.com")
+    db.swarm_memberships.setdefault(swarm_id, {})[overseer["id"]] = {"user_id": overseer["id"], "role": "overseer"}
+    overseer_token = client.post("/api/auth/login", json={"email": "overseer@example.com", "username": "overseer-at-example.com", "password": "testpass123"}).json()["access_token"]
+
+    response = client.delete(
+        f"/api/swarms/{swarm_id}/members/{overseer['id']}",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "removed"
+    assert db.get_swarm_member(swarm_id, overseer["id"]) is None
+    assert client.get(f"/api/swarms/{swarm_id}/access", headers={"Authorization": f"Bearer {overseer_token}"}).status_code == 403
+    notifications = client.get("/api/notifications", headers={"Authorization": f"Bearer {owner_token}"}).json()["notifications"]
+    assert any(row["event_type"] == "swarm_member_removed" and "overseer@example.com" in row["message"] for row in notifications)
+
+
+def test_overlord_can_resend_pending_overseer_invite_with_rotated_link(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "overmind.main.send_invitation_email",
+        lambda email, swarm, role, token: sent.append((email, swarm.get("id"), role, token)),
+    )
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"}).json()["access_token"]
+    owner = db.get_user_by_email("owner@example.com")
+    swarm_id = db.default_swarm_id(owner["id"])
+
+    created = client.post(
+        f"/api/swarms/{swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "pending-overseer@example.com"},
+    )
+    invitation_id = created.json()["invitation"]["id"]
+    original_token = sent[-1][3]
+
+    response = client.post(
+        f"/api/swarms/{swarm_id}/invitations/{invitation_id}/resend",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "sent"
+    assert response.json()["invitation"]["id"] == invitation_id
+    resent_token = sent[-1][3]
+    assert resent_token != original_token
+    assert client.get(f"/api/invitations/status?token={original_token}").status_code == 400
+    assert client.get(f"/api/invitations/status?token={resent_token}").status_code == 200
+
+    client.post("/api/auth/register", json={"email": "observer@example.com", "username": "observer-at-example.com", "password": "testpass123"})
+    observer = db.get_user_by_email("observer@example.com")
+    db.swarm_memberships.setdefault(swarm_id, {})[observer["id"]] = {"user_id": observer["id"], "role": "overseer"}
+    observer_token = client.post("/api/auth/login", json={"email": "observer@example.com", "username": "observer-at-example.com", "password": "testpass123"}).json()["access_token"]
+    denied = client.post(
+        f"/api/swarms/{swarm_id}/invitations/{invitation_id}/resend",
+        headers={"Authorization": f"Bearer {observer_token}"},
+    )
+    assert denied.status_code == 403
+
+
 def test_swarms_marks_users_home_swarm(client):
-    client.post("/api/auth/register", json={"email": "owner-home@example.com", "password": "testpass123"})
-    token = client.post("/api/auth/login", json={"email": "owner-home@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "owner-home@example.com", "username": "owner-home-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "owner-home@example.com", "username": "owner-home-at-example.com", "password": "testpass123"}).json()["access_token"]
 
     response = client.get("/api/swarms", headers={"Authorization": f"Bearer {token}"})
 
@@ -657,8 +753,8 @@ def test_swarms_marks_users_home_swarm(client):
 
 
 def test_invited_overseer_home_swarm_is_their_owned_swarm(client):
-    client.post("/api/auth/register", json={"email": "owner-home@example.com", "password": "testpass123"})
-    owner_token = client.post("/api/auth/login", json={"email": "owner-home@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "owner-home@example.com", "username": "owner-home-at-example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner-home@example.com", "username": "owner-home-at-example.com", "password": "testpass123"}).json()["access_token"]
     owner_swarm_id = db.default_swarm_id(db.get_user_by_email("owner-home@example.com")["id"])
 
     invite = client.post(
@@ -668,8 +764,8 @@ def test_invited_overseer_home_swarm_is_their_owned_swarm(client):
     )
     assert invite.status_code == 200
 
-    client.post("/api/auth/register", json={"email": "overseer-home@example.com", "password": "testpass123"})
-    overseer_token = client.post("/api/auth/login", json={"email": "overseer-home@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "overseer-home@example.com", "username": "overseer-home-at-example.com", "password": "testpass123"})
+    overseer_token = client.post("/api/auth/login", json={"email": "overseer-home@example.com", "username": "overseer-home-at-example.com", "password": "testpass123"}).json()["access_token"]
 
     response = client.get("/api/swarms", headers={"Authorization": f"Bearer {overseer_token}"})
 
@@ -682,8 +778,8 @@ def test_invited_overseer_home_swarm_is_their_owned_swarm(client):
 
 
 def test_drone_ownership_claim_success_and_owner_actions(client, capsys):
-    client.post("/api/auth/register", json={"email": "claim-owner@example.com", "password": "claimpass123"})
-    token = client.post("/api/auth/login", json={"email": "claim-owner@example.com", "password": "claimpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "claim-owner@example.com", "username": "claim-owner-at-example.com", "password": "claimpass123"})
+    token = client.post("/api/auth/login", json={"email": "claim-owner@example.com", "username": "claim-owner-at-example.com", "password": "claimpass123"}).json()["access_token"]
 
     response = client.post(
         "/api/drones/claim-ownership",
@@ -691,6 +787,7 @@ def test_drone_ownership_claim_success_and_owner_actions(client, capsys):
             "device_id": "claim-drone",
             "device_name": "Claimed Drone",
             "email": "claim-owner@example.com",
+            "username": "claim-owner-at-example.com",
             "password": "claimpass123",
             "batocera_info": {"ip_address": "10.0.0.7"},
         },
@@ -708,20 +805,20 @@ def test_drone_ownership_claim_success_and_owner_actions(client, capsys):
 
 
 def test_drone_ownership_claim_invalid_credentials_and_cross_swarm_admin(client, capsys):
-    client.post("/api/auth/register", json={"email": "first-owner@example.com", "password": "claimpass123"})
-    client.post("/api/auth/register", json={"email": "second-owner@example.com", "password": "otherpass123"})
+    client.post("/api/auth/register", json={"email": "first-owner@example.com", "username": "first-owner-at-example.com", "password": "claimpass123"})
+    client.post("/api/auth/register", json={"email": "second-owner@example.com", "username": "second-owner-at-example.com", "password": "otherpass123"})
     first_token = client.post(
         "/api/auth/login",
-        json={"email": "first-owner@example.com", "password": "claimpass123"},
+        json={"email": "first-owner@example.com", "username": "first-owner-at-example.com", "password": "claimpass123"},
     ).json()["access_token"]
     second_token = client.post(
         "/api/auth/login",
-        json={"email": "second-owner@example.com", "password": "otherpass123"},
+        json={"email": "second-owner@example.com", "username": "second-owner-at-example.com", "password": "otherpass123"},
     ).json()["access_token"]
 
     bad = client.post(
         "/api/drones/claim-ownership",
-        json={"device_id": "owned-drone", "email": "first-owner@example.com", "password": "wrongpass123"},
+        json={"device_id": "owned-drone", "email": "first-owner@example.com", "username": "first-owner-at-example.com", "password": "wrongpass123"},
     )
     assert bad.status_code == 401
     captured = capsys.readouterr()
@@ -730,13 +827,13 @@ def test_drone_ownership_claim_invalid_credentials_and_cross_swarm_admin(client,
 
     claimed = client.post(
         "/api/drones/claim-ownership",
-        json={"device_id": "owned-drone", "email": "first-owner@example.com", "password": "claimpass123"},
+        json={"device_id": "owned-drone", "email": "first-owner@example.com", "username": "first-owner-at-example.com", "password": "claimpass123"},
     )
     assert claimed.status_code == 200
 
     second_claim = client.post(
         "/api/drones/claim-ownership",
-        json={"device_id": "owned-drone", "email": "second-owner@example.com", "password": "otherpass123"},
+        json={"device_id": "owned-drone", "email": "second-owner@example.com", "username": "second-owner-at-example.com", "password": "otherpass123"},
     )
     assert second_claim.status_code == 200
     assert second_claim.json()["drone_token"] is None
@@ -755,8 +852,8 @@ def test_drone_ownership_claim_invalid_credentials_and_cross_swarm_admin(client,
 
 
 def test_hive_lists_public_swarms_without_private_owner_data(client):
-    client.post("/api/auth/register", json={"email": "hive-owner@example.com", "password": "testpass123", "full_name": "Hive Owner"})
-    owner_token = client.post("/api/auth/login", json={"email": "hive-owner@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123", "full_name": "Hive Owner"})
+    owner_token = client.post("/api/auth/login", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123"}).json()["access_token"]
     client.patch(
         "/api/profile",
         headers={"Authorization": f"Bearer {owner_token}"},
@@ -766,8 +863,8 @@ def test_hive_lists_public_swarms_without_private_owner_data(client):
     swarm_id = db.default_swarm_id(owner["id"])
     db.create_device(owner["id"], "hive-drone", "Hive Drone", {"ip_address": "10.0.0.9"}, raw_token="drone-token", swarm_id=swarm_id)
 
-    client.post("/api/auth/register", json={"email": "visitor@example.com", "password": "testpass123"})
-    visitor_token = client.post("/api/auth/login", json={"email": "visitor@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "visitor@example.com", "username": "visitor-at-example.com", "password": "testpass123"})
+    visitor_token = client.post("/api/auth/login", json={"email": "visitor@example.com", "username": "visitor-at-example.com", "password": "testpass123"}).json()["access_token"]
     response = client.get("/api/hive", headers={"Authorization": f"Bearer {visitor_token}"})
     assert response.status_code == 200
     raw = response.text
@@ -781,14 +878,14 @@ def test_hive_lists_public_swarms_without_private_owner_data(client):
 
 
 def test_hive_overseer_can_view_drone_but_not_mutate(client):
-    client.post("/api/auth/register", json={"email": "owner-hive@example.com", "password": "testpass123"})
-    client.post("/api/auth/register", json={"email": "overseer-hive@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "owner-hive@example.com", "username": "owner-hive-at-example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "overseer-hive@example.com", "username": "overseer-hive-at-example.com", "password": "testpass123"})
     owner = db.get_user_by_email("owner-hive@example.com")
     overseer = db.get_user_by_email("overseer-hive@example.com")
     swarm_id = db.default_swarm_id(owner["id"])
     db.swarm_memberships.setdefault(swarm_id, {})[overseer["id"]] = {"user_id": overseer["id"], "role": "overseer"}
     db.create_device(owner["id"], "overseer-drone", "Overseer Drone", {"ip_address": "10.0.0.10"}, raw_token="drone-token", swarm_id=swarm_id)
-    overseer_token = client.post("/api/auth/login", json={"email": "overseer-hive@example.com", "password": "testpass123"}).json()["access_token"]
+    overseer_token = client.post("/api/auth/login", json={"email": "overseer-hive@example.com", "username": "overseer-hive-at-example.com", "password": "testpass123"}).json()["access_token"]
 
     hive = client.get("/api/hive", headers={"Authorization": f"Bearer {overseer_token}"})
     assert next(item for item in hive.json()["hive"] if item["swarm_id"] == swarm_id)["can_view"] is True
@@ -802,19 +899,19 @@ def test_hive_overseer_can_view_drone_but_not_mutate(client):
 
 
 def test_unauthorized_user_cannot_view_private_drone_details(client):
-    client.post("/api/auth/register", json={"email": "private-owner@example.com", "password": "testpass123"})
-    client.post("/api/auth/register", json={"email": "outsider@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "private-owner@example.com", "username": "private-owner-at-example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "outsider@example.com", "username": "outsider-at-example.com", "password": "testpass123"})
     owner = db.get_user_by_email("private-owner@example.com")
     db.create_device(owner["id"], "private-drone", "Private Drone", {"ip_address": "10.0.0.11"}, raw_token="drone-token")
-    outsider_token = client.post("/api/auth/login", json={"email": "outsider@example.com", "password": "testpass123"}).json()["access_token"]
+    outsider_token = client.post("/api/auth/login", json={"email": "outsider@example.com", "username": "outsider-at-example.com", "password": "testpass123"}).json()["access_token"]
 
     response = client.get("/api/devices/private-drone", headers={"Authorization": f"Bearer {outsider_token}"})
     assert response.status_code == 404
 
 
 def test_download_state_and_cancel_rbac(client):
-    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
-    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"}).json()["access_token"]
     swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {owner_token}"}).json()["swarms"][0]["id"]
     owner = db.get_user_by_email("owner@example.com")
     db.create_device(owner["id"], "target-a", "Target A", {"ip_address": "10.0.0.2"}, raw_token="drone-token", swarm_id=swarm_id)
@@ -897,8 +994,8 @@ def test_download_state_and_cancel_rbac(client):
         headers={"Authorization": f"Bearer {owner_token}"},
         json={"email": "viewer@example.com", "role": "overseer"},
     )
-    client.post("/api/auth/register", json={"email": "viewer@example.com", "password": "testpass123"})
-    viewer_token = client.post("/api/auth/login", json={"email": "viewer@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "viewer@example.com", "username": "viewer-at-example.com", "password": "testpass123"})
+    viewer_token = client.post("/api/auth/login", json={"email": "viewer@example.com", "username": "viewer-at-example.com", "password": "testpass123"}).json()["access_token"]
 
     viewer_downloads = client.get("/api/downloads", headers={"Authorization": f"Bearer {viewer_token}"})
     assert viewer_downloads.status_code == 200
@@ -937,6 +1034,7 @@ def test_register_device_requires_authorization_token(client):
         "/api/auth/register",
         json={
             "email": "test@example.com",
+            "username": "test-at-example.com",
             "password": "testpass123",
         }
     )
@@ -954,11 +1052,11 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
     """A valid integration token creates a pending Drone until the Overlord approves it."""
     client.post(
         "/api/auth/register",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     )
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     )
     token = login_response.json()["access_token"]
     token_response = client.post(
@@ -1060,8 +1158,8 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
 
 def test_reapproving_same_drone_updates_existing_device_instead_of_duplicating(client):
     """Repeated approval with a new authorization token keeps one visible Drone record."""
-    client.post("/api/auth/register", json={"email": "dedupe@example.com", "password": "testpass123"})
-    login_response = client.post("/api/auth/login", json={"email": "dedupe@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "dedupe@example.com", "username": "dedupe-at-example.com", "password": "testpass123"})
+    login_response = client.post("/api/auth/login", json={"email": "dedupe@example.com", "username": "dedupe-at-example.com", "password": "testpass123"})
     token = login_response.json()["access_token"]
 
     first_token_response = client.post(
@@ -1101,7 +1199,7 @@ def test_reapproving_same_drone_updates_existing_device_instead_of_duplicating(c
 
 def test_existing_duplicate_drone_records_are_collapsed(client):
     """Persisted duplicate records for one physical Drone are collapsed on read."""
-    client.post("/api/auth/register", json={"email": "collapse@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "collapse@example.com", "username": "collapse-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("collapse@example.com")
     internal_id = db.create_device(user["id"], "duplicate-drone", "Original", {"ip_address": "10.0.0.2"}, raw_token="token")
     db.devices["manual-duplicate"] = {
@@ -1111,7 +1209,7 @@ def test_existing_duplicate_drone_records_are_collapsed(client):
     }
     db.user_devices[user["id"]].append("manual-duplicate")
 
-    login_response = client.post("/api/auth/login", json={"email": "collapse@example.com", "password": "testpass123"})
+    login_response = client.post("/api/auth/login", json={"email": "collapse@example.com", "username": "collapse-at-example.com", "password": "testpass123"})
     token = login_response.json()["access_token"]
     response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
@@ -1124,11 +1222,11 @@ def test_register_device_resolves_owner_from_token_without_email(client):
     """Drone registration no longer needs the Overmind email when the token is valid."""
     client.post(
         "/api/auth/register",
-        json={"email": "token-owner@example.com", "password": "testpass123"},
+        json={"email": "token-owner@example.com", "username": "token-owner-at-example.com", "password": "testpass123"},
     )
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "token-owner@example.com", "password": "testpass123"},
+        json={"email": "token-owner@example.com", "username": "token-owner-at-example.com", "password": "testpass123"},
     )
     token = login_response.json()["access_token"]
     token_response = client.post(
@@ -1159,11 +1257,11 @@ def test_register_device_resolves_owner_from_token_without_email(client):
 def test_integration_token_onboarding_and_approved_token_claim(client):
     client.post(
         "/api/auth/register",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     )
     token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     token_response = client.post(
         "/api/integration-tokens",
@@ -1193,10 +1291,10 @@ def test_integration_token_onboarding_and_approved_token_claim(client):
 
 
 def test_integration_token_cannot_register_different_drone(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     user_token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     auth_token = client.post(
         "/api/integration-tokens",
@@ -1219,10 +1317,10 @@ def test_integration_token_cannot_register_different_drone(client):
 
 
 def test_integration_token_cannot_register_same_id_with_different_certificate(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     user_token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     auth_token = client.post(
         "/api/integration-tokens",
@@ -1258,10 +1356,10 @@ def test_integration_token_cannot_register_same_id_with_different_certificate(cl
 
 
 def test_approval_preserves_bound_token_and_heartbeat_succeeds(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     user_token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     auth_token = client.post(
         "/api/integration-tokens",
@@ -1307,10 +1405,10 @@ def test_approval_preserves_bound_token_and_heartbeat_succeeds(client):
 
 
 def test_approval_updates_existing_removed_drone_to_new_bound_token(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     user_token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     first_auth = client.post(
         "/api/integration-tokens",
@@ -1355,10 +1453,10 @@ def test_approval_updates_existing_removed_drone_to_new_bound_token(client):
 
 
 def test_revoked_integration_token_invalidates_backed_drone_token(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     user_token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     token_payload = client.post(
         "/api/integration-tokens",
@@ -1394,11 +1492,11 @@ def test_deny_pending_drone_connection(client):
     """Unauthorized registration no longer creates a pending connection to deny."""
     client.post(
         "/api/auth/register",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     )
     token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     register_response = client.post(
         "/api/devices/register",
@@ -1436,11 +1534,11 @@ def test_list_devices_uses_authorization_header(client):
     """Authenticated routes should accept Bearer token from header."""
     client.post(
         "/api/auth/register",
-        json={"email": "auth-header@example.com", "password": "testpass123"},
+        json={"email": "auth-header@example.com", "username": "auth-header-at-example.com", "password": "testpass123"},
     )
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "auth-header@example.com", "password": "testpass123"},
+        json={"email": "auth-header@example.com", "username": "auth-header-at-example.com", "password": "testpass123"},
     )
     token = login_response.json()["access_token"]
     response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
@@ -1453,7 +1551,7 @@ def test_demo_seed_exposes_devices_and_systems(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     assert login_response.status_code == 200
     token = login_response.json()["access_token"]
@@ -1490,7 +1588,7 @@ def test_demo_seed_exposes_pending_drone_connections(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     token = login_response.json()["access_token"]
 
@@ -1509,7 +1607,7 @@ def test_demo_seed_exposes_pending_drone_connections(client):
 
 def test_drone_heartbeat_updates_device_name(client):
     """Device name is controlled by the Drone heartbeat."""
-    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("owner@example.com")
     db.create_device(user["id"], "drone-a", "Old Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
 
@@ -1528,7 +1626,7 @@ def test_delete_device_removes_device_and_related_data(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     token = login_response.json()["access_token"]
 
@@ -1555,7 +1653,7 @@ def test_delete_device_removes_device_and_related_data(client):
 
 
 def test_drone_self_disconnect_removes_from_swarm_without_pending_connection(client):
-    client.post("/api/auth/register", json={"email": "disconnect@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "disconnect@example.com", "username": "disconnect-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("disconnect@example.com")
     db.create_device(user["id"], "disconnect-drone", "Disconnect Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
 
@@ -1565,7 +1663,7 @@ def test_drone_self_disconnect_removes_from_swarm_without_pending_connection(cli
     )
     assert disconnect_response.status_code == 200
 
-    login_response = client.post("/api/auth/login", json={"email": "disconnect@example.com", "password": "testpass123"})
+    login_response = client.post("/api/auth/login", json={"email": "disconnect@example.com", "username": "disconnect-at-example.com", "password": "testpass123"})
     token = login_response.json()["access_token"]
     devices_response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
     assert all(device["device_id"] != "disconnect-drone" for device in devices_response.json()["devices"])
@@ -1574,10 +1672,10 @@ def test_drone_self_disconnect_removes_from_swarm_without_pending_connection(cli
 
 
 def test_swarm_master_list_deduplicates_by_md5_and_activity_search(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("test@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="a")
@@ -1605,10 +1703,10 @@ def test_swarm_master_list_deduplicates_by_md5_and_activity_search(client):
 
 
 def test_drone_sync_activity_endpoint_upserts_by_sync_id(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("test@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
@@ -1655,10 +1753,10 @@ def test_drone_sync_activity_endpoint_upserts_by_sync_id(client):
 
 
 def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("test@example.com")
     db.create_device(user["id"], "source-without-rom", "Source Without ROM", {"ip_address": "10.0.0.2"}, raw_token="a")
@@ -1684,10 +1782,10 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
 
 
 def test_sync_folder_rom_payload_matches_by_path_without_md5(client):
-    client.post("/api/auth/register", json={"email": "folder@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "folder@example.com", "username": "folder-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "folder@example.com", "password": "testpass123"},
+        json={"email": "folder@example.com", "username": "folder-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("folder@example.com")
     db.create_device(user["id"], "source-with-folder", "Source Folder", {"ip_address": "10.0.0.3"}, raw_token="b")
@@ -1714,10 +1812,10 @@ def test_sync_folder_rom_payload_matches_by_path_without_md5(client):
 
 
 def test_rom_metadata_upload_persists_bios_and_master_bios(client):
-    client.post("/api/auth/register", json={"email": "bios@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "bios@example.com", "username": "bios-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "bios@example.com", "password": "testpass123"},
+        json={"email": "bios@example.com", "username": "bios-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("bios@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
@@ -1752,7 +1850,7 @@ def test_rom_metadata_upload_persists_bios_and_master_bios(client):
 
 
 def test_rom_metadata_hash_patch_enriches_existing_inventory_without_replacing_roms(client):
-    client.post("/api/auth/register", json={"email": "hashes@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "hashes@example.com", "username": "hashes-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("hashes@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
 
@@ -1796,10 +1894,10 @@ def test_rom_metadata_hash_patch_enriches_existing_inventory_without_replacing_r
 
 
 def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client):
-    client.post("/api/auth/register", json={"email": "sync-bios@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "sync-bios@example.com", "username": "sync-bios-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "sync-bios@example.com", "password": "testpass123"},
+        json={"email": "sync-bios@example.com", "username": "sync-bios-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("sync-bios@example.com")
     db.create_device(user["id"], "source-without-bios", "Source Without BIOS", {"ip_address": "10.0.0.2"}, raw_token="a")
@@ -1826,10 +1924,10 @@ def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client)
 
 
 def test_asset_metadata_upload_persists_artwork_and_master_artwork(client):
-    client.post("/api/auth/register", json={"email": "artwork@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "artwork@example.com", "username": "artwork-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "artwork@example.com", "password": "testpass123"},
+        json={"email": "artwork@example.com", "username": "artwork-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("artwork@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
@@ -1866,10 +1964,10 @@ def test_asset_metadata_upload_persists_artwork_and_master_artwork(client):
 
 
 def test_sync_artwork_action_payload_includes_only_source_devices_with_artwork(client):
-    client.post("/api/auth/register", json={"email": "sync-artwork@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "sync-artwork@example.com", "username": "sync-artwork-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "sync-artwork@example.com", "password": "testpass123"},
+        json={"email": "sync-artwork@example.com", "username": "sync-artwork-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("sync-artwork@example.com")
     db.create_device(user["id"], "source-without-artwork", "Source Without Artwork", {"ip_address": "10.0.0.2"}, raw_token="a")
@@ -1902,10 +2000,10 @@ def test_sync_artwork_action_payload_includes_only_source_devices_with_artwork(c
 
 
 def test_bulk_sync_artwork_filters_sources_and_systems(client):
-    client.post("/api/auth/register", json={"email": "bulk-artwork@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "bulk-artwork@example.com", "username": "bulk-artwork-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "bulk-artwork@example.com", "password": "testpass123"},
+        json={"email": "bulk-artwork@example.com", "username": "bulk-artwork-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("bulk-artwork@example.com")
     db.create_device(user["id"], "source-a", "Source A", {"ip_address": "10.0.0.2"}, raw_token="a")
@@ -1948,10 +2046,10 @@ def test_bulk_sync_artwork_filters_sources_and_systems(client):
 
 
 def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
-    client.post("/api/auth/register", json={"email": "test@example.com", "password": "testpass123"})
+    client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
-        json={"email": "test@example.com", "password": "testpass123"},
+        json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("test@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="a")
@@ -1985,7 +2083,7 @@ def test_device_action_lifecycle(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     token = login_response.json()["access_token"]
 
@@ -2190,7 +2288,7 @@ def test_action_claim_returns_all_pending_actions_in_order(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     token = login_response.json()["access_token"]
     first = client.post(
@@ -2221,7 +2319,7 @@ def test_shutdown_action_is_rejected_by_api(client):
     db.populate_fake_data()
     token = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     ).json()["access_token"]
 
     response = client.post(
@@ -2237,7 +2335,7 @@ def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
     db.populate_fake_data()
     token = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     ).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -2287,6 +2385,34 @@ def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
     assert "Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}" in tile_renderer
 
 
+def test_profile_swarm_access_exposes_remove_overseer_action():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "m.role === 'overseer'" in js
+    assert "Remove Overseer" in js
+    assert "Remove this Overseer from the swarm?" in js
+
+
+def test_profile_swarm_access_exposes_pending_invite_resend_action():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "i.status === 'pending'" in js
+    assert "Resend Invite" in js
+    assert "function resendOverseerInvite(invitationId)" in js
+    assert "/invitations/${encodeURIComponent(invitationId)}/resend" in js
+    assert "previous invitation link will no longer work" in js
+
+
+def test_signup_form_requires_username_and_posts_it():
+    root = Path(__file__).resolve().parents[1]
+    html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert 'id="register-username" maxlength="80" required' in html
+    assert "const username = document.getElementById('register-username').value.trim();" in js
+    assert "JSON.stringify({ email, username, password, invitation_token: pendingInvitationToken })" in js
+
+
 def test_invite_registration_ui_clears_pending_token_before_login():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     assert "pendingInvitationToken = null;" in js
@@ -2315,7 +2441,7 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     token = login_response.json()["access_token"]
 
@@ -2365,7 +2491,7 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     token = login_response.json()["access_token"]
 
@@ -2429,7 +2555,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     token = login_response.json()["access_token"]
 
@@ -2528,8 +2654,8 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
 
 
 def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):
-    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
-    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"}).json()["access_token"]
     swarm_id = db.default_swarm_id(db.get_user_by_email("owner@example.com")["id"])
 
     invite_response = client.post(
@@ -2546,13 +2672,13 @@ def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):
 
     mismatch = client.post(
         "/api/auth/register",
-        json={"email": "someone-else@example.com", "password": "testpass123", "invitation_token": raw_token},
+        json={"email": "someone-else@example.com", "username": "someone-else-at-example.com", "password": "testpass123", "invitation_token": raw_token},
     )
     assert mismatch.status_code == 403
 
     registered = client.post(
         "/api/auth/register",
-        json={"email": "new-user@example.com", "password": "testpass123", "invitation_token": raw_token},
+        json={"email": "new-user@example.com", "username": "new-user-at-example.com", "password": "testpass123", "invitation_token": raw_token},
     )
     assert registered.status_code == 200
     new_user = db.get_user_by_email("new-user@example.com")
@@ -2561,8 +2687,8 @@ def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):
 
 
 def test_invitation_accept_is_idempotent_after_invite_registration(client):
-    client.post("/api/auth/register", json={"email": "owner@example.com", "password": "testpass123"})
-    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"}).json()["access_token"]
     swarm_id = db.default_swarm_id(db.get_user_by_email("owner@example.com")["id"])
 
     client.post(
@@ -2577,13 +2703,13 @@ def test_invitation_accept_is_idempotent_after_invite_registration(client):
 
     registered = client.post(
         "/api/auth/register",
-        json={"email": "new-overseer@example.com", "password": "testpass123", "invitation_token": raw_token},
+        json={"email": "new-overseer@example.com", "username": "new-overseer-at-example.com", "password": "testpass123", "invitation_token": raw_token},
     )
     assert registered.status_code == 200
 
     login = client.post(
         "/api/auth/login",
-        json={"email": "new-overseer@example.com", "password": "testpass123"},
+        json={"email": "new-overseer@example.com", "username": "new-overseer-at-example.com", "password": "testpass123"},
     )
     assert login.status_code == 200
     overseer_token = login.json()["access_token"]
@@ -2620,7 +2746,7 @@ def test_profile_and_settings_update(client):
     db.populate_fake_data()
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "demo@example.com", "password": "DemoPass123"},
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     )
     token = login_response.json()["access_token"]
 
@@ -2664,6 +2790,31 @@ def test_profile_and_settings_update(client):
     )
     assert swarm_update.status_code == 200
     assert swarm_update.json()["swarm"]["name"] == "Demo Swarm"
+
+
+def test_profile_username_change_cannot_take_existing_username(client):
+    client.post(
+        "/api/auth/register",
+        json={"email": "alpha@example.com", "username": "ArcadeAlpha", "password": "testpass123"},
+    )
+    client.post(
+        "/api/auth/register",
+        json={"email": "beta@example.com", "username": "ArcadeBeta", "password": "testpass123"},
+    )
+    beta_token = client.post(
+        "/api/auth/login",
+        json={"email": "beta@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+
+    duplicate = client.patch(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {beta_token}"},
+        json={"username": "arcadealpha"},
+    )
+
+    assert duplicate.status_code == 400
+    assert duplicate.json()["detail"] == "Username already registered"
+    assert db.get_user_by_email("beta@example.com")["username"] == "ArcadeBeta"
 
 
 if __name__ == "__main__":

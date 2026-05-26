@@ -33,6 +33,7 @@ class BatoceraInfo(BaseModel):
 class UserRegister(BaseModel):
     """User registration request."""
     email: EmailStr
+    username: str = Field(..., min_length=1, max_length=80)
     password: str = Field(..., min_length=8, description="Password must be at least 8 characters")
     full_name: Optional[str] = None
     invitation_token: Optional[str] = None
@@ -75,6 +76,7 @@ class User(BaseModel):
     """User model."""
     id: str
     email: EmailStr
+    username: Optional[str] = None
     full_name: Optional[str] = None
     created_at: datetime
 

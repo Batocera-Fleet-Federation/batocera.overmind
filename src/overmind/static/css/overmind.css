@@ -175,6 +175,10 @@
       margin: 1.5rem 0;
     }
     .landing-shell .feature-pill {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      column-gap: .65rem;
       background: rgba(21, 31, 50, 0.84);
       border: 1px solid var(--admin-border);
       border-radius: 1rem;
@@ -186,18 +190,18 @@
     .landing-shell .feature-pill i {
       color: var(--admin-sidebar-accent);
       font-size: 1.35rem;
-      margin-bottom: .5rem;
-      display: inline-block;
+      display: block;
     }
     .landing-shell .feature-pill h3 {
       color: var(--admin-text);
       font-size: 1rem;
       font-weight: 900;
-      margin: 0 0 .35rem;
+      margin: 0;
     }
     .landing-shell .feature-pill p {
+      grid-column: 1 / -1;
       color: var(--admin-muted);
-      margin: 0;
+      margin: .5rem 0 0;
       font-size: .95rem;
       line-height: 1.45;
     }
