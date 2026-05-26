@@ -86,6 +86,9 @@ class FakeDatabase:
         "remove_swarm_member",
         "update_swarm_member_role",
         "update_swarm_name",
+        "admin_delete_device",
+        "admin_delete_swarm",
+        "admin_delete_user",
     }
 
     def __getattribute__(self, name):
@@ -1024,6 +1027,72 @@ class FakeDatabase:
         ]
         self.pending_drone_connections.pop(device_id, None)
         self._persist_state()
+        return True
+
+    def admin_delete_device(self, device_id: str) -> bool:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return False
+        internal_id = device["id"]
+        owner_id = device.get("user_id")
+        self.devices.pop(internal_id, None)
+        self.device_admin_claims.pop(internal_id, None)
+        for bucket in (
+            self.roms,
+            self.bios,
+            self.artwork,
+            self.gamelogs,
+            self.device_actions,
+            self.speed_samples,
+            self.device_events,
+            self.peer_checks,
+            self.rom_sync_activity,
+        ):
+            bucket.pop(internal_id, None)
+        self.download_states.pop(internal_id, None)
+        self.pending_drone_connections.pop(device_id, None)
+        self.approved_drone_tokens.pop(device_id, None)
+        if owner_id in self.user_devices:
+            self.user_devices[owner_id] = [row for row in self.user_devices.get(owner_id, []) if row != internal_id]
+        return True
+
+    def admin_delete_swarm(self, swarm_id: str) -> bool:
+        swarm = self.swarms.get(swarm_id)
+        if not swarm:
+            return False
+        for device in list(self.devices.values()):
+            if device.get("swarm_id") == swarm_id:
+                self.admin_delete_device(device.get("device_id"))
+        self.swarms.pop(swarm_id, None)
+        self.swarm_memberships.pop(swarm_id, None)
+        for invite_id, invite in list(self.invitations.items()):
+            if invite.get("swarm_id") == swarm_id:
+                self.invitations.pop(invite_id, None)
+        return True
+
+    def admin_delete_user(self, user_id: str) -> bool:
+        user = self.users.get(user_id)
+        if not user:
+            return False
+        for device in list(self.devices.values()):
+            if device.get("user_id") == user_id:
+                self.admin_delete_device(device.get("device_id"))
+        for swarm_id, swarm in list(self.swarms.items()):
+            if swarm.get("owner_id") == user_id:
+                self.admin_delete_swarm(swarm_id)
+        for members in self.swarm_memberships.values():
+            members.pop(user_id, None)
+        for invite_id, invite in list(self.invitations.items()):
+            if invite.get("invited_by") == user_id or invite.get("email") == str(user.get("email") or "").lower():
+                self.invitations.pop(invite_id, None)
+        self.integration_tokens.pop(user_id, None)
+        self.user_devices.pop(user_id, None)
+        self.email_verifications.pop(user_id, None)
+        for reset_id, reset in list(self.password_resets.items()):
+            if reset.get("user_id") == user_id:
+                self.password_resets.pop(reset_id, None)
+        self.user_by_email.pop(user.get("email"), None)
+        self.users.pop(user_id, None)
         return True
 
     def create_device_action(

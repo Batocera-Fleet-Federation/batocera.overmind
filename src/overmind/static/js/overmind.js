@@ -86,6 +86,7 @@
             let pendingInvitationToken = sessionStorage.getItem('pending_invitation_token') || null;
             const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
             const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
+            const SUPER_ADMIN_EMAIL = 'mr_jerrodh@hotmail.com';
             const MASTER_ROM_PAGE_SIZE = 100;
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
@@ -93,6 +94,7 @@
                 devices: ['My Swarm', 'Systems and ROMs'],
                 hive: ['The Hive', 'Browse public swarm listings'],
                 profile: ['Profile', 'Account, access, and preferences'],
+                'super-admin': ['Super Admin', 'Users, swarms, and drones'],
                 help: ['Help', 'Install, connect, and configure Drones'],
             };
 
@@ -584,6 +586,7 @@
 	            function showDashboard() {
                 hideLandingShell();
                 document.body.classList.add('is-authenticated');
+                updateSuperAdminVisibility();
                 document.getElementById('auth-section').classList.remove('active');
                 document.getElementById('dashboard-section').classList.add('active');
                 document.getElementById('auth-section').style.display = 'none';
@@ -795,10 +798,22 @@
                     const response = await apiGet('/api/profile');
                     if (!response.ok) throw new Error('Failed to load profile');
                     currentProfile = await response.json();
+                    updateSuperAdminVisibility();
                     renderProfileUI();
                 } catch (error) {
                     console.error('Error loading profile:', error);
                 }
+            }
+
+            function isSuperAdmin() {
+                const email = String((currentUser && currentUser.email) || (currentProfile && currentProfile.email) || '').trim().toLowerCase();
+                return email === SUPER_ADMIN_EMAIL;
+            }
+
+            function updateSuperAdminVisibility() {
+                document.querySelectorAll('.super-admin-only').forEach(node => {
+                    node.style.display = isSuperAdmin() ? '' : 'none';
+                });
             }
 
             function ensureProfileState() {
@@ -2882,7 +2897,7 @@
                 const raw = window.location.hash || '#/devices';
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
-                const allowed = ['devices', 'hive', 'profile', 'help'];
+                const allowed = ['devices', 'hive', 'profile', 'super-admin', 'help'];
                 if ((parts[0] === 'systems' || parts[0] === 'bios' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
@@ -3043,6 +3058,100 @@
                     .replace(/'/g, '&#39;');
             }
 
+            function formatAdminDate(value) {
+                return value ? new Date(value).toLocaleString() : 'n/a';
+            }
+
+            async function loadSuperAdmin() {
+                const summary = document.getElementById('super-admin-summary');
+                const container = document.getElementById('super-admin-content');
+                if (!summary || !container) return;
+                if (!isSuperAdmin()) {
+                    container.innerHTML = '<div class="empty-state">Super admin access required.</div>';
+                    return;
+                }
+                container.innerHTML = '<div class="empty-state">Loading admin data...</div>';
+                try {
+                    const response = await apiGet('/api/admin/overview');
+                    if (!response.ok) throw new Error('Failed to load admin data');
+                    const data = await response.json();
+                    const users = data.users || [];
+                    const swarms = data.swarms || [];
+                    const drones = data.drones || [];
+                    summary.innerHTML = `
+                        <span class="badge text-bg-primary">Users: ${users.length}</span>
+                        <span class="badge text-bg-primary">Swarms: ${swarms.length}</span>
+                        <span class="badge text-bg-primary">Drones: ${drones.length}</span>
+                    `;
+                    container.innerHTML = `
+                        <div class="device-card mb-3">
+                            <h4 class="h5">Users</h4>
+                            <div class="table-responsive"><table class="table table-sm align-middle">
+                                <thead><tr><th>Email</th><th>Name</th><th>Provider</th><th>Status</th><th>Swarms</th><th>Drones</th><th></th></tr></thead>
+                                <tbody>${users.map(user => `
+                                    <tr>
+                                        <td>${escapeHtml(user.email)}</td>
+                                        <td>${escapeHtml(user.full_name || user.username || '')}</td>
+                                        <td>${escapeHtml(user.auth_provider || 'password')}</td>
+                                        <td>${user.is_active ? '<span class="badge text-bg-success">active</span>' : '<span class="badge text-bg-warning">inactive</span>'}</td>
+                                        <td>${Number(user.swarm_count || 0)} (${Number(user.owned_swarm_count || 0)} owned)</td>
+                                        <td>${Number(user.drone_count || 0)}</td>
+                                        <td class="text-end">${user.is_super_admin ? '<span class="badge text-bg-secondary">super admin</span>' : `<button class="btn btn-outline-danger btn-sm" onclick="deleteSuperAdminRecord('users', '${escapeHtml(user.id)}')">Delete</button>`}</td>
+                                    </tr>`).join('') || '<tr><td colspan="7" class="text-muted">No users.</td></tr>'}</tbody>
+                            </table></div>
+                        </div>
+                        <div class="device-card mb-3">
+                            <h4 class="h5">Swarms</h4>
+                            <div class="table-responsive"><table class="table table-sm align-middle">
+                                <thead><tr><th>Name</th><th>Owner</th><th>Members</th><th>Drones</th><th>Created</th><th></th></tr></thead>
+                                <tbody>${swarms.map(swarm => `
+                                    <tr>
+                                        <td>${escapeHtml(swarm.name)}</td>
+                                        <td>${escapeHtml(swarm.owner_email || swarm.owner_id)}</td>
+                                        <td>${Number(swarm.member_count || 0)}</td>
+                                        <td>${Number(swarm.drone_count || 0)}</td>
+                                        <td>${formatAdminDate(swarm.created_at)}</td>
+                                        <td class="text-end"><button class="btn btn-outline-danger btn-sm" onclick="deleteSuperAdminRecord('swarms', '${escapeHtml(swarm.id)}')">Delete</button></td>
+                                    </tr>`).join('') || '<tr><td colspan="6" class="text-muted">No swarms.</td></tr>'}</tbody>
+                            </table></div>
+                        </div>
+                        <div class="device-card">
+                            <h4 class="h5">Drones</h4>
+                            <div class="table-responsive"><table class="table table-sm align-middle">
+                                <thead><tr><th>Name</th><th>Drone ID</th><th>Owner</th><th>Swarm</th><th>Status</th><th>Last Seen</th><th></th></tr></thead>
+                                <tbody>${drones.map(drone => `
+                                    <tr>
+                                        <td>${escapeHtml(drone.device_name || 'Drone')}</td>
+                                        <td class="mono">${escapeHtml(drone.device_id)}</td>
+                                        <td>${escapeHtml(drone.owner_email || drone.user_id)}</td>
+                                        <td>${escapeHtml(drone.swarm_name || drone.swarm_id || '')}</td>
+                                        <td><span class="badge ${drone.approval_status === 'approved' ? 'text-bg-success' : 'text-bg-secondary'}">${escapeHtml(drone.approval_status || 'unknown')}</span></td>
+                                        <td>${formatAdminDate(drone.last_seen)}</td>
+                                        <td class="text-end"><button class="btn btn-outline-danger btn-sm" onclick="deleteSuperAdminRecord('drones', '${escapeHtml(drone.device_id)}')">Delete</button></td>
+                                    </tr>`).join('') || '<tr><td colspan="7" class="text-muted">No drones.</td></tr>'}</tbody>
+                            </table></div>
+                        </div>
+                    `;
+                } catch (error) {
+                    console.error('Error loading super admin data:', error);
+                    container.innerHTML = '<div class="empty-state">Unable to load super admin data.</div>';
+                }
+            }
+
+            async function deleteSuperAdminRecord(kind, id) {
+                if (!isSuperAdmin()) return;
+                if (!window.confirm(`Delete this ${kind.slice(0, -1)}? This cannot be undone.`)) return;
+                try {
+                    const response = await apiDelete(`/api/admin/${kind}/${encodeURIComponent(id)}`);
+                    if (!response.ok) throw new Error(`Failed to delete ${kind}`);
+                    await loadSuperAdmin();
+                    showMessage('Deleted.', 'success');
+                } catch (error) {
+                    console.error('Error deleting admin record:', error);
+                    showMessage(error.message || 'Delete failed.', 'error');
+                }
+            }
+
             async function deleteSelectedDevice() {
                 if (!selectedDeviceId) return;
                 const current = currentDevices.find(d => d.device_id === selectedDeviceId);
@@ -3082,6 +3191,7 @@
                     devices: 'devices-tab',
                     hive: 'hive-tab',
                     profile: 'profile-tab',
+                    'super-admin': 'super-admin-tab',
                     help: 'help-tab',
                 };
                 const tabElement = document.getElementById(tabMap[tabName]);
@@ -3095,6 +3205,7 @@
                 }
                 if (tabName === 'profile') renderProfileUI();
                 if (tabName === 'hive') loadHive();
+                if (tabName === 'super-admin') loadSuperAdmin();
                 updateSelectedDeviceSummary();
                 applyRbacUI();
                 setPageChrome(tabName);

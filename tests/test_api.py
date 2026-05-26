@@ -169,6 +169,58 @@ def test_social_auth_activates_existing_unverified_user(client, monkeypatch):
     assert db.default_swarm_id(user["id"])
 
 
+def test_super_admin_overview_and_delete_permissions(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"})
+    admin_token = client.post(
+        "/api/auth/login",
+        json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"},
+    ).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "regular@example.com", "password": "testpass123"})
+    regular_token = client.post(
+        "/api/auth/login",
+        json={"email": "regular@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    regular_user = db.get_user_by_email("regular@example.com")
+    db.create_device(regular_user["id"], "admin-visible-drone", "Admin Visible Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    denied = client.get("/api/admin/overview", headers={"Authorization": f"Bearer {regular_token}"})
+    assert denied.status_code == 403
+
+    overview = client.get("/api/admin/overview", headers={"Authorization": f"Bearer {admin_token}"})
+    assert overview.status_code == 200
+    payload = overview.json()
+    assert any(user["email"] == "regular@example.com" for user in payload["users"])
+    assert any(drone["device_id"] == "admin-visible-drone" for drone in payload["drones"])
+
+    self_delete = client.delete(
+        f"/api/admin/users/{db.get_user_by_email('mr_jerrodh@hotmail.com')['id']}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert self_delete.status_code == 400
+
+    delete_drone = client.delete("/api/admin/drones/admin-visible-drone", headers={"Authorization": f"Bearer {admin_token}"})
+    assert delete_drone.status_code == 200
+    assert db.get_device_by_device_id("admin-visible-drone") is None
+
+
+def test_super_admin_delete_user_removes_owned_swarms_and_drones(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"})
+    admin_token = client.post(
+        "/api/auth/login",
+        json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"},
+    ).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "remove-me@example.com", "password": "testpass123"})
+    target = db.get_user_by_email("remove-me@example.com")
+    swarm_id = db.default_swarm_id(target["id"])
+    db.create_device(target["id"], "remove-me-drone", "Remove Me Drone", {"ip_address": "10.0.0.3"}, raw_token="drone-token")
+
+    response = client.delete(f"/api/admin/users/{target['id']}", headers={"Authorization": f"Bearer {admin_token}"})
+    assert response.status_code == 200
+    assert db.get_user_by_email("remove-me@example.com") is None
+    assert swarm_id not in db.swarms
+    assert db.get_device_by_device_id("remove-me-drone") is None
+
+
 def test_email_registration_requires_verification(client, monkeypatch):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
     response = client.post(

@@ -174,6 +174,7 @@
                             <a href="#/hive" role="button" class="btn nav-btn requires-auth" data-tab="hive" onclick="event.preventDefault(); switchTab('hive', this)"><i class="bi bi-diagram-3 me-2"></i>The Hive</a>
 
                             <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i><span id="profile-nav-label">Profile</span></a>
+                            <a href="#/super-admin" role="button" class="btn nav-btn requires-auth super-admin-only" data-tab="super-admin" style="display:none" onclick="event.preventDefault(); switchTab('super-admin', this)"><i class="bi bi-command me-2"></i>Super Admin</a>
                             <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
                         </div>
                     </div>
@@ -464,6 +465,17 @@
                             </div>
                             <div id="hive-list" class="row g-3">
                                 <div class="empty-state">Loading swarms...</div>
+                            </div>
+                        </div>
+
+                        <div id="super-admin-tab" class="content-section dashboard-tab" style="display: none;">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                                <h3 class="mb-0">Super Admin</h3>
+                                <button class="btn btn-outline-primary btn-sm" type="button" onclick="loadSuperAdmin()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                            </div>
+                            <div id="super-admin-summary" class="d-flex flex-wrap gap-2 mb-3"></div>
+                            <div id="super-admin-content">
+                                <div class="empty-state">Loading admin data...</div>
                             </div>
                         </div>
 

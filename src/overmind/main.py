@@ -29,6 +29,8 @@ from overmind.drone_ca import sign_drone_csr
 from overmind.drone_security import generate_drone_token, hash_drone_token
 from overmind.postgres_store import database_url, postgres_store
 
+SUPER_ADMIN_EMAIL = "mr_jerrodh@hotmail.com"
+
 SUPPORTED_DEVICE_ACTIONS = {
     "restart",
     "update",
@@ -329,6 +331,64 @@ def require_device_admin(user: dict, device: dict) -> dict:
     if db.user_has_device_admin_claim(user["id"], device.get("device_id")):
         return {"user_id": user["id"], "role": "overlord", "source": "device_ownership_claim"}
     return require_swarm_role(user, device["swarm_id"], {"overlord"})
+
+
+def require_super_admin(authorization: Optional[str]) -> dict:
+    user = get_current_user(authorization)
+    if str(user.get("email") or "").strip().lower() != SUPER_ADMIN_EMAIL:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    return user
+
+
+def admin_user_row(user: dict) -> dict:
+    user_id = user.get("id")
+    return {
+        "id": user_id,
+        "email": user.get("email"),
+        "username": user.get("username"),
+        "full_name": user.get("full_name"),
+        "auth_provider": user.get("auth_provider"),
+        "email_verified": bool(user.get("email_verified")),
+        "is_active": bool(user.get("is_active")),
+        "created_at": user.get("created_at"),
+        "swarm_count": sum(1 for members in db.swarm_memberships.values() if user_id in members),
+        "owned_swarm_count": sum(1 for swarm in db.swarms.values() if swarm.get("owner_id") == user_id),
+        "drone_count": sum(1 for device in db.devices.values() if device.get("user_id") == user_id),
+        "is_super_admin": str(user.get("email") or "").strip().lower() == SUPER_ADMIN_EMAIL,
+    }
+
+
+def admin_swarm_row(swarm: dict) -> dict:
+    owner = db.get_user(swarm.get("owner_id")) or {}
+    swarm_id = swarm.get("id")
+    return {
+        "id": swarm_id,
+        "name": swarm.get("name"),
+        "owner_id": swarm.get("owner_id"),
+        "owner_email": owner.get("email"),
+        "created_at": swarm.get("created_at"),
+        "member_count": len(db.swarm_memberships.get(swarm_id, {})),
+        "drone_count": sum(1 for device in db.devices.values() if device.get("swarm_id") == swarm_id),
+    }
+
+
+def admin_drone_row(device: dict) -> dict:
+    owner = db.get_user(device.get("user_id")) or {}
+    swarm = db.swarms.get(device.get("swarm_id")) or {}
+    return {
+        "id": device.get("id"),
+        "device_id": device.get("device_id"),
+        "device_name": device.get("device_name"),
+        "user_id": device.get("user_id"),
+        "owner_email": owner.get("email"),
+        "swarm_id": device.get("swarm_id"),
+        "swarm_name": swarm.get("name"),
+        "approval_status": device.get("approval_status", "approved"),
+        "swarm_connected": bool(device.get("swarm_connected")),
+        "registered_at": device.get("registered_at"),
+        "last_seen": device.get("last_seen"),
+        "reachable_url": device.get("reachable_url"),
+    }
 
 
 def public_swarm_name(swarm: dict) -> str:
@@ -651,6 +711,42 @@ async def list_swarms(authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     default_swarm_id = db.default_swarm_id(user["id"])
     return {"swarms": [{**swarm, "current": swarm.get("id") == default_swarm_id} for swarm in db.get_user_swarms(user["id"])]}
+
+
+@app.get("/api/admin/overview")
+async def admin_overview(authorization: Optional[str] = Header(default=None)):
+    require_super_admin(authorization)
+    db._dedupe_all_device_records()
+    users = sorted((admin_user_row(user) for user in db.users.values()), key=lambda row: str(row.get("email") or "").lower())
+    swarms = sorted((admin_swarm_row(swarm) for swarm in db.swarms.values()), key=lambda row: str(row.get("name") or "").lower())
+    drones = sorted((admin_drone_row(device) for device in db.devices.values()), key=lambda row: str(row.get("device_name") or row.get("device_id") or "").lower())
+    return {"users": users, "swarms": swarms, "drones": drones}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, authorization: Optional[str] = Header(default=None)):
+    user = require_super_admin(authorization)
+    if user_id == user["id"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Super admin cannot delete their own account")
+    if not db.admin_delete_user(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return {"status": "deleted", "user_id": user_id}
+
+
+@app.delete("/api/admin/swarms/{swarm_id}")
+async def admin_delete_swarm(swarm_id: str, authorization: Optional[str] = Header(default=None)):
+    require_super_admin(authorization)
+    if not db.admin_delete_swarm(swarm_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swarm not found")
+    return {"status": "deleted", "swarm_id": swarm_id}
+
+
+@app.delete("/api/admin/drones/{device_id}")
+async def admin_delete_drone(device_id: str, authorization: Optional[str] = Header(default=None)):
+    require_super_admin(authorization)
+    if not db.admin_delete_device(device_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Drone not found")
+    return {"status": "deleted", "device_id": device_id}
 
 
 @app.post("/api/swarms")
