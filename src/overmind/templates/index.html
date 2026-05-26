@@ -173,10 +173,17 @@
                             <a href="#" role="button" class="btn nav-btn shared-swarm-nav requires-auth" id="shared-swarm-nav-btn" data-tab="shared-swarm" style="display:none" onclick="event.preventDefault(); openSelectedSharedSwarm()"><i class="bi bi-share me-2"></i><span id="shared-swarm-nav-label">Shared Swarm</span></a>
                             <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); goToMySwarm()"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
                             <a href="#/hive" role="button" class="btn nav-btn requires-auth" data-tab="hive" onclick="event.preventDefault(); switchTab('hive', this)"><i class="bi bi-diagram-3 me-2"></i>The Hive</a>
-
-                            <a href="#/profile" role="button" class="btn nav-btn requires-auth" data-tab="profile" onclick="event.preventDefault(); switchTab('profile', this)"><i class="bi bi-person me-2"></i><span id="profile-nav-label">Profile</span></a>
-                            <a href="#/super-admin" role="button" class="btn nav-btn requires-auth super-admin-only" data-tab="super-admin" style="display:none" onclick="event.preventDefault(); switchTab('super-admin', this)"><i class="bi bi-command me-2"></i>Super Admin</a>
-                            <a href="#" role="button" class="btn requires-auth" onclick="event.preventDefault(); logout()"><i class="bi bi-box-arrow-right me-2"></i>Logout</a>
+                            <details class="account-menu requires-auth" id="account-menu">
+                                <summary class="profile-chip" aria-label="Open account menu" title="Account menu">
+                                    <img class="avatar-top-right" id="nav-profile-avatar" alt="">
+                                    <span class="avatar-fallback" id="nav-profile-avatar-fallback" aria-hidden="true"><i class="bi bi-person"></i></span>
+                                </summary>
+                                <nav class="account-menu-panel" aria-label="Account">
+                                    <a href="#/profile" class="account-menu-item nav-btn" data-tab="profile" onclick="event.preventDefault(); closeAccountMenu(); switchTab('profile', this)"><i class="bi bi-person"></i><span>Profile</span></a>
+                                    <a href="#/super-admin" class="account-menu-item nav-btn super-admin-only" data-tab="super-admin" style="display:none" onclick="event.preventDefault(); closeAccountMenu(); switchTab('super-admin', this)"><i class="bi bi-command"></i><span>Super Admin</span></a>
+                                    <button type="button" class="account-menu-item account-menu-logout" onclick="closeAccountMenu(); logout()"><i class="bi bi-box-arrow-right"></i><span>Logout</span></button>
+                                </nav>
+                            </details>
                         </div>
                     </div>
                 </aside>

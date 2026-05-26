@@ -791,6 +791,14 @@
                 max-width: 100%;
                 flex: 0 0 auto;
             }
+            .layout-shell aside {
+                position: relative;
+                z-index: 10000;
+            }
+            .layout-shell main {
+                position: relative;
+                z-index: 1;
+            }
 
             .sidebar {
                 background: rgba(21, 31, 50, 0.86);
@@ -969,6 +977,7 @@
             body.is-authenticated .requires-auth { display: flex; }
             body.is-authenticated .sidebar .requires-auth { display: inline-flex; }
             .sidebar .requires-auth { display: none; }
+            body:not(.is-authenticated) .sidebar .requires-auth { display: none !important; }
             .device-view-btn.active {
                 color: #fff !important;
                 background: var(--admin-sidebar-accent) !important;
@@ -1260,6 +1269,67 @@
                 background: transparent;
                 color: var(--admin-muted);
                 font-size: 1rem;
+            }
+            .account-menu {
+                flex: 0 0 auto;
+                margin-left: 0.35rem;
+                position: relative;
+                z-index: 10001;
+            }
+            .sidebar .account-menu.requires-auth {
+                display: none;
+            }
+            body.is-authenticated .sidebar .account-menu.requires-auth {
+                display: block;
+            }
+            .account-menu > summary {
+                list-style: none;
+            }
+            .account-menu > summary::-webkit-details-marker {
+                display: none;
+            }
+            .account-menu[open] .profile-chip {
+                border-color: var(--admin-sidebar-accent);
+                color: var(--admin-sidebar-accent);
+            }
+            .account-menu-panel {
+                background: rgba(21, 31, 50, 0.98);
+                border: 1px solid var(--admin-border);
+                border-radius: 0.5rem;
+                box-shadow: 0 0.7rem 1.8rem rgba(0, 0, 0, 0.32);
+                min-width: 12rem;
+                padding: 0.4rem;
+                position: absolute;
+                right: 0;
+                top: calc(100% + 0.55rem);
+                z-index: 10002;
+            }
+            .account-menu-item {
+                align-items: center;
+                background: transparent !important;
+                border: 0;
+                border-radius: 0.35rem;
+                color: var(--admin-text) !important;
+                display: flex;
+                font-size: 0.92rem;
+                font-weight: 700;
+                gap: 0.65rem;
+                padding: 0.65rem 0.75rem;
+                text-align: left;
+                text-decoration: none;
+                width: 100%;
+            }
+            .account-menu-item:hover,
+            .account-menu-item:focus,
+            .account-menu-item.active {
+                background: rgba(0, 194, 255, 0.12) !important;
+                color: var(--admin-sidebar-accent) !important;
+            }
+            .account-menu-logout {
+                border-top: 1px solid var(--admin-border);
+                border-radius: 0;
+                margin-top: 0.25rem;
+                padding-top: 0.8rem;
             }
             .empty-state {
                 background: rgba(31, 42, 68, 0.86);

@@ -101,6 +101,7 @@
 
             document.addEventListener('DOMContentLoaded', async () => {
                     setupInactivityTracking();
+                    setupAccountMenu();
 	                loadAuthProviders();
 	                handleOAuthReturn();
 	                handleAuthHashActions();
@@ -550,6 +551,7 @@
             }
 
 	            function logout(message = null, nextHash = '#/home') {
+                closeAccountMenu();
                 authToken = null;
                 currentUser = null;
                 currentProfile = null;
@@ -819,6 +821,41 @@
                 });
             }
 
+            function setupAccountMenu() {
+                document.addEventListener('click', event => {
+                    const menu = document.getElementById('account-menu');
+                    if (menu && menu.open && !menu.contains(event.target)) menu.removeAttribute('open');
+                });
+                document.addEventListener('keydown', event => {
+                    if (event.key === 'Escape') closeAccountMenu();
+                });
+            }
+
+            function closeAccountMenu() {
+                const menu = document.getElementById('account-menu');
+                if (menu) menu.removeAttribute('open');
+            }
+
+            function renderAccountAvatar() {
+                const avatar = document.getElementById('nav-profile-avatar');
+                const fallback = document.getElementById('nav-profile-avatar-fallback');
+                if (!avatar || !fallback) return;
+                const avatarDataUrl = currentProfile && currentProfile.avatar_data_url ? currentProfile.avatar_data_url : '';
+                if (avatarDataUrl) {
+                    avatar.src = avatarDataUrl;
+                    avatar.style.display = 'block';
+                    fallback.style.display = 'none';
+                    avatar.onerror = () => {
+                        avatar.style.display = 'none';
+                        fallback.style.display = 'inline-flex';
+                    };
+                    return;
+                }
+                avatar.removeAttribute('src');
+                avatar.style.display = 'none';
+                fallback.style.display = 'inline-flex';
+            }
+
             function ensureProfileState() {
                 if (currentProfile) return currentProfile;
                 currentProfile = {
@@ -835,8 +872,7 @@
 
             function renderProfileUI() {
                 if (!currentProfile) return;
-                const profileLabel = document.getElementById('profile-nav-label');
-                if (profileLabel) profileLabel.textContent = currentProfile.username || currentProfile.email || 'Profile';
+                renderAccountAvatar();
                 const usernameInput = document.getElementById('profile-username-input');
                 if (usernameInput) usernameInput.value = currentProfile.username || '';
                 const avatarPreview = document.getElementById('profile-avatar-preview');

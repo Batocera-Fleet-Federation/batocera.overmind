@@ -60,6 +60,25 @@ def test_ui_header_shows_stamped_version(client):
     assert "__OVERMIND_VERSION__" not in html
 
 
+def test_ui_header_groups_account_actions_under_avatar_dropdown(client):
+    html = client.get("/").text
+    css = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/css/overmind.css").read_text(encoding="utf-8")
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    assert 'id="account-menu"' in html
+    assert 'id="nav-profile-avatar"' in html
+    assert 'id="nav-profile-avatar-fallback"' in html
+    assert 'role="button" class="btn nav-btn active requires-auth" data-tab="devices"' in html
+    assert 'role="button" class="btn nav-btn requires-auth" data-tab="hive"' in html
+    assert '<nav class="account-menu-panel" aria-label="Account">' in html
+    assert html.count('data-tab="profile"') == 1
+    assert html.count('data-tab="super-admin"') == 1
+    assert "body:not(.is-authenticated) .sidebar .requires-auth { display: none !important; }" in css
+    assert ".layout-shell aside {" in css and "z-index: 10000;" in css
+    assert ".account-menu-panel {" in css and "z-index: 10002;" in css
+    assert "renderAccountAvatar();" in js
+    assert "closeAccountMenu(); logout()" in html
+
+
 def test_register_user(client):
     """Test user registration."""
     response = client.post(
