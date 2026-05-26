@@ -535,6 +535,87 @@ class FakeDatabase:
         return False
 
     # Device operations
+    def _merge_device_bucket(self, bucket: Dict[str, list], keep_id: str, remove_id: str) -> None:
+        keep_rows = bucket.setdefault(keep_id, [])
+        for row in bucket.get(remove_id, []):
+            if row not in keep_rows:
+                keep_rows.append(row)
+        bucket.pop(remove_id, None)
+
+    def _dedupe_device_records(self, device_id: str, preferred_id: Optional[str] = None) -> Optional[dict]:
+        matches = [device for device in self.devices.values() if device.get("device_id") == device_id]
+        if not matches:
+            return None
+
+        def sort_key(device: dict):
+            return (
+                1 if preferred_id and device.get("id") == preferred_id else 0,
+                device.get("last_seen") or datetime.min,
+                device.get("registered_at") or datetime.min,
+            )
+
+        keep = sorted(matches, key=sort_key, reverse=True)[0]
+        keep_id = keep["id"]
+        duplicate_ids = [device["id"] for device in matches if device.get("id") != keep_id]
+        if not duplicate_ids:
+            return keep
+
+        for duplicate_id in duplicate_ids:
+            duplicate = self.devices.get(duplicate_id)
+            if not duplicate:
+                continue
+            if (duplicate.get("last_seen") or datetime.min) > (keep.get("last_seen") or datetime.min):
+                keep["last_seen"] = duplicate.get("last_seen")
+            if not keep.get("registered_at") or (
+                duplicate.get("registered_at") and duplicate.get("registered_at") < keep.get("registered_at")
+            ):
+                keep["registered_at"] = duplicate.get("registered_at")
+            for key in ("rom_systems",):
+                merged = list(dict.fromkeys((keep.get(key) or []) + (duplicate.get(key) or [])))
+                if merged:
+                    keep[key] = merged
+            for key in ("auto_sync_policy", "system_info", "certificate", "network", "resolved_network"):
+                if not keep.get(key) and duplicate.get(key):
+                    keep[key] = duplicate.get(key)
+            for key in ("api_port", "scheme", "reachable_url", "authorization_token_id", "drone_token_hash", "swarm_id", "user_id"):
+                if duplicate.get(key) and not keep.get(key):
+                    keep[key] = duplicate.get(key)
+            if duplicate.get("swarm_connected"):
+                keep["swarm_connected"] = True
+            claims = self.device_admin_claims.setdefault(keep_id, [])
+            for claim_user_id in self.device_admin_claims.get(duplicate_id, []):
+                if claim_user_id not in claims:
+                    claims.append(claim_user_id)
+            self.device_admin_claims.pop(duplicate_id, None)
+            for bucket in (
+                self.roms,
+                self.bios,
+                self.artwork,
+                self.gamelogs,
+                self.device_actions,
+                self.speed_samples,
+                self.device_events,
+                self.peer_checks,
+                self.rom_sync_activity,
+            ):
+                self._merge_device_bucket(bucket, keep_id, duplicate_id)
+            self.download_states.pop(duplicate_id, None)
+            self.devices.pop(duplicate_id, None)
+
+        for owner_id, ids in list(self.user_devices.items()):
+            cleaned = []
+            for internal_id in ids:
+                replacement = keep_id if internal_id in duplicate_ids else internal_id
+                if replacement not in cleaned:
+                    cleaned.append(replacement)
+            self.user_devices[owner_id] = cleaned
+        self._persist_state()
+        return keep
+
+    def _dedupe_all_device_records(self) -> None:
+        for device_id in list({device.get("device_id") for device in self.devices.values() if device.get("device_id")}):
+            self._dedupe_device_records(device_id)
+
     def create_pending_drone_connection(
         self,
         device_id: str,
@@ -660,13 +741,41 @@ class FakeDatabase:
         authorization_token_id: Optional[str] = None,
         swarm_id: Optional[str] = None,
     ) -> str:
-        """Register a new device."""
-        internal_id = str(uuid.uuid4())
+        """Register a new device, or update the existing record for this Drone ID."""
         selected_swarm_id = swarm_id or self.default_swarm_id(user_id) or self.ensure_personal_swarm(user_id)["id"]
         network_state = resolve_reported_network(batocera_info.get("network") if isinstance(batocera_info, dict) else None)
         certificate = self._clean_device_certificate(
             batocera_info.get("certificate") if isinstance(batocera_info, dict) else None
         )
+        existing = self._dedupe_device_records(device_id)
+        if existing:
+            internal_id = existing["id"]
+            existing.update({
+                "user_id": user_id,
+                "swarm_id": selected_swarm_id,
+                "device_name": device_name,
+                "batocera_info": batocera_info,
+                "last_seen": datetime.utcnow(),
+                "network": network_state["reported"],
+                "resolved_network": network_state["resolved"],
+                "swarm_connected": network_state["swarm_connected"],
+                "authorization_token_id": authorization_token_id,
+                "api_port": batocera_info.get("api_port") if isinstance(batocera_info, dict) else None,
+                "scheme": (batocera_info.get("scheme") if isinstance(batocera_info, dict) else None) or "https",
+                "reachable_url": batocera_info.get("reachable_url") if isinstance(batocera_info, dict) else None,
+                "certificate": certificate,
+                "approval_status": "approved",
+            })
+            if raw_token or token_hash:
+                existing["drone_token_hash"] = token_hash or hash_drone_token(raw_token or "")
+            for owner_id, ids in list(self.user_devices.items()):
+                self.user_devices[owner_id] = [row for row in ids if row != internal_id]
+            self.user_devices.setdefault(user_id, [])
+            if internal_id not in self.user_devices[user_id]:
+                self.user_devices[user_id].append(internal_id)
+            return internal_id
+
+        internal_id = str(uuid.uuid4())
         self.devices[internal_id] = {
             "id": internal_id,
             "user_id": user_id,
@@ -734,13 +843,11 @@ class FakeDatabase:
     
     def get_device_by_device_id(self, device_id: str) -> Optional[dict]:
         """Get device by device_id (unique per user)."""
-        for device in self.devices.values():
-            if device["device_id"] == device_id:
-                return device
-        return None
+        return self._dedupe_device_records(device_id)
     
     def get_user_devices(self, user_id: str, swarm_id: Optional[str] = None) -> List[dict]:
         """Get all devices for a user."""
+        self._dedupe_all_device_records()
         visible_swarm_ids = {swarm_id} if swarm_id else {row["id"] for row in self.get_user_swarms(user_id)}
         return [
             device for device in self.devices.values()
@@ -915,12 +1022,8 @@ class FakeDatabase:
             did for did in self.user_devices.get(user_id, [])
             if did != internal_id
         ]
-        self.create_pending_drone_connection(
-            device_id,
-            device.get("device_name") or device_id,
-            device.get("batocera_info") or {},
-            user_id=user_id,
-        )
+        self.pending_drone_connections.pop(device_id, None)
+        self._persist_state()
         return True
 
     def create_device_action(

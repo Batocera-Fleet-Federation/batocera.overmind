@@ -714,6 +714,68 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
     assert upload_probe.json()["bytes_received"] == 4096
 
 
+def test_reapproving_same_drone_updates_existing_device_instead_of_duplicating(client):
+    """Repeated approval with a new authorization token keeps one visible Drone record."""
+    client.post("/api/auth/register", json={"email": "dedupe@example.com", "password": "testpass123"})
+    login_response = client.post("/api/auth/login", json={"email": "dedupe@example.com", "password": "testpass123"})
+    token = login_response.json()["access_token"]
+
+    first_token_response = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"label": "First token"},
+    )
+    first_auth_token = first_token_response.json()["token"]["authorization_token"]
+    client.post(
+        "/api/devices/register",
+        headers={"Authorization": f"Bearer {first_auth_token}"},
+        json=_device_registration_payload(email="dedupe@example.com", authorization_token=first_auth_token, device_id="same-drone", device_name="Pedestal"),
+    )
+    assert client.post("/api/drone-connections/same-drone/accept", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+    second_token_response = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"label": "Second token"},
+    )
+    second_auth_token = second_token_response.json()["token"]["authorization_token"]
+    reconnect_response = client.post(
+        "/api/devices/register",
+        headers={"Authorization": f"Bearer {second_auth_token}"},
+        json=_device_registration_payload(email="dedupe@example.com", authorization_token=second_auth_token, device_id="same-drone", device_name="Pedestal Updated"),
+    )
+    assert reconnect_response.status_code == 200
+    assert reconnect_response.json()["status"] == "approved"
+
+    devices_response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+    assert devices_response.status_code == 200
+    devices = [device for device in devices_response.json()["devices"] if device["device_id"] == "same-drone"]
+    assert len(devices) == 1
+    assert devices[0]["device_name"] == "Pedestal Updated"
+    assert len([device for device in db.devices.values() if device["device_id"] == "same-drone"]) == 1
+
+
+def test_existing_duplicate_drone_records_are_collapsed(client):
+    """Persisted duplicate records for one physical Drone are collapsed on read."""
+    client.post("/api/auth/register", json={"email": "collapse@example.com", "password": "testpass123"})
+    user = db.get_user_by_email("collapse@example.com")
+    internal_id = db.create_device(user["id"], "duplicate-drone", "Original", {"ip_address": "10.0.0.2"}, raw_token="token")
+    db.devices["manual-duplicate"] = {
+        **db.devices[internal_id],
+        "id": "manual-duplicate",
+        "device_name": "Manual Duplicate",
+    }
+    db.user_devices[user["id"]].append("manual-duplicate")
+
+    login_response = client.post("/api/auth/login", json={"email": "collapse@example.com", "password": "testpass123"})
+    token = login_response.json()["access_token"]
+    response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    devices = [device for device in response.json()["devices"] if device["device_id"] == "duplicate-drone"]
+    assert len(devices) == 1
+    assert len([device for device in db.devices.values() if device["device_id"] == "duplicate-drone"]) == 1
+
+
 def test_register_device_resolves_owner_from_token_without_email(client):
     """Drone registration no longer needs the Overmind email when the token is valid."""
     client.post(
@@ -1145,7 +1207,26 @@ def test_delete_device_removes_device_and_related_data(client):
     )
     assert detail_response.status_code == 404
     pending_response = client.get("/api/drone-connections", headers={"Authorization": f"Bearer {token}"})
-    assert any(conn["device_id"] == "arcade-cabinet-001" for conn in pending_response.json()["connections"])
+    assert all(conn["device_id"] != "arcade-cabinet-001" for conn in pending_response.json()["connections"])
+
+
+def test_drone_self_disconnect_removes_from_swarm_without_pending_connection(client):
+    client.post("/api/auth/register", json={"email": "disconnect@example.com", "password": "testpass123"})
+    user = db.get_user_by_email("disconnect@example.com")
+    db.create_device(user["id"], "disconnect-drone", "Disconnect Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    disconnect_response = client.post(
+        "/api/devices/disconnect-drone/disconnect",
+        headers={"Authorization": "Bearer drone-token"},
+    )
+    assert disconnect_response.status_code == 200
+
+    login_response = client.post("/api/auth/login", json={"email": "disconnect@example.com", "password": "testpass123"})
+    token = login_response.json()["access_token"]
+    devices_response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+    assert all(device["device_id"] != "disconnect-drone" for device in devices_response.json()["devices"])
+    pending_response = client.get("/api/drone-connections", headers={"Authorization": f"Bearer {token}"})
+    assert all(conn["device_id"] != "disconnect-drone" for conn in pending_response.json()["connections"])
 
 
 def test_swarm_master_list_deduplicates_by_md5_and_activity_search(client):
