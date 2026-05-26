@@ -15,4 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Swarm Drone tiles now show the reported Batocera version instead of the internal Drone ID.
 - Profile Swarm Access now provides an explicit Remove Overseer action that revokes shared swarm access immediately.
 - Pending Overseer invitations can now be resent from Profile Swarm Access, rotating the invitation link and refreshing its expiry.
+- Pending Overseer invitations can now be removed from Profile Swarm Access, revoking unused invitation links immediately.
 - Password signup now requires a unique username, with duplicate prevention also enforced on Profile username changes.
+- Heartbeat swarm responses now provide each Drone's public peer endpoint for remote Drone-to-Drone transfers and display reported public IP details.

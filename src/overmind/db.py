@@ -92,6 +92,7 @@ class FakeDatabase:
         "create_swarm",
         "invite_to_swarm",
         "rotate_pending_invitation",
+        "remove_pending_invitation",
         "accept_invitation",
         "accept_invitation_for_user",
         "remove_swarm_member",
@@ -525,6 +526,12 @@ class FakeDatabase:
         invite["expires_at"] = expires_at
         invite["resent_at"] = datetime.utcnow()
         return invite
+
+    def remove_pending_invitation(self, swarm_id: str, invitation_id: str) -> Optional[dict]:
+        invite = self.invitations.get(invitation_id)
+        if not invite or invite.get("swarm_id") != swarm_id or invite.get("status") != "pending":
+            return None
+        return self.invitations.pop(invitation_id)
 
     def list_swarm_access(self, swarm_id: str) -> dict:
         members = []
@@ -1187,6 +1194,12 @@ class FakeDatabase:
             ipv4 = resolved.get("ipv4") or []
             reported = peer.get("network") or {}
             public_ip = reported.get("public_ip") or reported.get("public")
+            scheme = peer.get("scheme") or "https"
+            api_port = peer.get("api_port") or 8443
+            public_host = str(public_ip or "").strip()
+            if ":" in public_host and not public_host.startswith("["):
+                public_host = f"[{public_host}]"
+            public_reachable_url = f"{scheme}://{public_host}:{api_port}" if public_host else None
             last_seen = peer.get("last_seen")
             online = bool(last_seen and last_seen >= cutoff)
             cert = dict(peer.get("certificate") or {})
@@ -1200,8 +1213,9 @@ class FakeDatabase:
                 "local_ip": ipv4[0] if ipv4 else (peer.get("batocera_info") or {}).get("ip_address"),
                 "private_ip": ipv4,
                 "public_ip": public_ip,
-                "api_port": peer.get("api_port") or 8443,
-                "scheme": peer.get("scheme") or "https",
+                "public_reachable_url": public_reachable_url,
+                "api_port": api_port,
+                "scheme": scheme,
                 "reachable_url": peer.get("reachable_url"),
                 "last_heartbeat": last_seen,
                 "last_seen": last_seen,

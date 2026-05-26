@@ -1215,7 +1215,7 @@
                             <thead><tr><th>Email</th><th>Role</th><th>Registration</th><th>Status</th><th></th></tr></thead>
                             <tbody>
                                 ${members.map(m => `<tr><td>${escapeHtml(m.email || '')}</td><td>${escapeHtml(roleLabel(m.role))}</td><td>registered</td><td>${escapeHtml(m.status || 'accepted')}</td><td>${canMutateSwarm() && m.role === 'overseer' ? `<button class="btn btn-outline-danger btn-sm" title="Remove this Overseer from the swarm" onclick="removeSwarmMember('${escapeHtml(m.user_id)}')"><i class="bi bi-person-x me-1"></i>Remove Overseer</button>` : ''}</td></tr>`).join('')}
-                                ${invites.map(i => `<tr><td>${escapeHtml(i.email || '')}</td><td>${escapeHtml(roleLabel(i.role))}</td><td>${escapeHtml(i.registration_status || 'invited')}</td><td>${escapeHtml(i.status || 'pending')}</td><td>${canMutateSwarm() && i.status === 'pending' ? `<button class="btn btn-outline-primary btn-sm" title="Send a new Overseer invitation link" onclick="resendOverseerInvite('${escapeHtml(i.id)}')"><i class="bi bi-envelope-arrow-up me-1"></i>Resend Invite</button>` : ''}</td></tr>`).join('')}
+                                ${invites.map(i => `<tr><td>${escapeHtml(i.email || '')}</td><td>${escapeHtml(roleLabel(i.role))}</td><td>${escapeHtml(i.registration_status || 'invited')}</td><td>${escapeHtml(i.status || 'pending')}</td><td>${canMutateSwarm() && i.status === 'pending' ? `<div class="d-flex gap-2 flex-wrap"><button class="btn btn-outline-primary btn-sm" title="Send a new Overseer invitation link" onclick="resendOverseerInvite('${escapeHtml(i.id)}')"><i class="bi bi-envelope-arrow-up me-1"></i>Resend Invite</button><button class="btn btn-outline-danger btn-sm" title="Remove this pending Overseer invitation" onclick="removePendingOverseerInvite('${escapeHtml(i.id)}')"><i class="bi bi-person-x me-1"></i>Remove Invite</button></div>` : ''}</td></tr>`).join('')}
                             </tbody>
                         </table></div>
                     `;
@@ -1268,6 +1268,17 @@
                 } catch (error) {
                     showMessage(error.message || 'Unable to resend invitation.', 'error');
                 }
+            }
+
+            async function removePendingOverseerInvite(invitationId) {
+                if (!selectedSwarmId || !window.confirm('Remove this pending Overseer invitation? The invitation link will no longer work.')) return;
+                const response = await apiDelete(`/api/swarms/${selectedSwarmId}/invitations/${encodeURIComponent(invitationId)}`);
+                if (!response.ok) {
+                    showMessage('Unable to remove invitation.', 'error');
+                    return;
+                }
+                await loadSwarmAccess();
+                showMessage('Pending Overseer invitation removed.', 'success');
             }
 
             async function saveNotificationSettings() {
@@ -2320,6 +2331,7 @@
                 const resolved = device.resolved_network || {};
                 const ipv4 = resolved.ipv4 || [];
                 const ipv6 = resolved.ipv6 || [];
+                const publicIp = (device.network || {}).public_ip || (device.network || {}).public || 'n/a';
                 const cert = device.certificate || {};
                 const peerChecks = device.peer_checks || [];
                 const info = device.system_info || {};
@@ -2349,6 +2361,7 @@
                         </div>
                         <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
+                        <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}</div>
                         <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
                         <hr>
                         <strong>Certificate</strong>
@@ -2446,6 +2459,7 @@
                 const resolved = device.resolved_network || {};
                 const ipv4 = resolved.ipv4 || [];
                 const ipv6 = resolved.ipv6 || [];
+                const publicIp = (device.network || {}).public_ip || (device.network || {}).public || 'n/a';
                 const cert = device.certificate || {};
                 const info = device.system_info || {};
                 const sample = device.last_speed_sample;
@@ -2469,6 +2483,7 @@
                         </div>
                         <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
+                        <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}</div>
                         <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
                         <hr>
                         <strong>Certificate</strong>

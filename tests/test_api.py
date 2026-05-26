@@ -739,6 +739,52 @@ def test_overlord_can_resend_pending_overseer_invite_with_rotated_link(client, m
     assert denied.status_code == 403
 
 
+def test_overlord_can_remove_pending_overseer_invite_and_revoke_link(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "overmind.main.send_invitation_email",
+        lambda email, swarm, role, token: sent.append(token),
+    )
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"}).json()["access_token"]
+    swarm_id = db.default_swarm_id(db.get_user_by_email("owner@example.com")["id"])
+
+    created = client.post(
+        f"/api/swarms/{swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "pending-remove@example.com"},
+    )
+    invitation_id = created.json()["invitation"]["id"]
+    invite_token = sent[-1]
+    assert client.get(f"/api/invitations/status?token={invite_token}").status_code == 200
+
+    removed = client.delete(
+        f"/api/swarms/{swarm_id}/invitations/{invitation_id}",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["status"] == "removed"
+    assert invitation_id not in db.invitations
+    assert client.get(f"/api/invitations/status?token={invite_token}").status_code == 400
+    access = client.get(f"/api/swarms/{swarm_id}/access", headers={"Authorization": f"Bearer {owner_token}"})
+    assert not any(row["id"] == invitation_id for row in access.json()["access"]["invitations"])
+
+    client.post("/api/auth/register", json={"email": "observer@example.com", "username": "observer-at-example.com", "password": "testpass123"})
+    observer = db.get_user_by_email("observer@example.com")
+    db.swarm_memberships.setdefault(swarm_id, {})[observer["id"]] = {"user_id": observer["id"], "role": "overseer"}
+    observer_token = client.post("/api/auth/login", json={"email": "observer@example.com", "password": "testpass123"}).json()["access_token"]
+    created_again = client.post(
+        f"/api/swarms/{swarm_id}/invitations",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"email": "pending-denied@example.com"},
+    )
+    denied = client.delete(
+        f"/api/swarms/{swarm_id}/invitations/{created_again.json()['invitation']['id']}",
+        headers={"Authorization": f"Bearer {observer_token}"},
+    )
+    assert denied.status_code == 403
+
+
 def test_swarms_marks_users_home_swarm(client):
     client.post("/api/auth/register", json={"email": "owner-home@example.com", "username": "owner-home-at-example.com", "password": "testpass123"})
     token = client.post("/api/auth/login", json={"email": "owner-home@example.com", "username": "owner-home-at-example.com", "password": "testpass123"}).json()["access_token"]
@@ -2403,6 +2449,15 @@ def test_profile_swarm_access_exposes_pending_invite_resend_action():
     assert "previous invitation link will no longer work" in js
 
 
+def test_profile_swarm_access_exposes_pending_invite_remove_action():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "Remove Invite" in js
+    assert "function removePendingOverseerInvite(invitationId)" in js
+    assert "/invitations/${encodeURIComponent(invitationId)}`" in js
+    assert "invitation link will no longer work" in js
+
+
 def test_signup_form_requires_username_and_posts_it():
     root = Path(__file__).resolve().parents[1]
     html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
@@ -2564,7 +2619,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         headers={"Authorization": "Bearer demo-local-drone-token"},
         json={
             "device_id": "arcade-cabinet-001",
-            "network": {"ipv4": ["192.168.1.50"], "ipv6": ["fd00::50"], "hostname_override": "bff-drone-a"},
+            "network": {"ipv4": ["192.168.1.50"], "ipv6": ["fd00::50"], "public_ip": "198.51.100.50", "hostname_override": "bff-drone-a"},
             "reachable_url": "https://bff-drone-a:8443",
             "rom_metadata": {
                 "type": "rom_metadata",
@@ -2581,6 +2636,8 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
     assert heartbeat_response.status_code == 200
     swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["device_id"] == "arcade-cabinet-001")
     assert swarm_peer["reachable_url"] == "https://bff-drone-a:8443"
+    assert swarm_peer["public_ip"] == "198.51.100.50"
+    assert swarm_peer["public_reachable_url"] == "https://198.51.100.50:8443"
 
     roms_response = client.get(
         "/api/devices/arcade-cabinet-001/roms",

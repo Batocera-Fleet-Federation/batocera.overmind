@@ -754,6 +754,18 @@ async def resend_swarm_invitation(swarm_id: str, invitation_id: str, authorizati
     return {"status": "sent", "invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
 
 
+@app.delete("/api/swarms/{swarm_id}/invitations/{invitation_id}")
+async def remove_swarm_invitation(swarm_id: str, invitation_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    selected_swarm_id(user, swarm_id)
+    require_swarm_role(user, swarm_id, {OWNER_ROLE})
+    invite = db.remove_pending_invitation(swarm_id, invitation_id)
+    if not invite:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending invitation not found")
+    print(f"Pending invitation removed for {invite.get('email')}: swarm_id={swarm_id}")
+    return {"status": "removed", "invitation_id": invitation_id}
+
+
 @app.get("/api/invitations/status")
 async def invitation_status(token: str):
     invite = db.find_invitation_by_token(token, verify_secret_token)
