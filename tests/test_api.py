@@ -47,6 +47,17 @@ def test_health_check(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert response.json()["version"].startswith("v")
+
+
+def test_ui_header_shows_stamped_version(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    version = Path(__file__).resolve().parents[1].joinpath("VERSION").read_text(encoding="utf-8").strip()
+    assert 'id="overmind-version-badge"' in html
+    assert version in html
+    assert "__OVERMIND_VERSION__" not in html
 
 
 def test_register_user(client):
@@ -1652,6 +1663,149 @@ def test_device_action_lifecycle(client):
     assert complete_response.json()["action"]["status"] == "completed"
 
 
+def test_action_results_append_logs_and_cap_stored_lines(client):
+    user_id = db.create_user("logs@example.com", "hash")
+    internal_id = db.create_device(user_id, "log-drone", "Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
+    device = db.get_device(internal_id)
+
+    db.store_action_result(device, {
+        "type": "log_sources",
+        "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-1\nline-2"}]}],
+    })
+    db.store_action_result(device, {
+        "type": "log_sources",
+        "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-3"}]}],
+    })
+
+    file_info = device["log_sources"]["logs"][0]["files"][0]
+    assert file_info["content"].splitlines() == ["line-1", "line-2", "line-3"]
+
+    db.store_action_result(device, {
+        "type": "log_sources",
+        "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "\n".join(f"line-{i}" for i in range(4, 1105))}]}],
+    })
+
+    stored_lines = device["log_sources"]["logs"][0]["files"][0]["content"].splitlines()
+    assert len(stored_lines) == 1000
+    assert stored_lines[0] == "line-105"
+    assert stored_lines[-1] == "line-1104"
+    assert device["log_sources"]["max_lines"] == 1000
+
+
+def test_action_results_merge_configs_and_exclude_bak_files(client):
+    user_id = db.create_user("configs@example.com", "hash")
+    internal_id = db.create_device(user_id, "config-drone", "Config Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
+    device = db.get_device(internal_id)
+
+    db.store_action_result(device, {
+        "type": "emulator_configs",
+        "configs": [
+            {"root": "/configs", "relative_path": "retroarch/retroarch.cfg", "content": "video_driver = gl"},
+            {"root": "/configs", "relative_path": "retroarch/retroarch.cfg.bak", "content": "old"},
+        ],
+    })
+    db.store_action_result(device, {
+        "type": "emulator_configs",
+        "configs": [{"root": "/configs", "relative_path": "dolphin.ini", "content": "backend = vulkan"}],
+    })
+    for index in range(12):
+        db.store_action_result(device, {
+            "type": "emulator_configs",
+            "configs": [{"root": "/configs", "relative_path": "retroarch/retroarch.cfg", "content": f"video_driver = driver-{index}"}],
+        })
+    db.store_action_result(device, {"type": "emulator_configs", "configs": [], "incremental": True})
+
+    configs = {row["relative_path"]: row["content"] for row in device["emulator_configs"]["configs"]}
+    assert configs == {
+        "dolphin.ini": "backend = vulkan",
+        "retroarch/retroarch.cfg": "video_driver = driver-11",
+    }
+    retroarch = next(row for row in device["emulator_configs"]["configs"] if row["relative_path"] == "retroarch/retroarch.cfg")
+    assert len(retroarch["versions"]) == 10
+    assert retroarch["versions"][0]["content"] == "video_driver = driver-11"
+    assert retroarch["versions"][-1]["content"] == "video_driver = driver-2"
+    assert all(".bak" not in row["relative_path"] for row in device["emulator_configs"]["configs"])
+
+
+def test_game_log_upload_stores_sessions_for_game_log_list(client):
+    user_id = db.create_user("game-log@example.com", "hash")
+    db.create_device(user_id, "game-drone", "Game Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    response = client.post(
+        "/api/devices/game-drone/game-logs",
+        headers={"Authorization": "Bearer drone-token"},
+        json={
+            "type": "game_logs",
+            "sessions": [{
+                "played_at": "2026-05-26T10:15:00+00:00",
+                "system_name": "snes",
+                "game_name": "Game.sfc",
+                "rom_path": "/userdata/roms/snes/Game.sfc",
+                "rom_md5": "abc123",
+            }],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["session_count"] == 1
+    logs = db.get_device_gamelogs("game-drone")
+    assert len(logs) == 1
+    assert logs[0]["system_name"] == "snes"
+    assert logs[0]["game_name"] == "Game.sfc"
+    assert logs[0]["rom_md5"] == "abc123"
+    assert logs[0]["played_at"] == "2026-05-26T10:15:00+00:00"
+
+
+def test_log_source_upload_appends_changed_content(client):
+    user_id = db.create_user("log-upload@example.com", "hash")
+    db.create_device(user_id, "log-upload-drone", "Log Upload Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    for content in ("line-1\n", "line-2\n"):
+        response = client.post(
+            "/api/devices/log-upload-drone/log-sources",
+            headers={"Authorization": "Bearer drone-token"},
+            json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": content}]}]},
+        )
+        assert response.status_code == 200
+
+    device = db.get_device_by_device_id("log-upload-drone")
+    content = device["log_sources"]["logs"][0]["files"][0]["content"]
+    assert content.splitlines() == ["line-1", "line-2"]
+
+
+def test_emulator_config_upload_stores_changed_configs(client):
+    user_id = db.create_user("config-upload@example.com", "hash")
+    db.create_device(user_id, "config-upload-drone", "Config Upload Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    response = client.post(
+        "/api/devices/config-upload-drone/emulator-configs",
+        headers={"Authorization": "Bearer drone-token"},
+        json={
+            "type": "emulator_configs",
+            "configs": [{"root": "/configs", "relative_path": "retroarch.cfg", "content": "video_driver = vulkan"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["config_count"] == 1
+    device = db.get_device_by_device_id("config-upload-drone")
+    assert device["emulator_configs"]["configs"][0]["relative_path"] == "retroarch.cfg"
+    assert device["emulator_configs"]["configs"][0]["versions"][0]["content"] == "video_driver = vulkan"
+
+
+def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    assert "Waiting for Drone to upload" in js
+    assert "Waiting for Drone to upload artwork metadata" in js
+    assert js.count("renderDroneMetadataWaitingState('System & Roms metadata')") >= 2
+    assert "renderDroneMetadataWaitingState('BIOS metadata')" in js
+    assert "renderDroneMetadataWaitingState('artwork metadata')" in js
+    assert "overmindConfigVersion" in js
+    assert "downloadSelectedOvermindConfigVersion" in js
+    assert "update automatically every 30 seconds" in js
+    assert "Collect Configs" not in js
+
+
 def test_action_claim_returns_all_pending_actions_in_order(client):
     db.populate_fake_data()
     login_response = client.post(
@@ -1707,8 +1861,11 @@ def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_log_sources')\"" not in html
-    assert "loadGameLogs({queue: true})" in js
-    assert "loadDeviceConfigs({queue: true})" in js
+    assert "requestDeviceDataSnapshot" not in js
+    assert "loadGameLogs({queue:" not in js
+    assert "loadDeviceConfigs({queue:" not in js
+    assert "if (currentDeviceView === 'gamelogs') loadGameLogs();" in js
+    assert "if (currentDeviceView === 'configs') loadDeviceConfigs();" in js
 
 
 def test_invite_registration_ui_clears_pending_token_before_login():

@@ -90,6 +90,8 @@ echo "════════════════════════�
 echo ""
 
 CHANGELOG="CHANGELOG.md"
+VERSION_FILE="VERSION"
+INIT_FILE="src/overmind/__init__.py"
 TODAY="$(date +%Y-%m-%d)"
 
 update_changelog() {
@@ -125,6 +127,24 @@ update_changelog() {
   info "Updated $CHANGELOG with $VERSION"
 }
 
+update_version_files() {
+  printf "%s\n" "$VERSION" > "$VERSION_FILE"
+
+  if [[ -f "$INIT_FILE" ]]; then
+    tmp_file="$(mktemp)"
+    awk -v version="$VERSION" '
+      /^__version__ = / {
+        print "__version__ = \"" version "\""
+        next
+      }
+      { print }
+    ' "$INIT_FILE" > "$tmp_file"
+    mv "$tmp_file" "$INIT_FILE"
+  fi
+
+  info "Stamped application version $VERSION"
+}
+
 get_previous_tag() {
   git tag --sort=-v:refname \
     | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -152,14 +172,15 @@ if [[ "$PUSH_MODE" == "dry-run" ]]; then
 fi
 
 update_changelog
+update_version_files
 
-if [[ -f "$CHANGELOG" ]] && ! git diff --quiet -- "$CHANGELOG"; then
-  git add "$CHANGELOG"
+if ! git diff --quiet -- "$CHANGELOG" "$VERSION_FILE" "$INIT_FILE"; then
+  git add "$CHANGELOG" "$VERSION_FILE" "$INIT_FILE"
   git commit -m "chore: bump version to $VERSION"
   git push origin "$DEFAULT_BRANCH"
-  info "Committed and pushed $CHANGELOG update."
+  info "Committed and pushed version updates."
 else
-  info "No changelog changes to commit."
+  info "No version changes to commit."
 fi
 
 info "Creating annotated version tag: $VERSION"

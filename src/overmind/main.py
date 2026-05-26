@@ -51,14 +51,22 @@ PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONTENT_DIR = Path(__file__).resolve().parent.parent.parent / "content"
+VERSION_FILE = Path(__file__).resolve().parent.parent.parent / "VERSION"
 OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
+
+
+def get_app_version() -> str:
+    return os.getenv("OVERMIND_VERSION") or (VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "dev")
+
+
+APP_VERSION = get_app_version()
 
 
 app = FastAPI(
     title="Batocera Overmind API",
     description="API for Batocera system management and game tracking",
-    version="0.1.0",
+    version=APP_VERSION.lstrip("v"),
 )
 _RUNTIME_SECRET_REFRESHER = None
 
@@ -2184,7 +2192,10 @@ async def log_gameplay(
         device_id,
         gameplay_data.system_name,
         gameplay_data.game_name,
-        gameplay_data.duration_seconds
+        gameplay_data.duration_seconds,
+        rom_path=gameplay_data.rom_path,
+        rom_md5=gameplay_data.rom_md5,
+        played_at=gameplay_data.played_at,
     )
     
     if not gamelog_id:
@@ -2197,6 +2208,36 @@ async def log_gameplay(
         "message": "Gameplay logged successfully",
         "gamelog_id": gamelog_id
     }
+
+
+@app.post("/api/devices/{device_id}/game-logs")
+async def upload_device_game_logs(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Accept newly detected game launches from a Drone."""
+    device = get_current_drone(device_id, authorization)
+    result = dict(payload or {})
+    result["type"] = "game_logs"
+    db.store_action_result(device, result)
+    return {"status": "accepted", "session_count": len(result.get("sessions") if isinstance(result.get("sessions"), list) else [])}
+
+
+@app.post("/api/devices/{device_id}/log-sources")
+async def upload_device_log_sources(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Accept changed log source content from a Drone."""
+    device = get_current_drone(device_id, authorization)
+    result = dict(payload or {})
+    result["type"] = "log_sources"
+    db.store_action_result(device, result)
+    return {"status": "accepted", "source_count": len(result.get("logs") if isinstance(result.get("logs"), list) else [])}
+
+
+@app.post("/api/devices/{device_id}/emulator-configs")
+async def upload_device_emulator_configs(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    """Accept changed emulator configs from a Drone."""
+    device = get_current_drone(device_id, authorization)
+    result = dict(payload or {})
+    result["type"] = "emulator_configs"
+    db.store_action_result(device, result)
+    return {"status": "accepted", "config_count": len(result.get("configs") if isinstance(result.get("configs"), list) else [])}
 
 
 @app.get("/api/devices/{device_id}/gamelogs")
@@ -2245,7 +2286,7 @@ async def favicon() -> Response:
 
 def get_ui_html() -> str:
     """Get the HTML for the web UI."""
-    return (TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
+    return (TEMPLATES_DIR / "index.html").read_text(encoding="utf-8").replace("__OVERMIND_VERSION__", APP_VERSION)
 
 
 # ==================== Health Check ====================
@@ -2253,7 +2294,7 @@ def get_ui_html() -> str:
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 # ==================== Startup ====================

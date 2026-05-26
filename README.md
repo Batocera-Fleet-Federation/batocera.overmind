@@ -13,7 +13,7 @@ A comprehensive system management and game tracking API for Batocera gaming syst
 - Normal Drone management still uses bearer tokens and a pull model, so Overmind does not need to reach into your home network for routine actions.
 - Drone-to-Drone API calls can use mTLS with local Drone-created certificates. No public domain is required.
 - Docker images and the shared Compose swarm support local testing with multiple realistic Drone containers.
-- The Drone-to-Overmind heartbeat interval is 60 seconds by default.
+- The Drone-to-Overmind heartbeat interval is 30 seconds by default; changed emulator configs and log-source content are reported during this poll.
 - Local Compose starts without fake data by default and shows unapproved Drone onboarding requests.
 - Overmind generates Drone authorization tokens for onboarding; the old integration password flow is deprecated.
 
@@ -176,7 +176,7 @@ The local Docker Compose file includes a lightweight `postgres:16-alpine` servic
 
 ## Drone Push/Pull Architecture
 
-Drones call Overmind every 60 seconds with an alive payload. That payload includes the MAC-address `device_id`, IPv4/IPv6 connectivity info, API port, protocol, certificate metadata, ROM systems, and system information. Overmind validates the Drone bearer token, stores the latest network state, updates `last_seen`, and marks Drones offline after the offline threshold, which defaults to 180 seconds.
+Drones call Overmind every 30 seconds with an alive payload. That payload includes the MAC-address `device_id`, IPv4/IPv6 connectivity info, API port, protocol, certificate metadata, ROM systems, and system information. During each poll the Drone pushes only changed emulator configs and log-source content. Overmind validates the Drone bearer token, stores the latest network state, updates `last_seen`, and marks Drones offline after the offline threshold, which defaults to 180 seconds.
 
 Overmind returns the current swarm list in the alive response. Each Drone stores that list, skips itself, and checks the other Drones through their peer health API. The result says which Drone checked which peer, what address was used, whether it passed, how long it took, and the failure reason if it failed. Overmind stores those results and shows only the latest check per peer on the selected Drone page, using `RESOLVED` or `FAILED` labels.
 

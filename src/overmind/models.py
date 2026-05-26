@@ -145,6 +145,9 @@ class GamePlayLog(BaseModel):
     device_id: str
     system_name: str
     game_name: str
+    rom_path: Optional[str] = None
+    rom_md5: Optional[str] = None
+    played_at: Optional[datetime] = None
     duration_seconds: Optional[int] = None
 
 

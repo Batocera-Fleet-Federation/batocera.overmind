@@ -83,7 +83,7 @@ class PostgresMetadataStore:
                     INSERT INTO drone_action_results (device_id, action_id, result_type, result)
                     VALUES (%s, %s, %s, %s::jsonb)
                     """,
-                    (device_id, action_id, result.get("type"), json.dumps(result)),
+                    (device_id, action_id, result.get("type"), json.dumps(result, default=str)),
                 )
 
     def load_app_state(self) -> Optional[dict]:

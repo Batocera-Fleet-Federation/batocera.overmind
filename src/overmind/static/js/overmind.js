@@ -77,6 +77,7 @@
             let systemPageState = {};
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
+            let selectedDeviceDataRefreshTimer = null;
             let devicesRefreshTimer = null;
             let downloadsRefreshTimer = null;
             let downloadsRefreshInFlight = false;
@@ -558,11 +559,13 @@
                 lastAuthRefreshAt = 0;
                 if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
+                if (selectedDeviceDataRefreshTimer) clearInterval(selectedDeviceDataRefreshTimer);
                 if (devicesRefreshTimer) clearInterval(devicesRefreshTimer);
                 if (downloadsRefreshTimer) clearInterval(downloadsRefreshTimer);
                 stopInactivityTimer();
                 pendingConnectionTimer = null;
                 actionRefreshTimer = null;
+                selectedDeviceDataRefreshTimer = null;
                 devicesRefreshTimer = null;
                 downloadsRefreshTimer = null;
                 localStorage.removeItem('auth_token');
@@ -1635,13 +1638,9 @@
                 setRoute('devices', deviceId, 'systems');
             }
 
-            async function loadGameLogs(options = {}) {
+            async function loadGameLogs() {
                 if (!selectedDeviceId) {
                     document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a Drone to view logs.</div>';
-                    return;
-                }
-                if (options.queue) {
-                    await requestDeviceDataSnapshot('logs');
                     return;
                 }
                 try {
@@ -1664,6 +1663,26 @@
                 }
             }
 
+            function getOvermindLogLineLimit() {
+                const stored = Number(localStorage.getItem('overmind_log_line_limit') || 200);
+                if (!Number.isFinite(stored)) return 200;
+                return Math.min(1000, Math.max(1, Math.floor(stored)));
+            }
+
+            function setOvermindLogLineLimit(value) {
+                const nextValue = Math.min(1000, Math.max(1, Math.floor(Number(value) || 200)));
+                localStorage.setItem('overmind_log_line_limit', String(nextValue));
+                const input = document.getElementById('overmindLogLineLimit');
+                if (input) input.value = String(nextValue);
+                if (Number.isInteger(window.overmindSelectedLogIndex)) {
+                    selectOvermindLogSource(window.overmindSelectedLogIndex);
+                }
+            }
+
+            function renderPassiveUpdateNotice(label) {
+                return `<div class="small text-muted mb-2">${escapeHtml(label)} update automatically every 30 seconds.</div>`;
+            }
+
             function displayCombinedLogs({gamelogs, emulator_configs, log_sources}) {
                 const container = document.getElementById('gamelogs-list');
                 const sources = [];
@@ -1679,11 +1698,17 @@
                 });
                 const gameLines = (Array.isArray(gamelogs) ? gamelogs : []).map(log => {
                     const when = log.played_at ? new Date(log.played_at).toLocaleString() : '';
-                    return `${when} ${log.system_name || ''} ${log.game_name || ''}`.trim();
+                    const details = [
+                        log.system_name || '',
+                        log.game_name || log.rom_name || log.rom_path || '',
+                        log.rom_md5 ? `md5: ${log.rom_md5}` : '',
+                    ].filter(Boolean).join(' | ');
+                    return `${when} ${details}`.trim();
                 });
                 sources.unshift({id: 'game_logs', label: 'Game Logs', path: 'Overmind gameplay history', content: gameLines.join('\\n') || 'No game logs reported yet.'});
-                const first = sources[0];
+                const previousIndex = Number.isInteger(window.overmindSelectedLogIndex) ? window.overmindSelectedLogIndex : 0;
                 container.innerHTML = `
+                    ${renderPassiveUpdateNotice('Logs')}
                     <div class="row">
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
@@ -1701,7 +1726,11 @@
                             <div class="card log-card">
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                     <span id="overmindLogTitle">Select a log source</span>
-                                    <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs({queue:true})">Refresh</button>
+                                    <div class="d-flex flex-wrap align-items-center gap-2">
+                                        <label for="overmindLogLineLimit" class="small text-muted mb-0">Lines</label>
+                                        <input id="overmindLogLineLimit" class="form-control form-control-sm" type="number" min="1" max="1000" value="${getOvermindLogLineLimit()}" style="width:5.5rem;" onchange="setOvermindLogLineLimit(this.value)" oninput="setOvermindLogLineLimit(this.value)">
+                                        <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs()">Refresh View</button>
+                                    </div>
                                 </div>
                                 <div class="card-body">
                                     <div id="overmindLogPath" class="small text-muted mb-2"></div>
@@ -1713,7 +1742,7 @@
                 `;
                 window.overmindLogSources = sources;
                 if (sources.length) {
-                    setTimeout(() => selectOvermindLogSource(0), 0);
+                    setTimeout(() => selectOvermindLogSource(Math.min(previousIndex, sources.length - 1)), 0);
                 }
             }
 
@@ -1721,22 +1750,22 @@
                 const sources = window.overmindLogSources || [];
                 const source = sources[index];
                 if (!source) return;
+                window.overmindSelectedLogIndex = index;
                 document.querySelectorAll('#overmindLogSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
                 const title = document.getElementById('overmindLogTitle');
                 const path = document.getElementById('overmindLogPath');
                 const content = document.getElementById('overmindLogContent');
                 if (title) title.textContent = source.label;
                 if (path) path.textContent = source.path || '';
-                if (content) content.textContent = source.content || '';
+                if (content) {
+                    const lines = String(source.content || '').split(/\r?\n/);
+                    content.textContent = lines.slice(-getOvermindLogLineLimit()).join('\n');
+                }
             }
 
-            async function loadDeviceConfigs(options = {}) {
+            async function loadDeviceConfigs() {
                 const container = document.getElementById('configs-list');
                 if (!selectedDeviceId || !container) return;
-                if (options.queue) {
-                    await requestDeviceDataSnapshot('configs');
-                    return;
-                }
                 try {
                     const response = await apiGet(`/api/devices/${selectedDeviceId}`);
                     if (!response.ok) throw new Error('Failed to load config data');
@@ -1755,9 +1784,8 @@
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
                             <div>
                                 <strong>Emulator Configs</strong>
-                                <div class="small text-muted">No config snapshot has been collected from this Drone yet.</div>
+                                <div class="small text-muted">Waiting for Drone to upload changed emulator configs. This view updates automatically every 30 seconds.</div>
                             </div>
-                            <button class="btn btn-outline-primary btn-sm" onclick="loadDeviceConfigs({queue:true})">Collect Configs</button>
                         </div>
                     </div></div>`;
                     return;
@@ -1765,10 +1793,14 @@
                 const rows = configs.map((item, index) => {
                     const label = item.relative_path || item.path || item.name || `config-${index + 1}`;
                     const content = item.content || item.text || JSON.stringify(item, null, 2);
-                    return {label, root: item.root || '', content};
+                    const versions = Array.isArray(item.versions) && item.versions.length
+                        ? item.versions
+                        : [{collected_at: item.collected_at || '', fingerprint: item.fingerprint || '', content}];
+                    return {label, root: item.root || '', content, fingerprint: item.fingerprint || '', versions};
                 });
-                const first = rows[0];
+                const previousIndex = Number.isInteger(window.overmindSelectedConfigIndex) ? window.overmindSelectedConfigIndex : 0;
                 container.innerHTML = `
+                    ${renderPassiveUpdateNotice('Emulator configs')}
                     <div class="row">
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
@@ -1787,11 +1819,23 @@
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                     <span id="overmindConfigTitle">Select a config</span>
                                     <div class="d-flex gap-2">
-                                        <button class="btn btn-sm btn-outline-primary" onclick="loadDeviceConfigs({queue:true})">Refresh Snapshot</button>
+                                        <button class="btn btn-sm btn-outline-primary" onclick="loadDeviceConfigs()">Refresh View</button>
                                     </div>
                                 </div>
                                 <div class="card-body">
-                                    <div id="overmindConfigPath" class="small text-muted mb-2"></div>
+                                    <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-2">
+                                        <div>
+                                            <div id="overmindConfigPath" class="small text-muted"></div>
+                                            <div id="overmindConfigFingerprint" class="small text-muted mono"></div>
+                                        </div>
+                                        <div class="d-flex flex-wrap align-items-end gap-2">
+                                            <div>
+                                                <label class="form-label small mb-1" for="overmindConfigVersion">Version</label>
+                                                <select id="overmindConfigVersion" class="form-select form-select-sm" onchange="selectOvermindConfigVersion(this.value)"></select>
+                                            </div>
+                                            <button class="btn btn-sm btn-outline-primary" onclick="downloadSelectedOvermindConfigVersion()">Download</button>
+                                        </div>
+                                    </div>
                                     <pre id="overmindConfigContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a config from the left panel to view its contents.</pre>
                                 </div>
                             </div>
@@ -1800,7 +1844,7 @@
                 `;
                 window.overmindConfigRows = rows;
                 if (rows.length) {
-                    setTimeout(() => selectOvermindConfig(0), 0);
+                    setTimeout(() => selectOvermindConfig(Math.min(previousIndex, rows.length - 1)), 0);
                 }
             }
 
@@ -1808,60 +1852,58 @@
                 const rows = window.overmindConfigRows || [];
                 const row = rows[index];
                 if (!row) return;
+                window.overmindSelectedConfigIndex = index;
+                window.overmindSelectedConfigVersionIndex = 0;
                 document.querySelectorAll('#overmindConfigSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
                 const title = document.getElementById('overmindConfigTitle');
                 const path = document.getElementById('overmindConfigPath');
+                const fingerprint = document.getElementById('overmindConfigFingerprint');
+                const versionSelect = document.getElementById('overmindConfigVersion');
                 const content = document.getElementById('overmindConfigContent');
                 if (title) title.textContent = row.label;
                 if (path) path.textContent = row.root || '';
-                if (content) content.textContent = row.content || '';
+                if (versionSelect) {
+                    versionSelect.innerHTML = (row.versions || []).map((version, versionIndex) => {
+                        const stamp = version.collected_at ? new Date(version.collected_at).toLocaleString() : `Version ${versionIndex + 1}`;
+                        const hash = version.fingerprint ? ` ${String(version.fingerprint).slice(0, 8)}` : '';
+                        return `<option value="${versionIndex}">${escapeHtml(stamp + hash)}</option>`;
+                    }).join('');
+                    versionSelect.value = '0';
+                }
+                const version = (row.versions || [])[0] || row;
+                if (fingerprint) fingerprint.textContent = version.fingerprint ? `fingerprint: ${version.fingerprint}` : '';
+                if (content) content.textContent = version.content || row.content || '';
             }
 
-            async function requestDeviceDataSnapshot(kind) {
-                if (!selectedDeviceId) return;
-                const isLogs = kind === 'logs';
-                const container = document.getElementById(isLogs ? 'gamelogs-list' : 'configs-list');
-                if (container) {
-                    container.innerHTML = `<div class="empty-state">${isLogs ? 'Log' : 'Emulator config'} data is being retrieved and should be available within 30 seconds.</div>`;
-                }
-                showMessage(`${isLogs ? 'Log' : 'Emulator config'} data is being retrieved and should be available within 30 seconds.`, 'success');
-                const actions = isLogs ? ['collect_game_logs', 'collect_log_sources'] : ['collect_emulator_configs'];
-                try {
-                    for (const actionName of actions) {
-                        await queueDeviceAction(actionName, { confirm: false, refreshActions: false, notify: false });
-                    }
-                    await pollDeviceSnapshot(kind);
-                } catch (error) {
-                    console.error('Error requesting device data:', error);
-                    if (container) container.innerHTML = `<div class="empty-state">Unable to request ${isLogs ? 'log' : 'emulator config'} data.</div>`;
-                }
+            function selectOvermindConfigVersion(value) {
+                const rows = window.overmindConfigRows || [];
+                const row = rows[window.overmindSelectedConfigIndex || 0];
+                if (!row) return;
+                const versionIndex = Math.max(0, Math.min((row.versions || []).length - 1, Number(value) || 0));
+                window.overmindSelectedConfigVersionIndex = versionIndex;
+                const version = (row.versions || [])[versionIndex] || row;
+                const content = document.getElementById('overmindConfigContent');
+                const fingerprint = document.getElementById('overmindConfigFingerprint');
+                if (fingerprint) fingerprint.textContent = version.fingerprint ? `fingerprint: ${version.fingerprint}` : '';
+                if (content) content.textContent = version.content || row.content || '';
             }
 
-            async function pollDeviceSnapshot(kind) {
-                const deadline = Date.now() + 30000;
-                const isLogs = kind === 'logs';
-                while (Date.now() <= deadline) {
-                    await new Promise(resolve => setTimeout(resolve, 5000));
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}`);
-                    if (!response.ok) throw new Error('Failed to load device details');
-                    const device = await response.json();
-                    if (isLogs) {
-                        const hasLogSources = Array.isArray(device.log_sources?.logs) && device.log_sources.logs.length > 0;
-                        const hasGameLogs = Array.isArray(device.game_logs?.sessions) && device.game_logs.sessions.length > 0;
-                        if (hasLogSources || hasGameLogs) {
-                            await loadGameLogs({ queue: false });
-                            return;
-                        }
-                    } else if (Array.isArray(device.emulator_configs?.configs) && device.emulator_configs.configs.length > 0) {
-                        displayDeviceConfigs(device.emulator_configs);
-                        return;
-                    }
-                }
-                if (isLogs) {
-                    await loadGameLogs({ queue: false });
-                } else {
-                    await loadDeviceConfigs({ queue: false });
-                }
+            function downloadSelectedOvermindConfigVersion() {
+                const rows = window.overmindConfigRows || [];
+                const row = rows[window.overmindSelectedConfigIndex || 0];
+                if (!row) return;
+                const versionIndex = window.overmindSelectedConfigVersionIndex || 0;
+                const version = (row.versions || [])[versionIndex] || row;
+                const blob = new Blob([version.content || row.content || ''], {type: 'text/plain;charset=utf-8'});
+                const link = document.createElement('a');
+                const safeName = String(row.label || 'emulator-config').replace(/[^a-z0-9._-]+/gi, '_');
+                const suffix = version.fingerprint ? `.${String(version.fingerprint).slice(0, 8)}` : '';
+                link.href = URL.createObjectURL(blob);
+                link.download = `${safeName}${suffix}.txt`;
+                document.body.appendChild(link);
+                link.click();
+                URL.revokeObjectURL(link.href);
+                link.remove();
             }
 
             async function loadDeviceSystems() {
@@ -1937,7 +1979,6 @@
                 if (!confirm(`Queue sync for system ${system} on this Drone?`)) return;
                 try {
                     await syncSystem(system);
-                    await loadSyncActivityPanel();
                     await loadSwarmRomAvailabilityPanel();
                 } catch (err) {
                     console.error('Error syncing system:', err);
@@ -1961,7 +2002,9 @@
                 const container = document.getElementById('systems-list');
                 const entries = filteredSystemEntries();
                 if (!entries.length) {
-                    container.innerHTML = '<div class="empty-state">No systems or ROMs matched your search.</div>';
+                    container.innerHTML = deviceRomSearchQuery
+                        ? '<div class="empty-state">No systems or ROMs matched your search.</div>'
+                        : renderDroneMetadataWaitingState('System & Roms metadata');
                     return;
                 }
                 entries.sort((a, b) => a[0].localeCompare(b[0]));
@@ -2001,6 +2044,15 @@
                     </div>
                 `;
                 renderDroneAutoSyncPanel();
+            }
+
+            function renderDroneMetadataWaitingState(label) {
+                return `
+                    <div class="empty-state d-flex flex-column align-items-center justify-content-center gap-2 py-4">
+                        <div class="spinner-border text-primary" role="status" aria-hidden="true"></div>
+                        <div>${label === 'ROM metadata' ? 'Waiting for Drone to upload artwork metadata' : `Waiting for Drone to upload ${escapeHtml(label)}`}</div>
+                    </div>
+                `;
             }
 
             function selectedDrone() {
@@ -2291,7 +2343,11 @@
                                     `;
                                 }).join('')}
                             </tbody></table></div>
-                            ${total ? '' : '<div class="small text-muted">No ROMs found for this filter.</div>'}
+                            ${total ? '' : (
+                                (q || system || status)
+                                    ? '<div class="small text-muted">No ROMs found for this filter.</div>'
+                                    : renderDroneMetadataWaitingState('System & Roms metadata')
+                            )}
                         </div></div>
                     `;
                     // populate per-system Sync buttons for missing systems
@@ -2334,7 +2390,6 @@
                     });
                     if (!response.ok) throw new Error('Failed to queue ROM sync');
                     showMessage('ROM sync queued. The Drone will choose the source peer automatically.', 'success');
-                    await loadSyncActivityPanel();
                     // Refresh the master ROM table so the Sync button disappears once the Drone reports the ROM
                     await loadSwarmRomAvailabilityPanel();
                 } catch (error) {
@@ -2351,7 +2406,6 @@
                 });
                 if (!response.ok) throw new Error('Failed to queue system sync');
                 showMessage('System sync queued. The Drone will choose source peers automatically.', 'success');
-                await loadSyncActivityPanel();
             }
 
             function setMasterBiosPage(page) {
@@ -2447,7 +2501,11 @@
                                     `;
                                 }).join('')}
                             </tbody></table></div>
-                            ${total ? '' : '<div class="small text-muted">No BIOS files found for this filter.</div>'}
+                            ${total ? '' : (
+                                (biosSearchQuery || biosStatusFilter)
+                                    ? '<div class="small text-muted">No BIOS files found for this filter.</div>'
+                                    : renderDroneMetadataWaitingState('BIOS metadata')
+                            )}
                         </div></div>
                     `;
                 } catch (error) {
@@ -2465,7 +2523,6 @@
                     });
                     if (!response.ok) throw new Error('Failed to queue BIOS sync');
                     showMessage('BIOS sync queued. The Drone will choose the source peer automatically.', 'success');
-                    await loadSyncActivityPanel();
                     await loadDeviceBiosPanel();
                 } catch (error) {
                     console.error('Error queuing BIOS sync:', error);
@@ -2719,7 +2776,11 @@
                                     `;
                                 }).join('')}
                             </tbody></table></div>
-                            ${total ? '' : '<div class="small text-muted">No artwork found for this filter.</div>'}
+                            ${total ? '' : (
+                                (artworkSearchQuery || artworkStatusFilter || artworkTypeFilter || artworkSourceDeviceFilter.length || artworkSystemFilter.length)
+                                    ? '<div class="small text-muted">No artwork found for this filter.</div>'
+                                    : renderDroneMetadataWaitingState('artwork metadata')
+                            )}
                         </div></div>
                     `;
                 } catch (error) {
@@ -2745,7 +2806,6 @@
                     const result = await response.json();
                     const count = Number(result.queued_artwork_count || result.action_count || 0);
                     showMessage(count ? `Queued ${count} artwork sync${count === 1 ? '' : 's'}.` : 'No missing artwork matched those selections.', 'success');
-                    await loadSyncActivityPanel();
                     await loadDeviceArtworkPanel();
                 } catch (error) {
                     console.error('Error queuing bulk artwork sync:', error);
@@ -2764,7 +2824,6 @@
                     });
                     if (!response.ok) throw new Error('Failed to queue artwork sync');
                     showMessage('Artwork sync queued. The Drone will choose the source peer automatically.', 'success');
-                    await loadSyncActivityPanel();
                     await loadDeviceArtworkPanel();
                 } catch (error) {
                     console.error('Error queuing artwork sync:', error);
@@ -2832,24 +2891,42 @@
                 renderDroneTokenPanel();
                 renderDroneSpeedPanel();
                 loadSwarmRomAvailabilityPanel();
-                loadSyncActivityPanel();
             }
 
             function backToDevices() {
                 selectedDeviceId = null;
                 currentDeviceView = 'systems';
+                stopSelectedDeviceDataAutoRefresh();
                 setRoute('devices', null, 'systems');
+            }
+
+            function stopSelectedDeviceDataAutoRefresh() {
+                if (selectedDeviceDataRefreshTimer) clearInterval(selectedDeviceDataRefreshTimer);
+                selectedDeviceDataRefreshTimer = null;
+            }
+
+            function startSelectedDeviceDataAutoRefresh(viewName) {
+                stopSelectedDeviceDataAutoRefresh();
+                if (!selectedDeviceId || !['gamelogs', 'configs'].includes(viewName)) return;
+                selectedDeviceDataRefreshTimer = setInterval(() => {
+                    if (!selectedDeviceId || currentTab !== 'devices') {
+                        stopSelectedDeviceDataAutoRefresh();
+                        return;
+                    }
+                    if (currentDeviceView === 'gamelogs') loadGameLogs();
+                    if (currentDeviceView === 'configs') loadDeviceConfigs();
+                }, 30000);
             }
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
                 currentDeviceView = ['bios', 'artwork', 'gamelogs', 'configs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
+                startSelectedDeviceDataAutoRefresh(currentDeviceView);
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
                 if (activeBtn) activeBtn.classList.add('active');
 
                 const systemsPanel = document.getElementById('device-systems-panel');
-                const syncActivityPanel = document.getElementById('drone-sync-activity-panel');
                 const biosPanel = document.getElementById('device-bios-panel');
                 const artworkPanel = document.getElementById('device-artwork-panel');
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
@@ -2857,7 +2934,6 @@
                 const actionsPanel = document.getElementById('device-actions-panel');
                 const metadataPanel = document.getElementById('device-metadata-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
-                if (syncActivityPanel) syncActivityPanel.style.display = (currentDeviceView === 'systems' || currentDeviceView === 'bios' || currentDeviceView === 'artwork') ? 'block' : 'none';
                 if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
                 if (artworkPanel) artworkPanel.style.display = currentDeviceView === 'artwork' ? 'block' : 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
@@ -2866,11 +2942,10 @@
                 if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
 
                 if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
-                if (currentDeviceView === 'systems' || currentDeviceView === 'bios' || currentDeviceView === 'artwork') loadSyncActivityPanel();
                 if (currentDeviceView === 'bios') loadDeviceBiosPanel();
                 if (currentDeviceView === 'artwork') loadDeviceArtworkPanel();
-                if (currentDeviceView === 'gamelogs') loadGameLogs({queue: true});
-                if (currentDeviceView === 'configs') loadDeviceConfigs({queue: true});
+                if (currentDeviceView === 'gamelogs') loadGameLogs();
+                if (currentDeviceView === 'configs') loadDeviceConfigs();
                 if (currentDeviceView === 'metadata') {
                     renderDroneMetadataPanel();
                 }
