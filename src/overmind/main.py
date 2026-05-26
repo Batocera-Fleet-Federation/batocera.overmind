@@ -1551,6 +1551,7 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
         "file_path": rom_path,
         "rom_md5": payload.get("rom_md5"),
         "file_size": payload.get("file_size"),
+        "entry_type": payload.get("entry_type") or "file",
         "devices": source_devices,
     })
     if not action:
@@ -1564,6 +1565,7 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
         "status": "pending",
         "file_size": payload.get("file_size"),
         "rom_md5": payload.get("rom_md5"),
+        "entry_type": payload.get("entry_type") or "file",
     })
     return {"action": action}
 
@@ -1834,6 +1836,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
                 "file_path": rom.get("file_path") or rom.get("rom_name"),
                 "rom_md5": rom.get("rom_md5"),
                 "file_size": rom.get("file_size"),
+                "entry_type": rom.get("entry_type") or "file",
                 "devices": [],
             })
             info = devices[source_id].get("system_info") or {}

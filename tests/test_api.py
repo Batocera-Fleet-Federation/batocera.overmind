@@ -1432,6 +1432,36 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     assert action["payload"]["devices"] == [{"device_id": "source-with-rom", "device_name": "Source With ROM"}]
 
 
+def test_sync_folder_rom_payload_matches_by_path_without_md5(client):
+    client.post("/api/auth/register", json={"email": "folder@example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "folder@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("folder@example.com")
+    db.create_device(user["id"], "source-with-folder", "Source Folder", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.create_device(user["id"], "target-folder", "Target Folder", {"ip_address": "10.0.0.4"}, raw_token="c")
+    db.add_roms("source-with-folder", "ps3", [{"rom_name": "Game.ps3", "file_path": "Game.ps3", "entry_type": "folder", "file_size": 10}])
+
+    response = client.post(
+        "/api/devices/target-folder/sync-rom",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "ps3", "file_path": "Game.ps3", "entry_type": "folder", "file_size": 10},
+    )
+    assert response.status_code == 200
+
+    claim = client.post(
+        "/api/devices/target-folder/actions/claim",
+        headers={"Authorization": "Bearer c"},
+        json={},
+    )
+    assert claim.status_code == 200
+    action = claim.json()["actions"][0]
+    assert action["payload"]["entry_type"] == "folder"
+    assert action["payload"].get("rom_md5") is None
+    assert action["payload"]["devices"] == [{"device_id": "source-with-folder", "device_name": "Source Folder"}]
+
+
 def test_rom_metadata_upload_persists_bios_and_master_bios(client):
     client.post("/api/auth/register", json={"email": "bios@example.com", "password": "testpass123"})
     token = client.post(

@@ -85,7 +85,7 @@
             let lastAuthRefreshAt = 0;
             let authRefreshInFlight = false;
             let pendingInvitationToken = sessionStorage.getItem('pending_invitation_token') || null;
-            const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+            const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
             const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
             const SUPER_ADMIN_EMAIL = 'mr_jerrodh@hotmail.com';
             const MASTER_ROM_PAGE_SIZE = 100;
@@ -515,7 +515,7 @@
             function resetInactivityTimer() {
                 if (inactivityTimer) clearTimeout(inactivityTimer);
                 inactivityTimer = setTimeout(() => {
-                    logout('You were logged out after 5 minutes of inactivity.', '#/login');
+                    logout('You were logged out after 30 minutes of inactivity.', '#/login');
                 }, INACTIVITY_TIMEOUT_MS);
             }
 

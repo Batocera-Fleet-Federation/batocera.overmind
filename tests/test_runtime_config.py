@@ -70,6 +70,15 @@ def test_smtp_from_header_uses_display_name(monkeypatch):
     assert sent["from"] == "Batocera Overmind <noreply@example.com>"
 
 
+def test_ui_session_refreshes_while_active_and_times_out_after_30_minutes():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;" in js
+    assert "const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;" in js
+    assert "maybeRefreshAuthToken();" in js
+    assert "You were logged out after 30 minutes of inactivity." in js
+
+
 def test_env_only_config_is_unchanged_when_secret_missing(monkeypatch):
     monkeypatch.setenv("SMTP_PASSWORD", "from-env")
     refresher = RuntimeSecretRefresher(client=FakeSecretsClient(error=RuntimeError("not found")))
@@ -129,8 +138,8 @@ def test_secret_refresh_failure_keeps_last_known_good(monkeypatch):
 def test_overmind_ui_contains_inactivity_timeout_hooks():
     js = (Path(__file__).resolve().parents[1] / "src" / "overmind" / "static" / "js" / "overmind.js").read_text(encoding="utf-8")
 
-    assert "const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000" in js
+    assert "const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000" in js
     assert "function markUserActivity()" in js
     assert "resetInactivityTimer()" in js
     assert "/api/auth/refresh" in js
-    assert "You were logged out after 5 minutes of inactivity." in js
+    assert "You were logged out after 30 minutes of inactivity." in js
