@@ -13,6 +13,7 @@ from overmind.device_snapshots import (
     merge_emulator_configs,
     merge_game_logs,
     merge_log_sources,
+    merge_rom_metadata_hash_patch,
 )
 
 
@@ -1223,6 +1224,8 @@ class FakeDatabase:
         device = self.get_device_by_device_id(device_id)
         if not device or not isinstance(metadata, dict):
             return
+        if metadata.get("update_mode") == "rom_hash_patch":
+            metadata = merge_rom_metadata_hash_patch(device.get("rom_metadata"), metadata)
         systems = metadata.get("systems") if isinstance(metadata.get("systems"), list) else []
         self.update_device_last_seen(device["id"], rom_systems=systems)
         device["rom_metadata"] = metadata

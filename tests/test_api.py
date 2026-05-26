@@ -1440,6 +1440,50 @@ def test_rom_metadata_upload_persists_bios_and_master_bios(client):
     assert row["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
 
 
+def test_rom_metadata_hash_patch_enriches_existing_inventory_without_replacing_roms(client):
+    client.post("/api/auth/register", json={"email": "hashes@example.com", "password": "testpass123"})
+    user = db.get_user_by_email("hashes@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+
+    inventory = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory",
+            "systems": [{"name": "snes", "rom_count": 2}],
+            "roms": [
+                {"system": "snes", "file_path": "Game One.zip", "rom_name": "Game One", "file_size": 3},
+                {"system": "snes", "file_path": "Game Two.zip", "rom_name": "Game Two", "file_size": 3},
+            ],
+            "bios": [{"file_path": "dc/flash.bin", "md5": "bios-md5"}],
+            "artwork": [],
+        },
+    )
+    assert inventory.status_code == 200
+
+    patch = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "rom_hash_patch",
+            "roms": [{"system": "snes", "file_path": "Game One.zip", "rom_md5": "hash-one", "md5": "hash-one"}],
+            "hash_progress": {"processed": 1, "total": 2, "complete": False},
+        },
+    )
+    assert patch.status_code == 200
+
+    stored = db.get_device_roms("drone-a")
+    assert len(stored) == 2
+    by_path = {row["file_path"]: row for row in stored}
+    assert by_path["Game One.zip"]["rom_md5"] == "hash-one"
+    assert by_path["Game Two.zip"]["rom_md5"] is None
+    assert db.get_device_bios("drone-a")[0]["bios_md5"] == "bios-md5"
+
+
 def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client):
     client.post("/api/auth/register", json={"email": "sync-bios@example.com", "password": "testpass123"})
     token = client.post(

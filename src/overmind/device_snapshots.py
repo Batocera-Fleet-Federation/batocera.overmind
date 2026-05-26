@@ -1,4 +1,4 @@
-"""Pure transformations for device-reported logs and emulator configurations."""
+"""Pure transformations for device-reported snapshots and incremental updates."""
 
 from __future__ import annotations
 
@@ -7,6 +7,30 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional
+
+
+def merge_rom_metadata_hash_patch(existing: Optional[dict], incoming: dict) -> dict:
+    """Apply ROM hash-only updates to an existing full inventory snapshot."""
+    merged = dict(existing or {})
+    existing_roms = [dict(row) for row in merged.get("roms", []) if isinstance(row, dict)]
+
+    def key(row: dict) -> tuple:
+        system = str(row.get("system") or row.get("system_name") or "").strip().lower()
+        path = str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_file") or "").replace("\\", "/").lstrip("./").lower()
+        return system, path
+
+    by_key = {key(row): row for row in existing_roms}
+    for patch in incoming.get("roms") if isinstance(incoming.get("roms"), list) else []:
+        if not isinstance(patch, dict):
+            continue
+        row_key = key(patch)
+        current = by_key.get(row_key, {})
+        by_key[row_key] = {**current, **patch}
+    merged["roms"] = list(by_key.values())
+    merged["assets"] = {**(merged.get("assets") or {}), "roms": merged["roms"]}
+    merged["collected_at"] = incoming.get("collected_at") or merged.get("collected_at")
+    merged["hash_progress"] = incoming.get("hash_progress") or merged.get("hash_progress")
+    return merged
 
 
 def _cap_text_lines(value: str, max_lines: int) -> str:
