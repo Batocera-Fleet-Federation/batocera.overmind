@@ -23,6 +23,13 @@ from overmind.models import (
 from overmind.db import db
 from overmind import auth
 from overmind import emailer
+from overmind.access_policy import (
+    ensure_active_user as _ensure_active_user,
+    require_device_admin as _require_device_admin,
+    require_super_admin as _require_super_admin,
+    require_swarm_role as _require_swarm_role,
+    selected_swarm_id as _selected_swarm_id,
+)
 from overmind.account_notifications import (
     send_invitation_email as _send_invitation_email,
     send_password_reset_email as _send_password_reset_email,
@@ -41,7 +48,8 @@ from overmind.presenters import (
     admin_swarm_row as _admin_swarm_row,
     admin_user_row as _admin_user_row,
     device_response as _device_response,
-    public_swarm_name,
+    hive_response,
+    profile_response,
 )
 
 SUPER_ADMIN_EMAIL = "mr_jerrodh@hotmail.com"
@@ -215,38 +223,23 @@ def create_and_send_verification(user: dict) -> None:
 
 
 def ensure_active_user(user: dict) -> None:
-    if not user.get("is_active") or not user.get("email_verified"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email verification required")
+    _ensure_active_user(user)
 
 
 def selected_swarm_id(user: dict, swarm_id: Optional[str] = None) -> str:
-    candidate = swarm_id or db.default_swarm_id(user["id"])
-    if not candidate or not db.get_swarm_member(candidate, user["id"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Swarm access denied")
-    return candidate
+    return _selected_swarm_id(user, swarm_id, data_store=db)
 
 
 def require_swarm_role(user: dict, swarm_id: str, roles: set[str]) -> dict:
-    normalized_roles = {OWNER_ROLE if role == "overlord" else role for role in roles}
-    member = db.require_swarm_role(swarm_id, user["id"], roles)
-    if not member:
-        member = db.require_swarm_role(swarm_id, user["id"], normalized_roles)
-    if not member:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient swarm permission")
-    return member
+    return _require_swarm_role(user, swarm_id, roles, data_store=db, owner_role=OWNER_ROLE)
 
 
 def require_device_admin(user: dict, device: dict) -> dict:
-    if db.user_has_device_admin_claim(user["id"], device.get("device_id")):
-        return {"user_id": user["id"], "role": "overlord", "source": "device_ownership_claim"}
-    return require_swarm_role(user, device["swarm_id"], {"overlord"})
+    return _require_device_admin(user, device, data_store=db, role_checker=require_swarm_role)
 
 
 def require_super_admin(authorization: Optional[str]) -> dict:
-    user = get_current_user(authorization)
-    if str(user.get("email") or "").strip().lower() != SUPER_ADMIN_EMAIL:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
-    return user
+    return _require_super_admin(authorization, current_user=get_current_user, super_admin_email=SUPER_ADMIN_EMAIL)
 
 
 # ==================== Authentication ====================
@@ -1208,15 +1201,7 @@ async def get_speed_samples(device_id: str, authorization: Optional[str] = Heade
 async def get_profile(authorization: Optional[str] = Header(default=None)):
     """Get profile and user settings."""
     user = get_current_user(authorization)
-    return {
-        "id": user["id"],
-        "email": user["email"],
-        "username": user.get("username"),
-        "full_name": user.get("full_name"),
-        "avatar_data_url": user.get("avatar_data_url"),
-        "fleet_settings": user.get("fleet_settings", {}),
-        "notification_settings": user.get("notification_settings", {}),
-    }
+    return profile_response(user)
 
 
 @app.patch("/api/profile")
@@ -1239,16 +1224,7 @@ async def update_profile(payload: dict, authorization: Optional[str] = Header(de
     if "notification_settings" in payload and isinstance(payload["notification_settings"], dict):
         db.update_user_notification_settings(user_id, payload["notification_settings"])
 
-    updated = db.get_user(user_id)
-    return {
-        "id": updated["id"],
-        "email": updated["email"],
-        "username": updated.get("username"),
-        "full_name": updated.get("full_name"),
-        "avatar_data_url": updated.get("avatar_data_url"),
-        "fleet_settings": updated.get("fleet_settings", {}),
-        "notification_settings": updated.get("notification_settings", {}),
-    }
+    return profile_response(db.get_user(user_id))
 
 
 @app.get("/api/hive")
@@ -1256,26 +1232,7 @@ async def get_hive(authorization: Optional[str] = Header(default=None)):
     """Return a privacy-safe public swarm directory."""
     user = get_current_user(authorization)
     print(f"Hive page/list requested: user_id={user['id']}")
-    user_swarms = {row["id"]: row for row in db.get_user_swarms(user["id"])}
-    rows = []
-    for swarm in db.swarms.values():
-        owner = db.get_user(swarm.get("owner_id")) or {}
-        member = db.get_swarm_member(swarm["id"], user["id"])
-        rows.append({
-            "swarm_id": swarm["id"],
-            "swarm_name": public_swarm_name(swarm),
-            "owner_username": owner.get("username") or owner.get("full_name") or "Overlord",
-            "owner_avatar_data_url": owner.get("avatar_data_url"),
-            "drone_count": len([device for device in db.devices.values() if device.get("swarm_id") == swarm["id"] and device.get("approval_status", "approved") == "approved"]),
-            "current": swarm["id"] == db.default_swarm_id(user["id"]),
-            "viewer_role": member.get("role") if member else None,
-            "can_view": bool(member),
-        })
-    rows.sort(key=lambda row: str(row.get("swarm_name") or "").lower())
-    return {
-        "hive": rows,
-        "swarms": [{"id": row.get("id"), "name": public_swarm_name(row), "role": row.get("role")} for row in user_swarms.values()],
-    }
+    return hive_response(user, data_store=db)
 
 
 # ==================== ROM Management ====================

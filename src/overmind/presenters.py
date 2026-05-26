@@ -62,6 +62,48 @@ def public_swarm_name(swarm: dict) -> str:
     return "Personal Swarm" if "@" in name else name
 
 
+def profile_response(user: dict) -> dict:
+    """Return editable user profile and settings fields."""
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "username": user.get("username"),
+        "full_name": user.get("full_name"),
+        "avatar_data_url": user.get("avatar_data_url"),
+        "fleet_settings": user.get("fleet_settings", {}),
+        "notification_settings": user.get("notification_settings", {}),
+    }
+
+
+def hive_response(user: dict, *, data_store: Any) -> dict:
+    """Return a privacy-safe swarm directory for the Hive view."""
+    user_swarms = {row["id"]: row for row in data_store.get_user_swarms(user["id"])}
+    current_swarm_id = data_store.default_swarm_id(user["id"])
+    rows = []
+    for swarm in data_store.swarms.values():
+        owner = data_store.get_user(swarm.get("owner_id")) or {}
+        member = data_store.get_swarm_member(swarm["id"], user["id"])
+        rows.append({
+            "swarm_id": swarm["id"],
+            "swarm_name": public_swarm_name(swarm),
+            "owner_username": owner.get("username") or owner.get("full_name") or "Overlord",
+            "owner_avatar_data_url": owner.get("avatar_data_url"),
+            "drone_count": len([
+                device
+                for device in data_store.devices.values()
+                if device.get("swarm_id") == swarm["id"] and device.get("approval_status", "approved") == "approved"
+            ]),
+            "current": swarm["id"] == current_swarm_id,
+            "viewer_role": member.get("role") if member else None,
+            "can_view": bool(member),
+        })
+    rows.sort(key=lambda row: str(row.get("swarm_name") or "").lower())
+    return {
+        "hive": rows,
+        "swarms": [{"id": row.get("id"), "name": public_swarm_name(row), "role": row.get("role")} for row in user_swarms.values()],
+    }
+
+
 def device_response(device: dict, *, data_store: Any, offline_threshold_seconds: int) -> dict:
     """Return the public device shape for the Overmind UI."""
     last_seen = device.get("last_seen")
