@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from overmind import main as overmind_main
+from overmind import db as db_module
 from overmind.main import app, ensure_self_signed_cert, TOKEN_HASH_SECRET
 from overmind.db import db
 from overmind import auth as auth_utils
@@ -226,6 +227,96 @@ def test_notifications_capture_drone_status_transition_and_sync_trigger(client):
     assert sync.status_code == 200
     notifications = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]
     assert any(row["event_type"] == "sync_triggered" and "ROM sync" in row["message"] and "Source Drone" in row["message"] for row in notifications)
+
+
+def test_notification_delivery_uses_enabled_channels_and_selected_event_types(client, monkeypatch):
+    sent = []
+    webhooks = []
+
+    def fake_send_email(to_email, subject, html_body, text_body, from_email=None):
+        sent.append({"to": to_email, "subject": subject, "html": html_body, "text": text_body})
+        return True
+
+    def fake_post_webhook(webhook_url, payload):
+        webhooks.append({"url": webhook_url, "payload": payload})
+        return True
+
+    monkeypatch.setattr(db_module.notification_delivery.emailer, "send_email", fake_send_email)
+    monkeypatch.setattr(db_module.notification_delivery, "post_webhook", fake_post_webhook)
+    client.post("/api/auth/register", json={"email": "mailnotify@example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "mailnotify@example.com", "password": "testpass123"}).json()["access_token"]
+    user = db.get_user_by_email("mailnotify@example.com")
+    swarm_id = db.default_swarm_id(user["id"])
+
+    update = client.patch(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "notification_settings": {
+                "notify_email": True,
+                "notify_slack": True,
+                "notify_discord": False,
+                "slack_webhook": "https://hooks.slack.com/services/T/B/X",
+                "discord_webhook": "https://discord.com/api/webhooks/1/secret",
+                "email_address": "not-the-target@example.com",
+                "types": {"sync_triggered": True, "drone_status": False},
+            }
+        },
+    )
+    assert update.status_code == 200
+    assert "email_address" not in update.json()["notification_settings"]
+
+    db.add_swarm_notification(
+        swarm_id,
+        "sync_triggered",
+        "ROM sync triggered",
+        "Mail User triggered a ROM sync.",
+        {"sync_type": "ROM", "nature": "ROM sync for snes/Game.zip", "targets": [], "sources": []},
+        actor_user_id=user["id"],
+    )
+    db.add_swarm_notification(
+        swarm_id,
+        "drone_offline",
+        "Drone offline",
+        "Mail Drone is offline.",
+        {"device": {"device_id": "mail-drone", "device_name": "Mail Drone"}, "status": "offline"},
+    )
+
+    assert len(sent) == 1
+    assert sent[0]["to"] == "mailnotify@example.com"
+    assert "ROM sync triggered" in sent[0]["subject"]
+    assert "ROM sync for snes/Game.zip" in sent[0]["html"]
+    assert len(webhooks) == 1
+    assert webhooks[0]["url"] == "https://hooks.slack.com/services/T/B/X"
+    assert "ROM sync triggered" in webhooks[0]["payload"]["text"]
+    assert all("discord.com" not in row["url"] for row in webhooks)
+
+    sent.clear()
+    webhooks.clear()
+    client.patch(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "notification_settings": {
+                "notify_email": False,
+                "notify_slack": False,
+                "notify_discord": True,
+                "types": {"sync_triggered": True},
+            }
+        },
+    )
+    db.add_swarm_notification(
+        swarm_id,
+        "sync_triggered",
+        "BIOS sync triggered",
+        "Mail User triggered a BIOS sync.",
+        {"sync_type": "BIOS", "nature": "BIOS sync for dc/flash.bin", "targets": [], "sources": []},
+        actor_user_id=user["id"],
+    )
+    assert sent == []
+    assert len(webhooks) == 1
+    assert webhooks[0]["url"] == "https://discord.com/api/webhooks/1/secret"
+    assert webhooks[0]["payload"]["embeds"][0]["title"] == "BIOS sync triggered"
 
 
 def test_fake_data_populates_demo_notifications(client):

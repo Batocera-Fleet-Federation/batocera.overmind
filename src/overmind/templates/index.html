@@ -460,23 +460,16 @@
                                 <label style="display:flex; gap:10px; align-items:center;">
                                     <input type="checkbox" id="notify-email" onchange="toggleNotificationInputs()"> Notify Email
                                 </label>
-                                <div class="form-group">
-                                    <label>Email Address</label>
-                                    <input type="email" id="notify-email-address" placeholder="name@example.com" disabled readonly>
-                                    <div class="small text-muted mt-1">Uses the logged-in account email.</div>
-                                </div>
+                                <div class="small text-muted mb-3">Email notifications are sent to your registered account email.</div>
 
                                 <div class="form-group">
                                     <label>Notify on</label>
-                                    <label style="display:flex; gap:10px; align-items:center;">
-                                        <input type="checkbox" id="notify-type-gamelist-update"> Gamelist update
-                                    </label>
-                                    <label style="display:flex; gap:10px; align-items:center;">
-                                        <input type="checkbox" id="notify-type-device-offline"> Drone offline
-                                    </label>
-                                    <label style="display:flex; gap:10px; align-items:center;">
-                                        <input type="checkbox" id="notify-type-sync-failure"> Sync failure
-                                    </label>
+                                    <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="master_rom"> ROM master list changes</label>
+                                    <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="master_bios"> BIOS master list changes</label>
+                                    <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="master_artwork"> Artwork master list changes</label>
+                                    <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="drone_status"> Drone online/offline changes</label>
+                                    <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="drone_membership"> Drone added/removed from swarm</label>
+                                    <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="sync_triggered"> Sync triggered</label>
                                 </div>
 
                                 <button class="btn btn-primary" onclick="saveNotificationSettings()">Save Notification Settings</button>

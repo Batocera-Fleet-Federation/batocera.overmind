@@ -99,6 +99,31 @@ def test_ui_notifications_nav_and_polling_hooks():
     assert "startNotificationPolling();" in js
 
 
+def test_profile_notification_preferences_match_created_event_types():
+    root = Path(__file__).resolve().parents[1]
+    html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert 'id="notify-email-address"' not in html
+    assert "registered account email" in html
+    assert 'id="notify-slack"' in html
+    assert 'id="notify-discord"' in html
+    assert 'id="notify-slack-webhook"' in html
+    assert 'id="notify-discord-webhook"' in html
+    for notification_type in (
+        "master_rom",
+        "master_bios",
+        "master_artwork",
+        "drone_status",
+        "drone_membership",
+        "sync_triggered",
+    ):
+        assert f'data-notify-type="{notification_type}"' in html
+    for old_event_type in ("master_rom_added", "drone_offline", "drone_added"):
+        assert f'data-notify-type="{old_event_type}"' not in html
+    assert "selectedTypes[input.dataset.notifyType]" in js
+
+
 def test_env_only_config_is_unchanged_when_secret_missing(monkeypatch):
     monkeypatch.setenv("SMTP_PASSWORD", "from-env")
     refresher = RuntimeSecretRefresher(client=FakeSecretsClient(error=RuntimeError("not found")))

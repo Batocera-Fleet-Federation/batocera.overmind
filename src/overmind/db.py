@@ -7,6 +7,8 @@ from overmind import auth
 from overmind.drone_security import generate_drone_token, hash_drone_token, verify_drone_token
 from overmind.networking import resolve_reported_network
 from overmind.postgres_store import postgres_store
+from overmind import notification_delivery
+from overmind.notification_delivery import DEFAULT_NOTIFICATION_TYPES
 from overmind.models import User, Device, RomMetadata, GamePlay
 from overmind.device_snapshots import (
     append_game_log_sessions,
@@ -15,7 +17,6 @@ from overmind.device_snapshots import (
     merge_log_sources,
     merge_rom_metadata_hash_patch,
 )
-
 
 class FakeDatabase:
     """In-memory database using dictionaries."""
@@ -202,6 +203,7 @@ class FakeDatabase:
         bucket = self.notifications.setdefault(swarm_id, [])
         bucket.append(entry)
         del bucket[:-500]
+        notification_delivery.deliver_notification(self, entry)
         return entry
 
     def get_user_notifications(self, user_id: str, limit: int = 50) -> List[dict]:
@@ -362,12 +364,7 @@ class FakeDatabase:
                 "notify_email": True,
                 "slack_webhook": "",
                 "discord_webhook": "",
-                "email_address": email,
-                "types": {
-                    "gamelist_update": True,
-                    "device_offline": True,
-                    "sync_failure": True,
-                },
+                "types": dict(DEFAULT_NOTIFICATION_TYPES),
             },
             "created_at": datetime.utcnow(),
         }
@@ -652,7 +649,7 @@ class FakeDatabase:
         if not user:
             return None
         current = user.get("notification_settings", {})
-        merged = {**current, **{k: v for k, v in notification_settings.items() if k != "types"}}
+        merged = {**current, **{k: v for k, v in notification_settings.items() if k not in {"types", "email_address"}}}
         if "types" in notification_settings and isinstance(notification_settings["types"], dict):
             merged["types"] = {**current.get("types", {}), **notification_settings["types"]}
         user["notification_settings"] = merged

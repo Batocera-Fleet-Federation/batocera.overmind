@@ -1096,11 +1096,10 @@
                 document.getElementById('notify-email').checked = !!ns.notify_email;
                 document.getElementById('notify-slack-webhook').value = ns.slack_webhook || '';
                 document.getElementById('notify-discord-webhook').value = ns.discord_webhook || '';
-                document.getElementById('notify-email-address').value = currentProfile.email || '';
                 const types = ns.types || {};
-                document.getElementById('notify-type-gamelist-update').checked = !!types.gamelist_update;
-                document.getElementById('notify-type-device-offline').checked = !!types.device_offline;
-                document.getElementById('notify-type-sync-failure').checked = !!types.sync_failure;
+                document.querySelectorAll('.notify-type-checkbox').forEach(input => {
+                    input.checked = types[input.dataset.notifyType] !== false;
+                });
                 toggleNotificationInputs();
                 applyRbacUI();
                 loadSwarmAccess();
@@ -1117,7 +1116,9 @@
                 const emailEnabled = document.getElementById('notify-email').checked;
                 document.getElementById('notify-slack-webhook').disabled = !slackEnabled;
                 document.getElementById('notify-discord-webhook').disabled = !discordEnabled;
-                document.getElementById('notify-email-address').disabled = true;
+                document.querySelectorAll('.notify-type-checkbox').forEach(input => {
+                    input.disabled = !slackEnabled && !discordEnabled && !emailEnabled;
+                });
             }
 
             async function handleAvatarSelected(event) {
@@ -1255,6 +1256,10 @@
 
             async function saveNotificationSettings() {
                 try {
+                    const selectedTypes = {};
+                    document.querySelectorAll('.notify-type-checkbox').forEach(input => {
+                        selectedTypes[input.dataset.notifyType] = input.checked;
+                    });
                     const response = await apiPatch('/api/profile', {
                         notification_settings: {
                             notify_slack: document.getElementById('notify-slack').checked,
@@ -1262,12 +1267,7 @@
                             notify_email: document.getElementById('notify-email').checked,
                             slack_webhook: document.getElementById('notify-slack-webhook').value.trim(),
                             discord_webhook: document.getElementById('notify-discord-webhook').value.trim(),
-                            email_address: currentProfile.email || '',
-                            types: {
-                                gamelist_update: document.getElementById('notify-type-gamelist-update').checked,
-                                device_offline: document.getElementById('notify-type-device-offline').checked,
-                                sync_failure: document.getElementById('notify-type-sync-failure').checked
-                            }
+                            types: selectedTypes
                         }
                     });
                     if (!response.ok) throw new Error('Failed to save notification settings');
