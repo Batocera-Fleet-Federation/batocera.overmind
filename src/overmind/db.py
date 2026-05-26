@@ -43,6 +43,7 @@ class FakeDatabase:
         "swarms",
         "swarm_memberships",
         "invitations",
+        "notifications",
     )
     _PERSIST_AFTER_METHODS = {
         "create_user",
@@ -82,6 +83,7 @@ class FakeDatabase:
         "store_download_state",
         "log_gameplay",
         "populate_fake_data",
+        "populate_fake_notifications",
         "create_email_verification",
         "verify_email_code",
         "create_password_reset",
@@ -96,6 +98,9 @@ class FakeDatabase:
         "admin_delete_device",
         "admin_delete_swarm",
         "admin_delete_user",
+        "add_swarm_notification",
+        "mark_notifications_read",
+        "dismiss_notifications",
     }
 
     def __getattribute__(self, name):
@@ -133,6 +138,7 @@ class FakeDatabase:
         self.swarms: Dict[str, dict] = {}
         self.swarm_memberships: Dict[str, Dict[str, dict]] = {}
         self.invitations: Dict[str, dict] = {}
+        self.notifications: Dict[str, list] = {}
         self._load_persistent_state()
 
     def _state_snapshot(self) -> dict:
@@ -160,6 +166,178 @@ class FakeDatabase:
         internal_id = internal_device["id"]
         existing = self.gamelogs.get(internal_id, [])
         self.gamelogs[internal_id] = append_game_log_sessions(existing, device_id, sessions)
+
+    def _device_label(self, device: Optional[dict], fallback: Optional[str] = None) -> str:
+        if not device:
+            return str(fallback or "")
+        info = device.get("system_info") if isinstance(device.get("system_info"), dict) else {}
+        return str(device.get("device_name") or info.get("hostname") or device.get("device_id") or fallback or "")
+
+    def _notification_devices(self, devices: list) -> list:
+        rows = []
+        for item in devices:
+            if not isinstance(item, dict):
+                continue
+            device_id = str(item.get("device_id") or item.get("drone_id") or "").strip()
+            if not device_id:
+                continue
+            device = self.get_device_by_device_id(device_id) or item
+            rows.append({"device_id": device_id, "device_name": self._device_label(device, device_id)})
+        return rows
+
+    def add_swarm_notification(self, swarm_id: str, event_type: str, title: str, message: str, details: Optional[dict] = None, actor_user_id: Optional[str] = None) -> dict:
+        if not swarm_id:
+            return {}
+        entry = {
+            "id": str(uuid.uuid4()),
+            "swarm_id": swarm_id,
+            "event_type": event_type,
+            "title": title,
+            "message": message,
+            "details": details if isinstance(details, dict) else {},
+            "actor_user_id": actor_user_id,
+            "created_at": datetime.utcnow(),
+            "read_by": {},
+        }
+        bucket = self.notifications.setdefault(swarm_id, [])
+        bucket.append(entry)
+        del bucket[:-500]
+        return entry
+
+    def get_user_notifications(self, user_id: str, limit: int = 50) -> List[dict]:
+        swarm_ids = {row["id"] for row in self.get_user_swarms(user_id)}
+        rows = []
+        for swarm_id in swarm_ids:
+            swarm = self.swarms.get(swarm_id) or {}
+            for entry in self.notifications.get(swarm_id, []):
+                read_by = entry.get("read_by") if isinstance(entry.get("read_by"), dict) else {}
+                dismissed_by = entry.get("dismissed_by") if isinstance(entry.get("dismissed_by"), dict) else {}
+                if dismissed_by.get(user_id):
+                    continue
+                rows.append({
+                    **entry,
+                    "swarm_name": swarm.get("name"),
+                    "read": bool(read_by.get(user_id)),
+                })
+        rows.sort(key=lambda row: row.get("created_at") or datetime.min, reverse=True)
+        return rows[: max(1, int(limit))]
+
+    def mark_notifications_read(self, user_id: str, notification_ids: Optional[list] = None) -> int:
+        allowed_swarms = {row["id"] for row in self.get_user_swarms(user_id)}
+        wanted = {str(item) for item in notification_ids or [] if str(item)}
+        count = 0
+        now = datetime.utcnow()
+        for swarm_id in allowed_swarms:
+            for entry in self.notifications.get(swarm_id, []):
+                if wanted and entry.get("id") not in wanted:
+                    continue
+                read_by = entry.setdefault("read_by", {})
+                if not read_by.get(user_id):
+                    read_by[user_id] = now
+                    count += 1
+        return count
+
+    def dismiss_notifications(self, user_id: str, notification_ids: Optional[list] = None) -> int:
+        allowed_swarms = {row["id"] for row in self.get_user_swarms(user_id)}
+        wanted = {str(item) for item in notification_ids or [] if str(item)}
+        count = 0
+        now = datetime.utcnow()
+        for swarm_id in allowed_swarms:
+            for entry in self.notifications.get(swarm_id, []):
+                if wanted and entry.get("id") not in wanted:
+                    continue
+                dismissed_by = entry.setdefault("dismissed_by", {})
+                if dismissed_by.get(user_id):
+                    continue
+                dismissed_by[user_id] = now
+                entry.setdefault("read_by", {})[user_id] = now
+                count += 1
+        return count
+
+    def _master_snapshot_for_swarm(self, swarm_id: str, asset_type: str) -> Dict[tuple, dict]:
+        rows: Dict[tuple, dict] = {}
+        devices = [device for device in self.devices.values() if device.get("swarm_id") == swarm_id and device.get("approval_status", "approved") == "approved"]
+        for device in devices:
+            internal_id = device.get("id")
+            if asset_type == "rom":
+                for rom in self.roms.get(internal_id, []):
+                    key = self._rom_key(rom)
+                    if not key[1]:
+                        continue
+                    row = rows.setdefault(key, {
+                        "asset_type": "rom",
+                        "system_name": rom.get("system_name"),
+                        "name": rom.get("rom_name") or rom.get("file_path"),
+                        "path": rom.get("file_path") or rom.get("rom_name"),
+                        "md5": rom.get("rom_md5"),
+                        "devices": [],
+                    })
+                    row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
+            elif asset_type == "bios":
+                for bios in self.bios.get(internal_id, []):
+                    key = self._bios_key(bios)
+                    if not key[1]:
+                        continue
+                    row = rows.setdefault(key, {
+                        "asset_type": "bios",
+                        "name": bios.get("bios_name") or bios.get("file_path"),
+                        "path": bios.get("file_path") or bios.get("bios_name"),
+                        "md5": bios.get("bios_md5") or bios.get("md5"),
+                        "devices": [],
+                    })
+                    row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
+            elif asset_type == "artwork":
+                for artwork in self.artwork.get(internal_id, []):
+                    for artwork_type in artwork.get("artwork_types", []):
+                        key = self._artwork_key(artwork, artwork_type)
+                        if not key[0] or not key[1] or not key[2]:
+                            continue
+                        row = rows.setdefault(key, {
+                            "asset_type": "artwork",
+                            "system_name": artwork.get("system_name") or artwork.get("system"),
+                            "name": artwork.get("rom_name") or artwork.get("rom_path"),
+                            "path": artwork.get("rom_path") or artwork.get("file_path"),
+                            "artwork_type": artwork_type,
+                            "devices": [],
+                        })
+                        row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
+        return rows
+
+    def _notify_master_list_changes(self, swarm_id: Optional[str], before: Dict[str, Dict[tuple, dict]], after: Dict[str, Dict[tuple, dict]]) -> None:
+        if not swarm_id:
+            return
+        labels = {"rom": "ROM", "bios": "BIOS", "artwork": "artwork"}
+        for asset_type, label in labels.items():
+            previous = before.get(asset_type) or {}
+            current = after.get(asset_type) or {}
+            for key in sorted(set(current) - set(previous), key=str):
+                row = current[key]
+                devices = row.get("devices") or []
+                names = ", ".join(device.get("device_name") or device.get("device_id") for device in devices)
+                asset_label = row.get("path") or row.get("name") or label
+                if asset_type == "artwork" and row.get("artwork_type"):
+                    asset_label = f"{asset_label} ({row.get('artwork_type')})"
+                self.add_swarm_notification(
+                    swarm_id,
+                    f"master_{asset_type}_added",
+                    f"New {label} in master list",
+                    f"{asset_label} was added to the swarm master list from {names or 'a Drone'}.",
+                    {"asset": row, "devices": devices},
+                )
+            for key in sorted(set(previous) - set(current), key=str):
+                row = previous[key]
+                devices = row.get("devices") or []
+                names = ", ".join(device.get("device_name") or device.get("device_id") for device in devices)
+                asset_label = row.get("path") or row.get("name") or label
+                if asset_type == "artwork" and row.get("artwork_type"):
+                    asset_label = f"{asset_label} ({row.get('artwork_type')})"
+                self.add_swarm_notification(
+                    swarm_id,
+                    f"master_{asset_type}_removed",
+                    f"{label} removed from master list",
+                    f"{asset_label} was removed from the swarm master list after disappearing from {names or 'all Drones'}.",
+                    {"asset": row, "devices": devices},
+                )
     
     # User operations
     def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None, verified: bool = False, auth_provider: str = "password") -> str:
@@ -827,6 +1005,14 @@ class FakeDatabase:
         self.device_events[internal_id] = []
         self.peer_checks[internal_id] = []
         self.rom_sync_activity[internal_id] = []
+        self.devices[internal_id]["last_known_status"] = "online"
+        self.add_swarm_notification(
+            selected_swarm_id,
+            "drone_added",
+            "Drone added to swarm",
+            f"{device_name or device_id} was added to the swarm.",
+            {"device": {"device_id": device_id, "device_name": device_name or device_id}},
+        )
         return internal_id
 
     def add_device_admin_claim(self, user_id: str, device_id: str) -> Optional[dict]:
@@ -900,12 +1086,25 @@ class FakeDatabase:
     ):
         """Update last_seen timestamp for device."""
         if internal_id in self.devices:
-            self.devices[internal_id]["last_seen"] = datetime.utcnow()
+            device = self.devices[internal_id]
+            previous_status = device.get("last_known_status")
+            device["last_seen"] = datetime.utcnow()
+            if previous_status == "offline":
+                device["last_known_status"] = "online"
+                self.add_swarm_notification(
+                    device.get("swarm_id"),
+                    "drone_online",
+                    "Drone online",
+                    f"{self._device_label(device)} is online.",
+                    {"device": {"device_id": device.get("device_id"), "device_name": self._device_label(device)}, "status": "online"},
+                )
+            elif not previous_status:
+                device["last_known_status"] = "online"
             if network is not None:
                 network_state = resolve_reported_network(network)
-                self.devices[internal_id]["network"] = network_state["reported"]
-                self.devices[internal_id]["resolved_network"] = network_state["resolved"]
-                self.devices[internal_id]["swarm_connected"] = network_state["swarm_connected"]
+                device["network"] = network_state["reported"]
+                device["resolved_network"] = network_state["resolved"]
+                device["swarm_connected"] = network_state["swarm_connected"]
             if isinstance(rom_systems, list):
                 names = []
                 for system in rom_systems:
@@ -915,19 +1114,39 @@ class FakeDatabase:
                         name = str(system or "").strip()
                     if name and name not in names:
                         names.append(name)
-                self.devices[internal_id]["rom_systems"] = sorted(names)
+                device["rom_systems"] = sorted(names)
             if api_port is not None:
-                self.devices[internal_id]["api_port"] = api_port
+                device["api_port"] = api_port
             if scheme:
-                self.devices[internal_id]["scheme"] = scheme
+                device["scheme"] = scheme
             if reachable_url:
-                self.devices[internal_id]["reachable_url"] = reachable_url
+                device["reachable_url"] = reachable_url
             if isinstance(certificate, dict):
-                self.devices[internal_id]["certificate"] = self._clean_device_certificate(certificate)
+                device["certificate"] = self._clean_device_certificate(certificate)
             if isinstance(system_info, dict):
                 clean_info = dict(system_info)
                 clean_info["last_system_info_update"] = datetime.utcnow()
-                self.devices[internal_id]["system_info"] = clean_info
+                device["system_info"] = clean_info
+
+    def update_device_status_notifications(self, offline_seconds: int) -> None:
+        cutoff = datetime.utcnow() - timedelta(seconds=max(1, int(offline_seconds)))
+        for device in self.devices.values():
+            if device.get("approval_status", "approved") != "approved":
+                continue
+            is_online = bool(device.get("last_seen") and device.get("last_seen") >= cutoff)
+            current = "online" if is_online else "offline"
+            previous = device.get("last_known_status") or current
+            if previous == current:
+                device["last_known_status"] = current
+                continue
+            device["last_known_status"] = current
+            self.add_swarm_notification(
+                device.get("swarm_id"),
+                f"drone_{current}",
+                "Drone online" if current == "online" else "Drone offline",
+                f"{self._device_label(device)} is {current}.",
+                {"device": {"device_id": device.get("device_id"), "device_name": self._device_label(device)}, "status": current},
+            )
 
     def get_swarm_for_device(self, device_id: str, offline_seconds: int = 90) -> List[dict]:
         device = self.get_device_by_device_id(device_id)
@@ -1033,6 +1252,8 @@ class FakeDatabase:
             return False
 
         internal_id = device["id"]
+        swarm_id = device.get("swarm_id")
+        device_label = self._device_label(device, device_id)
         device["approval_status"] = "removed"
         device["removed_at"] = datetime.utcnow()
         self.device_actions[internal_id] = []
@@ -1041,6 +1262,13 @@ class FakeDatabase:
             if did != internal_id
         ]
         self.pending_drone_connections.pop(device_id, None)
+        self.add_swarm_notification(
+            swarm_id,
+            "drone_removed",
+            "Drone removed from swarm",
+            f"{device_label} was removed from the swarm.",
+            {"device": {"device_id": device_id, "device_name": device_label}},
+        )
         self._persist_state()
         return True
 
@@ -1224,6 +1452,12 @@ class FakeDatabase:
         device = self.get_device_by_device_id(device_id)
         if not device or not isinstance(metadata, dict):
             return
+        swarm_id = device.get("swarm_id")
+        before = {
+            "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
+            "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
+            "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
+        } if swarm_id else {}
         if metadata.get("update_mode") == "rom_hash_patch":
             metadata = merge_rom_metadata_hash_patch(device.get("rom_metadata"), metadata)
         systems = metadata.get("systems") if isinstance(metadata.get("systems"), list) else []
@@ -1264,6 +1498,12 @@ class FakeDatabase:
             self.add_bios(device_id, metadata.get("bios") or [])
         if isinstance(metadata.get("artwork"), list):
             self.add_artwork(device_id, metadata.get("artwork") or [])
+        after = {
+            "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
+            "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
+            "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
+        } if swarm_id else {}
+        self._notify_master_list_changes(swarm_id, before, after)
 
     def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)
@@ -2188,6 +2428,77 @@ class FakeDatabase:
             },
             user1_id,
         )
+
+    def populate_fake_notifications(self) -> None:
+        """Add varied sample notifications for demo/fake-data sessions."""
+        import random
+
+        demo_user = self.get_user_by_email("demo@example.com")
+        if not demo_user:
+            return
+        swarm_id = self.default_swarm_id(demo_user["id"])
+        if not swarm_id:
+            return
+        existing = self.notifications.setdefault(swarm_id, [])
+        existing[:] = [row for row in existing if not str(row.get("event_type") or "").startswith("fake_")]
+
+        rng = random.Random()
+        devices = [
+            {"device_id": "arcade-cabinet-001", "device_name": "Living Room Cabinet"},
+            {"device_id": "raspberry-pi-001", "device_name": "Bedroom Pi"},
+            {"device_id": "local-drone-a", "device_name": "Local Drone A"},
+            {"device_id": "local-drone-b", "device_name": "Local Drone B"},
+        ]
+        roms = [
+            ("snes", "Chrono Trigger.zip"),
+            ("snes", "Super Metroid.zip"),
+            ("genesis", "Streets of Rage 2.zip"),
+            ("psx", "Metal Gear Solid.zip"),
+            ("gba", "Metroid Fusion.zip"),
+        ]
+        templates = [
+            ("fake_master_rom_added", "New ROM in master list", "{asset} joined the master list from {source}.", "rom"),
+            ("fake_master_bios_added", "New BIOS in master list", "{asset} joined the master list from {source}.", "bios"),
+            ("fake_master_artwork_added", "New artwork in master list", "{asset} artwork is available from {source}.", "artwork"),
+            ("fake_master_rom_removed", "ROM removed from master list", "{asset} disappeared from the master list after leaving {source}.", "rom"),
+            ("fake_drone_offline", "Drone offline", "{source} went offline.", "drone"),
+            ("fake_drone_online", "Drone online", "{source} came back online.", "drone"),
+            ("fake_drone_added", "Drone added to swarm", "{source} joined the swarm.", "drone"),
+            ("fake_sync_triggered", "System sync triggered", "Demo User triggered a {asset} sync from {source} to {target}.", "sync"),
+        ]
+        for index in range(16):
+            event_type, title, message_template, kind = rng.choice(templates)
+            source = rng.choice(devices)
+            target = rng.choice([device for device in devices if device["device_id"] != source["device_id"]] or devices)
+            system, rom = rng.choice(roms)
+            if kind == "bios":
+                asset = rng.choice(["dc/flash.bin", "ps3/firmware.pup", "saturn/mpr-17933.bin"])
+            elif kind == "artwork":
+                asset = f"{system}/{rom} ({rng.choice(['image', 'boxart', 'wheel'])})"
+            elif kind == "sync":
+                asset = rng.choice([system, "artwork", "BIOS", "ROM"])
+            elif kind == "drone":
+                asset = source["device_name"]
+            else:
+                asset = f"{system}/{rom}"
+            message = message_template.format(asset=asset, source=source["device_name"], target=target["device_name"])
+            created_at = datetime.utcnow() - timedelta(minutes=rng.randint(3, 2880))
+            notification = self.add_swarm_notification(
+                swarm_id,
+                event_type,
+                title,
+                message,
+                {
+                    "asset": {"system": system, "path": rom, "kind": kind},
+                    "devices": [source],
+                    "target": target,
+                    "fake_data": True,
+                },
+                actor_user_id=demo_user["id"] if event_type == "fake_sync_triggered" else None,
+            )
+            notification["created_at"] = created_at
+            if index > 9:
+                notification.setdefault("read_by", {})[demo_user["id"]] = created_at + timedelta(minutes=1)
 
 
 # Global database instance

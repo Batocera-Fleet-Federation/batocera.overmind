@@ -1,6 +1,7 @@
 """Tests for the Batocera Overmind API."""
 
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,7 @@ def client(monkeypatch):
     db.swarms.clear()
     db.swarm_memberships.clear()
     db.invitations.clear()
+    db.notifications.clear()
     return TestClient(app)
 
 
@@ -164,6 +166,77 @@ def test_auth_refresh_requires_and_returns_valid_token(client):
     assert refreshed.status_code == 200
     assert refreshed.json()["access_token"]
     assert refreshed.json()["user"]["email"] == "refresh@example.com"
+
+
+def test_notifications_capture_master_list_add_and_read(client):
+    client.post("/api/auth/register", json={"email": "notify@example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "notify@example.com", "password": "testpass123"}).json()["access_token"]
+    user = db.get_user_by_email("notify@example.com")
+    db.create_device(user["id"], "notify-drone", "Notify Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    db.store_rom_metadata("notify-drone", {
+        "systems": [{"name": "snes"}],
+        "roms": [{"system": "snes", "rom_name": "Chrono Trigger", "file_path": "Chrono Trigger.zip", "rom_md5": "abc"}],
+        "bios": [{"file_path": "dc/flash.bin", "md5": "bios-md5"}],
+        "artwork": [{"system": "snes", "rom_path": "Chrono Trigger.zip", "artwork_types": ["image"]}],
+    })
+
+    response = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    notifications = response.json()["notifications"]
+    event_types = {row["event_type"] for row in notifications}
+    assert "master_rom_added" in event_types
+    assert "master_bios_added" in event_types
+    assert "master_artwork_added" in event_types
+    assert any("Notify Drone" in row["message"] and "Chrono Trigger.zip" in row["message"] for row in notifications)
+
+    read = client.post("/api/notifications/read", headers={"Authorization": f"Bearer {token}"}, json={})
+    assert read.status_code == 200
+    assert client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["unread_count"] == 0
+    first_id = notifications[0]["id"]
+    dismissed = client.post("/api/notifications/dismiss", headers={"Authorization": f"Bearer {token}"}, json={"ids": [first_id]})
+    assert dismissed.status_code == 200
+    remaining_ids = {row["id"] for row in client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]}
+    assert first_id not in remaining_ids
+
+
+def test_notifications_capture_drone_status_transition_and_sync_trigger(client):
+    client.post("/api/auth/register", json={"email": "syncnotify@example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "syncnotify@example.com", "password": "testpass123"}).json()["access_token"]
+    user = db.get_user_by_email("syncnotify@example.com")
+    db.create_device(user["id"], "source-drone", "Source Drone", {"ip_address": "10.0.0.2"}, raw_token="source-token")
+    db.create_device(user["id"], "target-drone", "Target Drone", {"ip_address": "10.0.0.3"}, raw_token="target-token")
+    db.add_roms("source-drone", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8}])
+    db.devices[db.get_device_by_device_id("target-drone")["id"]]["last_seen"] = datetime.utcnow() - timedelta(seconds=999)
+
+    devices = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+    assert devices.status_code == 200
+    assert any(row["event_type"] == "drone_offline" and "Target Drone" in row["message"] for row in client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"])
+
+    sync = client.post(
+        "/api/devices/target-drone/sync-rom",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8},
+    )
+    assert sync.status_code == 200
+    notifications = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]
+    assert any(row["event_type"] == "sync_triggered" and "ROM sync" in row["message"] and "Source Drone" in row["message"] for row in notifications)
+
+
+def test_fake_data_populates_demo_notifications(client):
+    db.populate_fake_data()
+    db.populate_fake_notifications()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    response = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    payload = response.json()
+    fake_rows = [row for row in payload["notifications"] if str(row.get("event_type") or "").startswith("fake_")]
+    assert len(fake_rows) >= 10
+    assert payload["unread_count"] > 0
 
 
 def test_invalid_login(client):

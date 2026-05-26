@@ -79,6 +79,26 @@ def test_ui_session_refreshes_while_active_and_times_out_after_30_minutes():
     assert "You were logged out after 30 minutes of inactivity." in js
 
 
+def test_ui_notifications_nav_and_polling_hooks():
+    root = Path(__file__).resolve().parents[1]
+    html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert 'id="notification-button"' in html
+    assert 'id="notification-badge"' in html
+    assert 'id="notification-panel"' in html
+    assert 'View All' in html
+    assert 'id="notifications-tab"' in html
+    assert "/api/notifications" in js
+    assert "/api/notifications/dismiss" in js
+    assert "99+" in js
+    assert "setupNotificationMenu();" in js
+    assert "closeNotificationsPanel()" in js
+    assert "loadNotificationsPage" in js
+    assert "Dismiss All Notifications" in html
+    assert "startNotificationPolling();" in js
+
+
 def test_env_only_config_is_unchanged_when_secret_missing(monkeypatch):
     monkeypatch.setenv("SMTP_PASSWORD", "from-env")
     refresher = RuntimeSecretRefresher(client=FakeSecretsClient(error=RuntimeError("not found")))

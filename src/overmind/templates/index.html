@@ -172,6 +172,24 @@
                         <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
                             <a href="#" role="button" class="btn nav-btn shared-swarm-nav requires-auth" id="shared-swarm-nav-btn" data-tab="shared-swarm" style="display:none" onclick="event.preventDefault(); openSelectedSharedSwarm()"><i class="bi bi-share me-2"></i><span id="shared-swarm-nav-label">Shared Swarm</span></a>
                             <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); goToMySwarm()"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
+                            <div class="notification-menu requires-auth" id="notification-menu">
+                                <button type="button" class="btn nav-btn notification-button" id="notification-button" aria-label="Notifications" title="Notifications" onclick="toggleNotificationsPanel()">
+                                    <i class="bi bi-bell"></i>
+                                    <span class="notification-badge" id="notification-badge" style="display:none;">0</span>
+                                </button>
+                                <div class="notification-panel" id="notification-panel" style="display:none;">
+                                    <div class="notification-panel-header">
+                                        <strong>Notifications</strong>
+                                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="markNotificationsRead()">Mark read</button>
+                                    </div>
+                                    <div id="notification-list" class="notification-list">
+                                        <div class="empty-state">No notifications yet.</div>
+                                    </div>
+                                    <div class="notification-panel-footer">
+                                        <button type="button" class="btn btn-primary btn-sm w-100" onclick="openNotificationsPage()">View All</button>
+                                    </div>
+                                </div>
+                            </div>
                             <details class="account-menu requires-auth" id="account-menu">
                                 <summary class="profile-chip" aria-label="Open account menu" title="Account menu">
                                     <img class="avatar-top-right" id="nav-profile-avatar" alt="">
@@ -472,6 +490,19 @@
                             </div>
                             <div id="hive-list" class="row g-3">
                                 <div class="empty-state">Loading swarms...</div>
+                            </div>
+                        </div>
+
+                        <div id="notifications-tab" class="content-section dashboard-tab" style="display: none;">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                                <h3 class="mb-0">Notifications</h3>
+                                <div class="d-flex flex-wrap gap-2">
+                                    <button class="btn btn-outline-primary btn-sm" type="button" onclick="loadNotificationsPage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                                    <button class="btn btn-outline-danger btn-sm" type="button" onclick="dismissAllNotifications()"><i class="bi bi-x-circle me-1"></i>Dismiss All Notifications</button>
+                                </div>
+                            </div>
+                            <div id="notifications-page-content">
+                                <div class="empty-state">Loading notifications...</div>
                             </div>
                         </div>
 

@@ -81,6 +81,7 @@
             let devicesRefreshTimer = null;
             let downloadsRefreshTimer = null;
             let downloadsRefreshInFlight = false;
+            let notificationsRefreshTimer = null;
             let inactivityTimer = null;
             let lastAuthRefreshAt = 0;
             let authRefreshInFlight = false;
@@ -95,13 +96,15 @@
                 devices: ['My Swarm', 'Systems and ROMs'],
                 hive: ['The Hive', 'Browse public swarm listings'],
                 profile: ['Profile', 'Account, access, and preferences'],
+                notifications: ['Notifications', 'Swarm event history'],
                 'super-admin': ['Super Admin', 'Users, swarms, and drones'],
                 help: ['Help', 'Install, connect, and configure Drones'],
             };
 
             document.addEventListener('DOMContentLoaded', async () => {
-                    setupInactivityTracking();
-                    setupAccountMenu();
+                setupInactivityTracking();
+                setupAccountMenu();
+                setupNotificationMenu();
 	                loadAuthProviders();
 	                handleOAuthReturn();
 	                handleAuthHashActions();
@@ -115,6 +118,7 @@
 	                    loadProfile();
                         loadDevices();
                         loadPendingConnections();
+                        loadNotifications();
                     } catch (error) {
                         console.error('Error restoring session:', error);
                         logout('Session expired. Please log in again.', '#/login');
@@ -238,6 +242,192 @@
                 });
                 await handleApiAuthFailure(response);
                 return response;
+            }
+
+            function renderNotifications(payload = {}) {
+                const rows = payload.notifications || [];
+                const unread = Number(payload.unread_count || 0);
+                const badge = document.getElementById('notification-badge');
+                const list = document.getElementById('notification-list');
+                if (badge) {
+                    badge.textContent = unread > 99 ? '99+' : String(unread);
+                    badge.style.display = unread > 0 ? '' : 'none';
+                    badge.setAttribute('aria-label', `${unread} unread notifications`);
+                }
+                if (!list) return;
+                if (!rows.length) {
+                    list.innerHTML = '<div class="empty-state">No notifications yet.</div>';
+                    return;
+                }
+                list.innerHTML = rows.slice(0, 5).map(row => {
+                    const created = row.created_at ? new Date(row.created_at).toLocaleString() : '';
+                    const swarm = row.swarm_name ? `<span>${escapeHtml(row.swarm_name)}</span>` : '';
+                    return `
+                        <div class="notification-item ${row.read ? '' : 'unread'}">
+                            <div class="notification-title">${escapeHtml(row.title || 'Notification')}</div>
+                            <div class="small mt-1">${escapeHtml(row.message || '')}</div>
+                            <div class="notification-meta">${[created, swarm].filter(Boolean).join(' · ')}</div>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            async function loadNotifications() {
+                if (!authToken) return;
+                try {
+                    const response = await apiGet('/api/notifications');
+                    if (!response.ok) throw new Error('Failed to load notifications');
+                    renderNotifications(await response.json());
+                } catch (error) {
+                    console.error('Error loading notifications:', error);
+                }
+            }
+
+            function toggleNotificationsPanel() {
+                const panel = document.getElementById('notification-panel');
+                if (!panel) return;
+                const shouldShow = panel.style.display === 'none' || !panel.style.display;
+                panel.style.display = shouldShow ? 'block' : 'none';
+                if (shouldShow) loadNotifications();
+            }
+
+            function closeNotificationsPanel() {
+                const panel = document.getElementById('notification-panel');
+                if (panel) panel.style.display = 'none';
+            }
+
+            function setupNotificationMenu() {
+                document.addEventListener('click', event => {
+                    const menu = document.getElementById('notification-menu');
+                    const panel = document.getElementById('notification-panel');
+                    if (!menu || !panel || panel.style.display === 'none') return;
+                    if (!menu.contains(event.target)) closeNotificationsPanel();
+                });
+            }
+
+            function openNotificationsPage() {
+                closeNotificationsPanel();
+                switchTab('notifications');
+            }
+
+            async function markNotificationsRead() {
+                if (!authToken) return;
+                try {
+                    const response = await fetch('/api/notifications/read', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: JSON.stringify({})
+                    });
+                    await handleApiAuthFailure(response);
+                    if (!response.ok) throw new Error('Failed to mark notifications read');
+                    await loadNotifications();
+                    if (currentTab === 'notifications') await loadNotificationsPage();
+                } catch (error) {
+                    console.error('Error marking notifications read:', error);
+                }
+            }
+
+            async function dismissNotification(notificationId) {
+                if (!authToken || !notificationId) return;
+                try {
+                    const response = await fetch('/api/notifications/dismiss', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: JSON.stringify({ ids: [notificationId] })
+                    });
+                    await handleApiAuthFailure(response);
+                    if (!response.ok) throw new Error('Failed to dismiss notification');
+                    await loadNotifications();
+                    await loadNotificationsPage();
+                } catch (error) {
+                    console.error('Error dismissing notification:', error);
+                    showMessage('Failed to dismiss notification.', 'error');
+                }
+            }
+
+            async function dismissAllNotifications() {
+                if (!authToken) return;
+                if (!window.confirm('Dismiss all notifications?')) return;
+                try {
+                    const response = await fetch('/api/notifications/dismiss', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: JSON.stringify({})
+                    });
+                    await handleApiAuthFailure(response);
+                    if (!response.ok) throw new Error('Failed to dismiss notifications');
+                    await loadNotifications();
+                    await loadNotificationsPage();
+                    showMessage('Notifications dismissed.', 'success');
+                } catch (error) {
+                    console.error('Error dismissing notifications:', error);
+                    showMessage('Failed to dismiss notifications.', 'error');
+                }
+            }
+
+            async function loadNotificationsPage() {
+                const container = document.getElementById('notifications-page-content');
+                if (!container || !authToken) return;
+                container.innerHTML = '<div class="empty-state">Loading notifications...</div>';
+                try {
+                    const response = await apiGet('/api/notifications?limit=250');
+                    if (!response.ok) throw new Error('Failed to load notifications');
+                    const rows = (await response.json()).notifications || [];
+                    if (!rows.length) {
+                        container.innerHTML = '<div class="empty-state">No notifications to show.</div>';
+                        return;
+                    }
+                    container.innerHTML = `
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle notifications-table">
+                                <thead>
+                                    <tr>
+                                        <th>Status</th>
+                                        <th>Notification</th>
+                                        <th>Swarm</th>
+                                        <th>Time</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${rows.map(row => {
+                                        const created = row.created_at ? new Date(row.created_at).toLocaleString() : '';
+                                        return `<tr class="${row.read ? '' : 'table-active'}">
+                                            <td><span class="badge ${row.read ? 'text-bg-secondary' : 'text-bg-primary'}">${row.read ? 'Read' : 'New'}</span></td>
+                                            <td>
+                                                <div class="fw-bold">${escapeHtml(row.title || 'Notification')}</div>
+                                                <div class="small">${escapeHtml(row.message || '')}</div>
+                                                <div class="small text-muted">${escapeHtml(row.event_type || '')}</div>
+                                            </td>
+                                            <td class="small">${escapeHtml(row.swarm_name || '')}</td>
+                                            <td class="small text-muted">${escapeHtml(created)}</td>
+                                            <td class="text-end">
+                                                <button class="btn btn-outline-danger btn-sm" type="button" onclick="dismissNotification('${escapeHtml(row.id || '')}')">Dismiss</button>
+                                            </td>
+                                        </tr>`;
+                                    }).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    `;
+                } catch (error) {
+                    console.error('Error loading notifications page:', error);
+                    container.innerHTML = '<div class="empty-state">Unable to load notifications.</div>';
+                }
+            }
+
+            function startNotificationPolling() {
+                if (notificationsRefreshTimer) clearInterval(notificationsRefreshTimer);
+                notificationsRefreshTimer = setInterval(loadNotifications, 60000);
             }
 
             async function loadAuthProviders() {
@@ -387,6 +577,7 @@
                     await loadProfile();
                     await loadDevices();
                     await loadPendingConnections();
+                    await loadNotifications();
                     showMessage('Overlord authenticated.', 'success');
                 } catch (error) {
                     showMessage('Login failed: ' + error.message, 'error');
@@ -552,6 +743,7 @@
 
 	            function logout(message = null, nextHash = '#/home') {
                 closeAccountMenu();
+                closeNotificationsPanel();
                 authToken = null;
                 currentUser = null;
                 currentProfile = null;
@@ -564,12 +756,18 @@
                 if (selectedDeviceDataRefreshTimer) clearInterval(selectedDeviceDataRefreshTimer);
                 if (devicesRefreshTimer) clearInterval(devicesRefreshTimer);
                 if (downloadsRefreshTimer) clearInterval(downloadsRefreshTimer);
+                if (notificationsRefreshTimer) clearInterval(notificationsRefreshTimer);
                 stopInactivityTimer();
                 pendingConnectionTimer = null;
                 actionRefreshTimer = null;
                 selectedDeviceDataRefreshTimer = null;
                 devicesRefreshTimer = null;
                 downloadsRefreshTimer = null;
+                notificationsRefreshTimer = null;
+                const notificationPanel = document.getElementById('notification-panel');
+                if (notificationPanel) notificationPanel.style.display = 'none';
+                const notificationBadge = document.getElementById('notification-badge');
+                if (notificationBadge) notificationBadge.style.display = 'none';
                 localStorage.removeItem('auth_token');
                 document.body.classList.remove('is-authenticated');
                 document.getElementById('auth-section').classList.add('active');
@@ -598,6 +796,7 @@
                 document.getElementById('dashboard-section').style.display = 'block';
                 setPageChrome(currentTab);
                 startPendingConnectionPolling();
+                startNotificationPolling();
                 resetInactivityTimer();
             }
 
@@ -3008,7 +3207,7 @@
                 const raw = window.location.hash || '#/devices';
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
-                const allowed = ['devices', 'hive', 'profile', 'super-admin', 'help'];
+                const allowed = ['devices', 'hive', 'profile', 'notifications', 'super-admin', 'help'];
                 if ((parts[0] === 'systems' || parts[0] === 'bios' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
                 }
@@ -3302,6 +3501,7 @@
                     devices: 'devices-tab',
                     hive: 'hive-tab',
                     profile: 'profile-tab',
+                    notifications: 'notifications-tab',
                     'super-admin': 'super-admin-tab',
                     help: 'help-tab',
                 };
@@ -3316,6 +3516,10 @@
                 }
                 if (tabName === 'profile') renderProfileUI();
                 if (tabName === 'hive') loadHive();
+                if (tabName === 'notifications') {
+                    markNotificationsRead();
+                    loadNotificationsPage();
+                }
                 if (tabName === 'super-admin') loadSuperAdmin();
                 updateSelectedDeviceSummary();
                 applyRbacUI();

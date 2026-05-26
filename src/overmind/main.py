@@ -251,6 +251,34 @@ def require_super_admin(authorization: Optional[str]) -> dict:
     return _require_super_admin(authorization, current_user=get_current_user, super_admin_email=SUPER_ADMIN_EMAIL)
 
 
+def _user_label(user: dict) -> str:
+    return str(user.get("full_name") or user.get("email") or user.get("id") or "Unknown user")
+
+
+def notify_sync_triggered(user: dict, device: dict, sync_type: str, nature: str, targets: list, sources: list, action: Optional[dict] = None) -> None:
+    swarm_id = device.get("swarm_id")
+    if not swarm_id:
+        return
+    target_devices = db._notification_devices(targets)
+    source_devices = db._notification_devices(sources)
+    target_names = ", ".join(row.get("device_name") or row.get("device_id") for row in target_devices) or db._device_label(device, device.get("device_id"))
+    source_names = ", ".join(row.get("device_name") or row.get("device_id") for row in source_devices) or "any available source"
+    db.add_swarm_notification(
+        swarm_id,
+        "sync_triggered",
+        f"{sync_type} sync triggered",
+        f"{_user_label(user)} triggered {nature} for {target_names} from {source_names}.",
+        {
+            "sync_type": sync_type,
+            "nature": nature,
+            "targets": target_devices or [{"device_id": device.get("device_id"), "device_name": db._device_label(device, device.get("device_id"))}],
+            "sources": source_devices,
+            "action_id": action.get("id") if isinstance(action, dict) else None,
+        },
+        actor_user_id=user.get("id"),
+    )
+
+
 # ==================== Authentication ====================
 
 @app.post("/api/auth/register", response_model=User)
@@ -528,6 +556,30 @@ async def list_swarms(authorization: Optional[str] = Header(default=None)):
     return {"swarms": [{**swarm, "current": swarm.get("id") == default_swarm_id} for swarm in db.get_user_swarms(user["id"])]}
 
 
+@app.get("/api/notifications")
+async def list_notifications(limit: int = 50, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    rows = db.get_user_notifications(user["id"], limit=limit)
+    unread = sum(1 for row in rows if not row.get("read"))
+    return {"notifications": rows, "unread_count": unread}
+
+
+@app.post("/api/notifications/read")
+async def mark_notifications_read(payload: dict = None, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    ids = payload.get("ids") if isinstance(payload, dict) and isinstance(payload.get("ids"), list) else None
+    count = db.mark_notifications_read(user["id"], ids)
+    return {"status": "ok", "marked_read": count}
+
+
+@app.post("/api/notifications/dismiss")
+async def dismiss_notifications(payload: dict = None, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    ids = payload.get("ids") if isinstance(payload, dict) and isinstance(payload.get("ids"), list) else None
+    count = db.dismiss_notifications(user["id"], ids)
+    return {"status": "ok", "dismissed": count}
+
+
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
@@ -652,6 +704,14 @@ async def accept_invitation(payload: dict, authorization: Optional[str] = Header
     if not invite:
         print(f"Invitation rejected for user={user.get('email')}: expired_or_used")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired invitation")
+    db.add_swarm_notification(
+        invite["swarm_id"],
+        "swarm_member_added",
+        "Swarm member added",
+        f"{_user_label(user)} joined the swarm.",
+        {"user_id": user["id"], "email": user.get("email")},
+        actor_user_id=user["id"],
+    )
     print(f"Invitation accepted for {user.get('email')}: swarm_id={invite['swarm_id']}")
     return {"status": "accepted", "swarm_id": invite["swarm_id"]}
 
@@ -661,8 +721,17 @@ async def remove_swarm_member(swarm_id: str, target_user_id: str, authorization:
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
     require_swarm_role(user, swarm_id, {"overlord"})
+    target = db.get_user(target_user_id) or {}
     if not db.remove_swarm_member(swarm_id, target_user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swarm member not found")
+    db.add_swarm_notification(
+        swarm_id,
+        "swarm_member_removed",
+        "Swarm member removed",
+        f"{_user_label(target)} was removed from the swarm by {_user_label(user)}.",
+        {"user_id": target_user_id, "email": target.get("email")},
+        actor_user_id=user["id"],
+    )
     return {"status": "removed"}
 
 
@@ -881,6 +950,7 @@ async def deny_drone_connection(device_id: str, authorization: Optional[str] = H
 async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List all devices for the authenticated user."""
     user = get_current_user(authorization)
+    db.update_device_status_notifications(SWARM_OFFLINE_THRESHOLD_SECONDS)
     sid = selected_swarm_id(user, swarm_id) if swarm_id else None
     devices = db.get_user_devices(user["id"], sid)
     
@@ -1567,6 +1637,7 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
         "rom_md5": payload.get("rom_md5"),
         "entry_type": payload.get("entry_type") or "file",
     })
+    notify_sync_triggered(user, device, "ROM", f"ROM sync for {system_name}/{rom_path}", [device], source_devices, action)
     return {"action": action}
 
 
@@ -1615,6 +1686,7 @@ async def sync_device_bios(device_id: str, payload: dict, authorization: Optiona
         "file_size": payload.get("file_size"),
         "bios_md5": payload.get("bios_md5") or payload.get("md5"),
     })
+    notify_sync_triggered(user, device, "BIOS", f"BIOS sync for {bios_path}", [device], source_devices, action)
     return {"action": action}
 
 
@@ -1665,6 +1737,7 @@ async def sync_device_artwork(device_id: str, payload: dict, authorization: Opti
         "action": "download",
         "status": "pending",
     })
+    notify_sync_triggered(user, device, "Artwork", f"{artwork_type} artwork sync for {system_name}/{rom_path}", [device], source_devices, action)
     return {"action": action}
 
 
@@ -1751,6 +1824,13 @@ async def sync_device_artwork_bulk(device_id: str, payload: dict, authorization:
             "status": "pending",
         })
 
+    if actions:
+        sources = []
+        for action in actions:
+            payload_devices = ((action.get("payload") or {}).get("devices") if isinstance(action.get("payload"), dict) else []) or []
+            sources.extend(payload_devices)
+        notify_sync_triggered(user, device, "Artwork", f"bulk artwork sync ({queued_assets} item(s))", [device], sources, actions[0])
+
     return {
         "status": "queued",
         "systems": sorted(systems) if systems else ["all"],
@@ -1788,6 +1868,7 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
         "action": "download",
         "status": "pending",
     })
+    notify_sync_triggered(user, device, "System", f"{system_name} system sync ({len(missing)} ROM item(s))", [device], [source for row in missing for source in (row.get("devices") or [])], action)
     return {"action": action}
 
 
@@ -1886,6 +1967,15 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
                     "action": "download",
                     "status": "pending",
                 })
+                notify_sync_triggered(
+                    user,
+                    devices[target_id],
+                    "Bulk system",
+                    f"{system_name} convergence sync ({len(missing)} ROM item(s))",
+                    [devices[target_id]],
+                    [source for row in missing for source in (row.get("devices") or [])],
+                    action,
+                )
 
     return {
         "status": "queued",
@@ -2120,12 +2210,14 @@ async def startup_event():
     if os.getenv("USE_FAKE_DATA", "").lower() == "true":
         print("\n📚 Loading sample data...")
         db.populate_fake_data()
+        db.populate_fake_notifications()
         print("✓ Sample data loaded successfully!")
         print("  • 2 demo users")
         print("  • 3 sample devices")
         print("  • 2 pending drone psionic connections")
         print("  • 10+ sample ROMs")
         print("  • 8 sample game plays")
+        print("  • sample notifications")
         print("\n  Demo Credentials:")
         print("  Email: demo@example.com")
         print("  Password: DemoPass123")
