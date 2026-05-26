@@ -1,19 +1,18 @@
 """Main FastAPI application."""
 
-import argparse
 import os
 import secrets
-import subprocess
 import urllib.parse
 import urllib.request
 import json
+from functools import partial
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional
 
 from overmind.models import (
     UserRegister, UserLogin, User, DeviceRegister,
@@ -24,10 +23,26 @@ from overmind.models import (
 from overmind.db import db
 from overmind import auth
 from overmind import emailer
+from overmind.account_notifications import (
+    send_invitation_email as _send_invitation_email,
+    send_password_reset_email as _send_password_reset_email,
+    send_verification_email as _send_verification_email,
+)
 from overmind.runtime_secrets import load_runtime_secret_once
 from overmind.drone_ca import sign_drone_csr
 from overmind.drone_security import generate_drone_token, hash_drone_token
 from overmind.postgres_store import database_url, postgres_store
+from overmind.tls_server import (
+    ensure_self_signed_cert as _ensure_self_signed_cert,
+    run_https_app as _run_https_app,
+)
+from overmind.presenters import (
+    admin_drone_row as _admin_drone_row,
+    admin_swarm_row as _admin_swarm_row,
+    admin_user_row as _admin_user_row,
+    device_response as _device_response,
+    public_swarm_name,
+)
 
 SUPER_ADMIN_EMAIL = "mr_jerrodh@hotmail.com"
 
@@ -55,6 +70,22 @@ VERSION_FILE = Path(__file__).resolve().parent.parent.parent / "VERSION"
 OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
 
+admin_user_row = partial(_admin_user_row, data_store=db, super_admin_email=SUPER_ADMIN_EMAIL)
+admin_swarm_row = partial(_admin_swarm_row, data_store=db)
+admin_drone_row = partial(_admin_drone_row, data_store=db)
+device_response = partial(_device_response, data_store=db, offline_threshold_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
+send_verification_email = partial(
+    _send_verification_email,
+    email_client=emailer,
+    ttl_minutes=VERIFICATION_TTL_MINUTES,
+)
+send_password_reset_email = partial(
+    _send_password_reset_email,
+    email_client=emailer,
+    ttl_minutes=PASSWORD_RESET_TTL_MINUTES,
+)
+send_invitation_email = partial(_send_invitation_email, email_client=emailer)
+
 
 def get_app_version() -> str:
     return os.getenv("OVERMIND_VERSION") or (VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "dev")
@@ -79,100 +110,12 @@ def apply_runtime_config_side_effects(values: dict[str, str]) -> None:
         TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 
 
-def _tls_file_pair_usable(key_file: Path, cert_file: Path) -> bool:
-    if not key_file.exists() or not cert_file.exists():
-        return False
-    checks = [
-        ["openssl", "x509", "-in", str(cert_file), "-noout"],
-        ["openssl", "pkey", "-in", str(key_file), "-noout"],
-    ]
-    try:
-        for cmd in checks:
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=5)
-        return True
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False
+def ensure_self_signed_cert():
+    return _ensure_self_signed_cert()
 
 
-def ensure_self_signed_cert() -> Tuple[Optional[Path], Optional[Path]]:
-    """Create a self-signed TLS certificate unless the configured pair is usable."""
-    cert_dir = Path(os.getenv("TLS_SELF_SIGNED_DIR", "./local-data/certs")).expanduser()
-    cert_dir.mkdir(parents=True, exist_ok=True)
-
-    key_file = cert_dir / "server.key"
-    cert_file = cert_dir / "server.crt"
-    if _tls_file_pair_usable(key_file, cert_file):
-        return key_file, cert_file
-
-    cmd = [
-        "openssl",
-        "req",
-        "-x509",
-        "-nodes",
-        "-days",
-        "3650",
-        "-newkey",
-        "rsa:2048",
-        "-keyout",
-        str(key_file),
-        "-out",
-        str(cert_file),
-        "-subj",
-        "/CN=localhost",
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-        return key_file, cert_file
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        print(f"Unable to create self-signed certificate: {exc}")
-        return None, None
-    
 def run_https_app() -> None:
-    """Run Overmind with HTTPS, creating a self-signed cert when TLS files are not provided."""
-    import uvicorn
-
-    parser = argparse.ArgumentParser(description="Run Batocera Overmind")
-    parser.add_argument("--host", default=os.getenv("OVERMIND_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("OVERMIND_PORT", "8443")))
-    parser.add_argument(
-        "--reload",
-        action="store_true",
-        default=os.getenv("OVERMIND_RELOAD", "false").strip().lower() in {"1", "true", "yes", "on"},
-    )
-    parser.add_argument("--ssl-keyfile", default=None)
-    parser.add_argument("--ssl-certfile", default=None)
-    args = parser.parse_args()
-
-    ssl_keyfile = args.ssl_keyfile
-    ssl_certfile = args.ssl_certfile
-
-    if not ssl_keyfile and not ssl_certfile:
-        generated_keyfile, generated_certfile = ensure_self_signed_cert()
-        ssl_keyfile = str(generated_keyfile) if generated_keyfile else None
-        ssl_certfile = str(generated_certfile) if generated_certfile else None
-
-        if ssl_keyfile and ssl_certfile:
-            print(f"Using self-signed TLS certificate: {ssl_certfile}")
-
-    elif not ssl_keyfile or not ssl_certfile:
-        raise RuntimeError("Both --ssl-keyfile and --ssl-certfile must be specified together.")
-    elif not _tls_file_pair_usable(Path(ssl_keyfile), Path(ssl_certfile)):
-        print(f"Configured TLS certificate/key are unusable; manufacturing self-signed certificate instead: {ssl_certfile}")
-        generated_keyfile, generated_certfile = ensure_self_signed_cert()
-        ssl_keyfile = str(generated_keyfile) if generated_keyfile else None
-        ssl_certfile = str(generated_certfile) if generated_certfile else None
-
-    if not ssl_keyfile or not ssl_certfile:
-        raise RuntimeError("HTTPS is required, but no TLS certificate/key could be loaded or generated.")
-
-    uvicorn.run(
-        "overmind.main:app" if args.reload else app,
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        ssl_keyfile=ssl_keyfile,
-        ssl_certfile=ssl_certfile,
-    )
+    _run_https_app(app, certificate_loader=ensure_self_signed_cert)
 
 # Add CORS middleware
 app.add_middleware(
@@ -259,20 +202,6 @@ def verify_secret_token(token: str, stored_hash: str) -> bool:
     return auth.verify_password(f"{TOKEN_HASH_SECRET}:{token}", stored_hash)
 
 
-def send_verification_email(user: dict, code: str, token: str) -> None:
-    link = f"{emailer.base_url()}/api/auth/verify-email?token={urllib.parse.quote(token)}"
-    body_html = emailer.render_email_template(
-        "registration_verification.html",
-        {"code": code, "verification_link": link, "ttl_minutes": VERIFICATION_TTL_MINUTES},
-    )
-    html_body, text_body = emailer.themed_email(
-        "Verify your Overmind account",
-        body_html,
-        f"Your Overmind validation code is {code}.\nVerify here: {link}\nThis code expires in {VERIFICATION_TTL_MINUTES} minutes.",
-    )
-    emailer.send_email(user["email"], "Verify your Batocera Overmind account", html_body, text_body)
-
-
 def create_and_send_verification(user: dict) -> None:
     code = f"{secrets.randbelow(1000000):06d}"
     raw_token = secrets.token_urlsafe(32)
@@ -283,34 +212,6 @@ def create_and_send_verification(user: dict) -> None:
         datetime.utcnow() + timedelta(minutes=VERIFICATION_TTL_MINUTES),
     )
     send_verification_email(user, code, raw_token)
-
-
-def send_password_reset_email(user: dict, token: str) -> None:
-    link = f"{emailer.base_url()}/#reset-password={urllib.parse.quote(token)}"
-    body_html = emailer.render_email_template(
-        "password_reset.html",
-        {"reset_link": link, "ttl_minutes": PASSWORD_RESET_TTL_MINUTES},
-    )
-    html_body, text_body = emailer.themed_email(
-        "Reset your Overmind password",
-        body_html,
-        f"Reset your Overmind password: {link}\nThis link expires in {PASSWORD_RESET_TTL_MINUTES} minutes.",
-    )
-    emailer.send_email(user["email"], "Reset your Batocera Overmind password", html_body, text_body)
-
-
-def send_invitation_email(email: str, swarm: dict, role: str, token: str) -> None:
-    link = f"{emailer.base_url()}/#invite={urllib.parse.quote(token)}"
-    body_html = emailer.render_email_template(
-        "swarm_invitation.html",
-        {"swarm_name": swarm.get("name"), "role": role, "invitation_link": link},
-    )
-    html_body, text_body = emailer.themed_email(
-        "You were invited to a Batocera swarm",
-        body_html,
-        f"You were invited to {swarm.get('name')} as {role}.\nAccept: {link}",
-    )
-    emailer.send_email(email, "Batocera Overmind swarm invitation", html_body, text_body)
 
 
 def ensure_active_user(user: dict) -> None:
@@ -346,102 +247,6 @@ def require_super_admin(authorization: Optional[str]) -> dict:
     if str(user.get("email") or "").strip().lower() != SUPER_ADMIN_EMAIL:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
     return user
-
-
-def admin_user_row(user: dict) -> dict:
-    user_id = user.get("id")
-    return {
-        "id": user_id,
-        "email": user.get("email"),
-        "username": user.get("username"),
-        "full_name": user.get("full_name"),
-        "auth_provider": user.get("auth_provider"),
-        "email_verified": bool(user.get("email_verified")),
-        "is_active": bool(user.get("is_active")),
-        "created_at": user.get("created_at"),
-        "swarm_count": sum(1 for members in db.swarm_memberships.values() if user_id in members),
-        "owned_swarm_count": sum(1 for swarm in db.swarms.values() if swarm.get("owner_id") == user_id),
-        "drone_count": sum(1 for device in db.devices.values() if device.get("user_id") == user_id),
-        "is_super_admin": str(user.get("email") or "").strip().lower() == SUPER_ADMIN_EMAIL,
-    }
-
-
-def admin_swarm_row(swarm: dict) -> dict:
-    owner = db.get_user(swarm.get("owner_id")) or {}
-    swarm_id = swarm.get("id")
-    return {
-        "id": swarm_id,
-        "name": swarm.get("name"),
-        "owner_id": swarm.get("owner_id"),
-        "owner_email": owner.get("email"),
-        "created_at": swarm.get("created_at"),
-        "member_count": len(db.swarm_memberships.get(swarm_id, {})),
-        "drone_count": sum(1 for device in db.devices.values() if device.get("swarm_id") == swarm_id),
-    }
-
-
-def admin_drone_row(device: dict) -> dict:
-    owner = db.get_user(device.get("user_id")) or {}
-    swarm = db.swarms.get(device.get("swarm_id")) or {}
-    return {
-        "id": device.get("id"),
-        "device_id": device.get("device_id"),
-        "device_name": device.get("device_name"),
-        "user_id": device.get("user_id"),
-        "owner_email": owner.get("email"),
-        "swarm_id": device.get("swarm_id"),
-        "swarm_name": swarm.get("name"),
-        "approval_status": device.get("approval_status", "approved"),
-        "swarm_connected": bool(device.get("swarm_connected")),
-        "registered_at": device.get("registered_at"),
-        "last_seen": device.get("last_seen"),
-        "reachable_url": device.get("reachable_url"),
-    }
-
-
-def public_swarm_name(swarm: dict) -> str:
-    name = str(swarm.get("name") or "Swarm")
-    return "Personal Swarm" if "@" in name else name
-
-
-def device_response(device: dict) -> dict:
-    """Public device shape for the Overmind UI."""
-    last_seen = device.get("last_seen")
-    online = False
-    try:
-        from datetime import datetime
-        online = bool(last_seen and last_seen >= datetime.utcnow() - timedelta(seconds=SWARM_OFFLINE_THRESHOLD_SECONDS))
-    except Exception:
-        online = False
-    cert = dict(device.get("certificate") or {})
-    cert.pop("private_key", None)
-    cert.pop("key", None)
-    return {
-        "id": device["id"],
-        "device_id": device["device_id"],
-        "device_name": device["device_name"],
-        "batocera_info": device["batocera_info"],
-        "system_info": device.get("system_info") or {},
-        "registered_at": device["registered_at"],
-        "last_seen": device["last_seen"],
-        "network": device.get("network") or {},
-        "resolved_network": device.get("resolved_network") or {"ipv4": [], "ipv6": []},
-        "swarm_connected": bool(device.get("swarm_connected")),
-        "rom_systems": device.get("rom_systems") or [],
-        "auto_sync_policy": device.get("auto_sync_policy") or {"enabled": False, "systems": []},
-        "last_speed_sample": device.get("last_speed_sample"),
-        "emulator_configs": device.get("emulator_configs"),
-        "log_sources": device.get("log_sources"),
-        "game_logs": device.get("game_logs"),
-        "token_rotated_at": device.get("token_rotated_at"),
-        "api_port": device.get("api_port"),
-        "scheme": device.get("scheme") or "https",
-        "reachable_url": device.get("reachable_url"),
-        "certificate": cert or None,
-        "peer_checks": db.get_latest_peer_checks(device.get("device_id")) if device.get("device_id") else [],
-        "online": online,
-        "status": "online" if online else "offline",
-    }
 
 
 # ==================== Authentication ====================
