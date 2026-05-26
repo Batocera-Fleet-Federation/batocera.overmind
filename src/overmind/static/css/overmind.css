@@ -843,32 +843,28 @@
             }
 
             .sidebar .btn {
-                border: 1px solid var(--admin-border) !important;
+                border: 0 !important;
                 text-align: left;
-                color: var(--admin-text) !important;
-                background: rgba(21, 31, 50, 0.72) !important;
-                padding: 0.62rem 0.85rem;
-                border-radius: 0.7rem;
-                font-weight: 800;
+                color: rgba(255, 255, 255, 0.92) !important;
+                background: transparent !important;
+                padding: 0.62rem 0.8rem;
+                border-radius: 0.45rem;
+                font-weight: 700;
                 font-size: 0.92rem;
                 transform: none !important;
                 box-shadow: none !important;
-                transition: border-color .2s ease, color .2s ease, background .2s ease, transform .2s ease;
+                transition: color .2s ease, background .2s ease;
             }
 
             .sidebar .btn:hover,
             .sidebar .btn:focus {
-                border-color: var(--admin-sidebar-accent) !important;
-                color: var(--admin-sidebar-accent) !important;
-                background: rgba(0, 194, 255, 0.10) !important;
-                transform: translateY(-1px) !important;
+                color: #fff !important;
+                background: rgba(255, 255, 255, 0.14) !important;
             }
 
             .sidebar .btn.active {
-                background: var(--admin-sidebar-accent) !important;
-                border-color: var(--admin-sidebar-accent) !important;
-                color: #06111f !important;
-                font-weight: 900;
+                background: rgba(255, 255, 255, 0.14) !important;
+                color: #fff !important;
             }
 
             .sidebar .resource-links {

@@ -50,14 +50,21 @@ def test_health_check(client):
     assert response.json()["version"].startswith("v")
 
 
-def test_ui_header_shows_stamped_version(client):
+def test_ui_header_hides_version_badge_without_environment_value(client, monkeypatch):
+    monkeypatch.delenv("OVERMIND_VERSION", raising=False)
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    version = Path(__file__).resolve().parents[1].joinpath("VERSION").read_text(encoding="utf-8").strip()
+    assert 'id="overmind-version-badge"' not in html
+    assert "__OVERMIND_VERSION_BADGE__" not in html
+
+
+def test_ui_header_shows_environment_version_badge(client, monkeypatch):
+    monkeypatch.setenv("OVERMIND_VERSION", "local:console & safe")
+    html = client.get("/").text
     assert 'id="overmind-version-badge"' in html
-    assert version in html
-    assert "__OVERMIND_VERSION__" not in html
+    assert "local:console &amp; safe" in html
+    assert "local:console & safe" not in html
 
 
 def test_ui_header_groups_account_actions_under_avatar_dropdown(client):
@@ -68,13 +75,17 @@ def test_ui_header_groups_account_actions_under_avatar_dropdown(client):
     assert 'id="nav-profile-avatar"' in html
     assert 'id="nav-profile-avatar-fallback"' in html
     assert 'role="button" class="btn nav-btn active requires-auth" data-tab="devices"' in html
-    assert 'role="button" class="btn nav-btn requires-auth" data-tab="hive"' in html
     assert '<nav class="account-menu-panel" aria-label="Account">' in html
+    assert '<a href="#/hive" class="account-menu-item nav-btn" data-tab="hive"' in html
+    assert html.index('data-tab="profile"') < html.index('data-tab="hive"') < html.index('data-tab="super-admin"')
     assert html.count('data-tab="profile"') == 1
+    assert html.count('data-tab="hive"') == 1
     assert html.count('data-tab="super-admin"') == 1
     assert "body:not(.is-authenticated) .sidebar .requires-auth { display: none !important; }" in css
     assert ".layout-shell aside {" in css and "z-index: 10000;" in css
     assert ".account-menu-panel {" in css and "z-index: 10002;" in css
+    assert "border: 0 !important;" in css
+    assert "background: rgba(255, 255, 255, 0.14) !important;" in css
     assert "renderAccountAvatar();" in js
     assert "closeAccountMenu(); logout()" in html
 

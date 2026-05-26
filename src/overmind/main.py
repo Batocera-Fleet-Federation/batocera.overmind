@@ -1,5 +1,6 @@
 """Main FastAPI application."""
 
+import html
 import os
 import secrets
 import urllib.parse
@@ -97,6 +98,14 @@ send_invitation_email = partial(_send_invitation_email, email_client=emailer)
 
 def get_app_version() -> str:
     return os.getenv("OVERMIND_VERSION") or (VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "dev")
+
+
+def get_version_badge_html() -> str:
+    """Render an optional runtime deployment label in the application navbar."""
+    version_label = os.getenv("OVERMIND_VERSION", "").strip()
+    if not version_label:
+        return ""
+    return f'<span class="badge text-bg-secondary" id="overmind-version-badge">{html.escape(version_label)}</span>'
 
 
 APP_VERSION = get_app_version()
@@ -2048,7 +2057,10 @@ async def favicon() -> Response:
 
 def get_ui_html() -> str:
     """Get the HTML for the web UI."""
-    return (TEMPLATES_DIR / "index.html").read_text(encoding="utf-8").replace("__OVERMIND_VERSION__", APP_VERSION)
+    return (TEMPLATES_DIR / "index.html").read_text(encoding="utf-8").replace(
+        "__OVERMIND_VERSION_BADGE__",
+        get_version_badge_html(),
+    )
 
 
 # ==================== Health Check ====================
