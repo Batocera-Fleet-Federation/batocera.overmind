@@ -483,6 +483,10 @@
 	                    pendingInvitationToken = new URLSearchParams(hash.slice(1)).get('invite');
                         if (pendingInvitationToken) sessionStorage.setItem('pending_invitation_token', pendingInvitationToken);
 	                    handleInvitationLink();
+	                } else if (hash.startsWith('#oauth_error=')) {
+	                    const params = new URLSearchParams(hash.slice(1));
+	                    showLandingAuth('login-form');
+	                    showMessage(params.get('oauth_error') || 'Social login failed. Please try again.', 'error');
 	                }
 	            }
 

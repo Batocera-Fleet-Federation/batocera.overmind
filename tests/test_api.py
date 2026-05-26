@@ -1,6 +1,9 @@
 """Tests for the Batocera Overmind API."""
 
+import io
+import json
 import sys
+import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -8,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from overmind import main as overmind_main
 from overmind.main import app, ensure_self_signed_cert, TOKEN_HASH_SECRET
 from overmind.db import db
 from overmind import auth as auth_utils
@@ -41,6 +45,7 @@ def client(monkeypatch):
     db.swarm_memberships.clear()
     db.invitations.clear()
     db.notifications.clear()
+    overmind_main.oauth_states.clear()
     return TestClient(app)
 
 
@@ -281,6 +286,76 @@ def test_social_auth_activates_existing_unverified_user(client, monkeypatch):
     assert user["email_verified"] is True
     assert user["is_active"] is True
     assert db.default_swarm_id(user["id"])
+
+
+class OAuthJsonResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+
+def test_social_auth_callback_redirects_on_github_user_unauthorized(client, monkeypatch):
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "github-client")
+    monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
+    overmind_main.oauth_states["state-1"] = "github"
+
+    def fake_urlopen(request, timeout=10):
+        if request.full_url == "https://github.com/login/oauth/access_token":
+            return OAuthJsonResponse({"access_token": "bad-token"})
+        raise urllib.error.HTTPError(
+            request.full_url,
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=io.BytesIO(b'{"message":"Bad credentials"}'),
+        )
+
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", fake_urlopen)
+    response = client.get(
+        "/api/auth/github/callback?code=code-1&state=state-1",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("/#oauth_error=GitHub%20login%20failed%20while%20loading%20account%20details.")
+    assert db.get_user_by_email("social-github@example.com") is None
+
+
+def test_social_auth_callback_completes_github_with_private_primary_email(client, monkeypatch):
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "github-client")
+    monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
+    overmind_main.oauth_states["state-2"] = "github"
+
+    def fake_urlopen(request, timeout=10):
+        if request.full_url == "https://github.com/login/oauth/access_token":
+            return OAuthJsonResponse({"access_token": "github-token"})
+        if request.full_url == "https://api.github.com/user":
+            return OAuthJsonResponse({"login": "octo"})
+        if request.full_url == "https://api.github.com/user/emails":
+            return OAuthJsonResponse([
+                {"email": "social-github@example.com", "primary": True, "verified": True},
+            ])
+        raise AssertionError(f"Unexpected OAuth URL {request.full_url}")
+
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", fake_urlopen)
+    response = client.get(
+        "/api/auth/github/callback?code=code-2&state=state-2",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("/#oauth_token=")
+    user = db.get_user_by_email("social-github@example.com")
+    assert user["full_name"] == "octo"
+    assert user["auth_provider"] == "github"
 
 
 def test_super_admin_overview_and_delete_permissions(client):

@@ -1,8 +1,10 @@
 """Main FastAPI application."""
 
 import html
+import logging
 import os
 import secrets
+import urllib.error
 import urllib.parse
 import urllib.request
 import json
@@ -13,7 +15,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Union
 
 from overmind.models import (
     UserRegister, UserLogin, User, DeviceRegister,
@@ -54,6 +56,7 @@ from overmind.presenters import (
 )
 
 SUPER_ADMIN_EMAIL = "mr_jerrodh@hotmail.com"
+logger = logging.getLogger("overmind.main")
 
 SUPPORTED_DEVICE_ACTIONS = {
     "restart",
@@ -171,6 +174,15 @@ OAUTH_PROVIDERS = {
 oauth_states: dict[str, str] = {}
 
 
+class OAuthProviderError(Exception):
+    """Raised when an upstream OAuth provider call fails."""
+
+    def __init__(self, provider: str, step: str):
+        self.provider = provider
+        self.step = step
+        super().__init__(f"{provider} OAuth {step} failed")
+
+
 def oauth_provider_enabled(provider: str) -> bool:
     """Return whether a social auth provider has the required ENV VARs."""
     config = OAUTH_PROVIDERS.get(provider)
@@ -183,6 +195,42 @@ def get_public_base_url(request: Request) -> str:
     if configured:
         return configured
     return str(request.base_url).rstrip("/")
+
+
+def oauth_failure_redirect(provider: str, message: str) -> RedirectResponse:
+    """Return browser OAuth callbacks to the UI with a readable failure."""
+    encoded_message = urllib.parse.quote(message)
+    encoded_provider = urllib.parse.quote(provider)
+    return RedirectResponse(f"/#oauth_error={encoded_message}&provider={encoded_provider}")
+
+
+def oauth_provider_label(provider: str) -> str:
+    """Return a user-facing OAuth provider label."""
+    return "GitHub" if provider == "github" else provider.title()
+
+
+def read_oauth_json(provider: str, step: str, request: urllib.request.Request) -> Union[dict, list]:
+    """Read JSON from an OAuth provider and log upstream failures without leaking tokens."""
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")[:500] if exc.fp else ""
+        logger.warning(
+            "OAuth provider request failed provider=%s step=%s status=%s reason=%s body=%s",
+            provider,
+            step,
+            exc.code,
+            exc.reason,
+            body,
+        )
+        raise OAuthProviderError(provider, step) from exc
+    except urllib.error.URLError as exc:
+        logger.warning("OAuth provider request failed provider=%s step=%s reason=%s", provider, step, exc.reason)
+        raise OAuthProviderError(provider, step) from exc
+    except json.JSONDecodeError as exc:
+        logger.warning("OAuth provider returned invalid JSON provider=%s step=%s", provider, step)
+        raise OAuthProviderError(provider, step) from exc
 
 
 def build_login_response(user: dict) -> dict:
@@ -451,32 +499,48 @@ async def social_auth_callback(provider: str, request: Request):
         headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urllib.request.urlopen(token_request, timeout=10) as response:
-        token_data = json.loads(response.read().decode())
-    access_token = token_data.get("access_token")
+    try:
+        token_data = read_oauth_json(provider, "token", token_request)
+    except OAuthProviderError:
+        return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login failed while requesting an access token.")
+    access_token = token_data.get("access_token") if isinstance(token_data, dict) else None
     if not access_token:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provider did not return a token")
+        response_keys = list(token_data.keys()) if isinstance(token_data, dict) else []
+        logger.warning("OAuth provider did not return an access token provider=%s response_keys=%s", provider, response_keys)
+        return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login did not return an access token.")
 
     user_request = urllib.request.Request(
         config["user_url"],
-        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "User-Agent": "batocera-overmind"},
     )
-    with urllib.request.urlopen(user_request, timeout=10) as response:
-        provider_user = json.loads(response.read().decode())
+    try:
+        provider_user = read_oauth_json(provider, "user", user_request)
+    except OAuthProviderError:
+        return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login failed while loading account details.")
+
+    if not isinstance(provider_user, dict):
+        logger.warning("OAuth provider returned unexpected user payload provider=%s", provider)
+        return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login returned unexpected account details.")
 
     email = provider_user.get("email")
     full_name = provider_user.get("name") or provider_user.get("login")
     if provider == "github" and not email:
         email_request = urllib.request.Request(
             config["email_url"],
-            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "User-Agent": "batocera-overmind"},
         )
-        with urllib.request.urlopen(email_request, timeout=10) as response:
-            emails = json.loads(response.read().decode())
+        try:
+            emails = read_oauth_json(provider, "email", email_request)
+        except OAuthProviderError:
+            return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login failed while loading email details.")
+        if not isinstance(emails, list):
+            logger.warning("OAuth provider returned unexpected email payload provider=%s", provider)
+            return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login returned unexpected email details.")
         primary = next((item for item in emails if item.get("primary") and item.get("verified")), None)
         email = (primary or emails[0]).get("email") if emails else None
     if not email:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provider did not return an email")
+        logger.warning("OAuth provider did not return an email provider=%s", provider)
+        return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login did not return a verified email.")
 
     user = db.get_or_create_social_user(email, full_name, provider)
     login_data = build_login_response(user)
