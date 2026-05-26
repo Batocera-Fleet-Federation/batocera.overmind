@@ -60,7 +60,8 @@ logger = logging.getLogger("overmind.main")
 
 SUPPORTED_DEVICE_ACTIONS = {
     "restart",
-    "update",
+    "enable_kiosk",
+    "disable_kiosk",
     "collect_rom_metadata",
     "collect_game_logs",
     "collect_emulator_configs",

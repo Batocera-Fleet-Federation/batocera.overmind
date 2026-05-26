@@ -291,6 +291,18 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
     assert "ROM sync triggered" in webhooks[0]["payload"]["text"]
     assert all("discord.com" not in row["url"] for row in webhooks)
 
+    db.add_swarm_notification(
+        swarm_id,
+        "device_action_completed",
+        "Remote action completed",
+        "Remote Restart completed on Mail Drone.",
+        {"device": {"device_id": "mail-drone", "device_name": "Mail Drone"}, "status": "completed"},
+    )
+    assert len(sent) == 2
+    assert "Remote Restart completed on Mail Drone." in sent[1]["html"]
+    assert len(webhooks) == 2
+    assert "Remote action completed" in webhooks[1]["payload"]["text"]
+
     sent.clear()
     webhooks.clear()
     client.patch(
@@ -2004,6 +2016,31 @@ def test_device_action_lifecycle(client):
     )
     assert complete_response.status_code == 200
     assert complete_response.json()["action"]["status"] == "completed"
+    actions_response = client.get(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert all(action["id"] != action_id for action in actions_response.json()["actions"])
+    action_notifications = [
+        row
+        for row in client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]
+        if row["event_type"] == "device_action_completed" and row["details"].get("action_id") == action_id
+    ]
+    assert len(action_notifications) == 1
+    assert "Remote Restart completed" in action_notifications[0]["message"]
+
+    retry_response = client.post(
+        f"/api/devices/arcade-cabinet-001/actions/{action_id}/complete",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={"status": "completed", "message": "Restart scheduled"},
+    )
+    assert retry_response.status_code == 200
+    action_notifications = [
+        row
+        for row in client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]
+        if row["event_type"] == "device_action_completed" and row["details"].get("action_id") == action_id
+    ]
+    assert len(action_notifications) == 1
 
 
 def test_action_results_append_logs_and_cap_stored_lines(client):
@@ -2196,11 +2233,41 @@ def test_shutdown_action_is_rejected_by_api(client):
     assert response.status_code == 400
 
 
+def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
+    db.populate_fake_data()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    for action_name in ("enable_kiosk", "disable_kiosk"):
+        response = client.post(
+            "/api/devices/arcade-cabinet-001/actions",
+            headers=headers,
+            json={"action": action_name},
+        )
+        assert response.status_code == 200
+        assert response.json()["action"]["action"] == action_name
+
+    update_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "update"},
+    )
+    assert update_response.status_code == 400
+
+
 def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     assert "queueDeviceAction('shutdown')" not in html
     assert ">Shutdown<" not in html
+    assert "queueDeviceAction('update')" not in html
+    assert ">Update<" not in html
+    assert ">Remote Restart<" in html
+    assert "queueDeviceAction('enable_kiosk')" in html
+    assert "queueDeviceAction('disable_kiosk')" in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_log_sources')\"" not in html
@@ -2209,6 +2276,15 @@ def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     assert "loadDeviceConfigs({queue:" not in js
     assert "if (currentDeviceView === 'gamelogs') loadGameLogs();" in js
     assert "if (currentDeviceView === 'configs') loadDeviceConfigs();" in js
+
+
+def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    start = js.index("function displayDevices()")
+    tile_renderer = js[start:js.index("function showSwarmHome", start)]
+
+    assert "Drone ID" not in tile_renderer
+    assert "Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}" in tile_renderer
 
 
 def test_invite_registration_ui_clears_pending_token_before_login():

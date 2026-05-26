@@ -11,3 +11,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release pipeline with GitHub Actions
 - Automated release notes generation
 - Release script for local creation
+- Drone actions now provide remote restart and Kiosk mode controls; completed actions leave the queue and appear as notifications.
+- Swarm Drone tiles now show the reported Batocera version instead of the internal Drone ID.

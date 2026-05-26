@@ -393,8 +393,9 @@
                                 </div>
                                 <div id="device-actions-panel" class="device-subpanel" style="display:none;">
                                     <div class="d-flex flex-wrap gap-2 mb-3 mutate-only">
-                                        <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Restart</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('update')"><i class="bi bi-download me-1"></i>Update</button>
+                                        <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Remote Restart</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('enable_kiosk')"><i class="bi bi-lock me-1"></i>Enable Kiosk</button>
+                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('disable_kiosk')"><i class="bi bi-unlock me-1"></i>Disable Kiosk</button>
                                         <button class="btn btn-outline-secondary btn-sm" onclick="loadDeviceActions()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
                                     </div>
                                     <div id="actions-list"></div>
@@ -470,6 +471,7 @@
                                     <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="drone_status"> Drone online/offline changes</label>
                                     <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="drone_membership"> Drone added/removed from swarm</label>
                                     <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="sync_triggered"> Sync triggered</label>
+                                    <label style="display:flex; gap:10px; align-items:center;"><input type="checkbox" class="notify-type-checkbox" data-notify-type="device_action"> Remote action completion</label>
                                 </div>
 
                                 <button class="btn btn-primary" onclick="saveNotificationSettings()">Save Notification Settings</button>

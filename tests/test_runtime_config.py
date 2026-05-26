@@ -117,6 +117,7 @@ def test_profile_notification_preferences_match_created_event_types():
         "drone_status",
         "drone_membership",
         "sync_triggered",
+        "device_action",
     ):
         assert f'data-notify-type="{notification_type}"' in html
     for old_event_type in ("master_rom_added", "drone_offline", "drone_added"):

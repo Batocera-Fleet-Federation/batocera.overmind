@@ -1481,8 +1481,7 @@
                                         <h5 class="card-title mb-0">${device.device_name}</h5>
                                         <i class="bi bi-hdd-network text-muted"></i>
                                     </div>
-                                    <div class="small text-muted mb-3">Drone ID</div>
-                                    <code class="small d-block text-break">${device.device_id}</code>
+                                    <div class="small text-muted mb-3">Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}</div>
                                     <div class="mt-3 d-flex flex-wrap gap-1">
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
@@ -3310,8 +3309,9 @@
                 const shouldRefreshActions = options.refreshActions !== false;
                 const shouldNotify = options.notify !== false;
                 const labels = {
-                    restart: 'restart',
-                    update: 'update',
+                    restart: 'remote restart',
+                    enable_kiosk: 'enable Kiosk mode',
+                    disable_kiosk: 'disable Kiosk mode',
                     collect_rom_metadata: 'collect ROM and system metadata',
                     collect_game_logs: 'collect Game Logs',
                     collect_emulator_configs: 'collect emulator configs',
@@ -3346,6 +3346,9 @@
 
             function formatActionName(actionName) {
                 const labels = {
+                    restart: 'Remote Restart',
+                    enable_kiosk: 'Enable Kiosk Mode',
+                    disable_kiosk: 'Disable Kiosk Mode',
                     collect_game_logs: 'Game Logs',
                     collect_emulator_configs: 'Emulator Configs',
                     collect_log_sources: 'Log Sources',

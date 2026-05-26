@@ -1365,11 +1365,16 @@ class FakeDatabase:
         return action
 
     def get_device_actions(self, user_id: str, device_id: str) -> Optional[List[dict]]:
-        """Get actions for a user's device."""
+        """Get currently queued or running actions for a user's device."""
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
             return None
-        return list(reversed(self.device_actions.get(device["id"], [])))
+        active = [
+            action
+            for action in self.device_actions.get(device["id"], [])
+            if action.get("status") in {"pending", "in_progress"}
+        ]
+        return list(reversed(active))
 
     def claim_next_device_action(self, device_id: str) -> Optional[dict]:
         """Claim the oldest pending action for a device."""
@@ -1412,6 +1417,8 @@ class FakeDatabase:
             return None
         for action in self.device_actions.get(device["id"], []):
             if action.get("id") == action_id:
+                if action.get("status") in {"completed", "failed"}:
+                    return action
                 action["status"] = status
                 action["completed_at"] = datetime.utcnow()
                 action["message"] = message
@@ -1423,6 +1430,31 @@ class FakeDatabase:
                         postgres_store.store_action_result(device_id, action_id, result)
                     except Exception as error:
                         print(f"Overmind PostgreSQL action result persistence failed: {error}")
+                action_label = {
+                    "restart": "Remote Restart",
+                    "enable_kiosk": "Enable Kiosk Mode",
+                    "disable_kiosk": "Disable Kiosk Mode",
+                }.get(
+                    str(action.get("action") or ""),
+                    str(action.get("action") or "action").replace("_", " ").title(),
+                )
+                device_label = self._device_label(device, device_id)
+                status_label = "completed" if status == "completed" else "failed"
+                message_text = f"{action_label} {status_label} on {device_label}."
+                if message:
+                    message_text = f"{message_text} {message}"
+                self.add_swarm_notification(
+                    device.get("swarm_id"),
+                    f"device_action_{status_label}",
+                    f"Remote action {status_label}",
+                    message_text,
+                    {
+                        "action_id": action_id,
+                        "action": action.get("action"),
+                        "status": status,
+                        "device": {"device_id": device_id, "device_name": device_label},
+                    },
+                )
                 return action
         return None
 

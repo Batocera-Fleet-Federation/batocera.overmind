@@ -26,6 +26,8 @@ NOTIFICATION_EVENT_TYPES = {
     "drone_added": "Drone added to swarm",
     "drone_removed": "Drone removed from swarm",
     "sync_triggered": "Sync triggered",
+    "device_action_completed": "Remote action completed",
+    "device_action_failed": "Remote action failed",
 }
 
 NOTIFICATION_TYPE_GROUPS = {
@@ -35,6 +37,7 @@ NOTIFICATION_TYPE_GROUPS = {
     "drone_status": ("drone_online", "drone_offline"),
     "drone_membership": ("drone_added", "drone_removed"),
     "sync_triggered": ("sync_triggered",),
+    "device_action": ("device_action_completed", "device_action_failed"),
 }
 
 EVENT_TYPE_TO_SETTING = {
@@ -57,6 +60,8 @@ _TEMPLATE_BY_EVENT_TYPE = {
     "drone_added": "notification_drone_membership.html",
     "drone_removed": "notification_drone_membership.html",
     "sync_triggered": "notification_sync_triggered.html",
+    "device_action_completed": "notification_device_action.html",
+    "device_action_failed": "notification_device_action.html",
 }
 
 
