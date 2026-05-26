@@ -106,10 +106,15 @@
 	                    authToken = token;
                     routeSwarmId = parseRoute().swarmId || null;
 	                    showDashboard();
+                    try {
 	                    await loadSwarms();
 	                    loadProfile();
-                    loadDevices();
-                    loadPendingConnections();
+                        loadDevices();
+                        loadPendingConnections();
+                    } catch (error) {
+                        console.error('Error restoring session:', error);
+                        logout('Session expired. Please log in again.', '#/login');
+                    }
                 } else {
                     const hash = window.location.hash || '';
                     const landing = document.querySelector('.landing-shell');

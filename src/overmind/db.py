@@ -189,6 +189,10 @@ class FakeDatabase:
             existing["auth_provider"] = existing.get("auth_provider") or provider
             if full_name and not existing.get("full_name"):
                 existing["full_name"] = full_name
+            existing["email_verified"] = True
+            existing["is_active"] = True
+            self.ensure_personal_swarm(existing["id"])
+            self.accept_invitations_for_email(email, existing["id"])
             return existing
 
         user_id = self.create_user(email, auth.hash_password(str(uuid.uuid4())), full_name, verified=True, auth_provider=provider)

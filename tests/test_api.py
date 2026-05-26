@@ -146,6 +146,29 @@ def test_social_auth_buttons_disabled_without_env(client, monkeypatch):
     assert response.json()["providers"] == {"google": False, "github": False}
 
 
+def test_social_auth_activates_existing_unverified_user(client, monkeypatch):
+    monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "github-client")
+    monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
+    client.post("/api/auth/register", json={"email": "social-existing@example.com", "password": "testpass123"})
+    user = db.get_user_by_email("social-existing@example.com")
+    assert user["email_verified"] is False
+    assert user["is_active"] is False
+
+    response = client.post(
+        "/api/auth/github",
+        json={"email": "social-existing@example.com", "full_name": "Social Existing"},
+    )
+    assert response.status_code == 200
+    token = response.json()["access_token"]
+    refreshed = client.post("/api/auth/refresh", headers={"Authorization": f"Bearer {token}"})
+    assert refreshed.status_code == 200
+    user = db.get_user_by_email("social-existing@example.com")
+    assert user["email_verified"] is True
+    assert user["is_active"] is True
+    assert db.default_swarm_id(user["id"])
+
+
 def test_email_registration_requires_verification(client, monkeypatch):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
     response = client.post(
