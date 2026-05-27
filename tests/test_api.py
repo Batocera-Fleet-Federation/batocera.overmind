@@ -2521,6 +2521,21 @@ def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
     assert update_response.status_code == 400
 
 
+def test_rebuild_asset_metadata_action_is_supported(client):
+    db.populate_fake_data()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "rebuild_asset_metadata"},
+    )
+    assert response.status_code == 200
+    assert response.json()["action"]["action"] == "rebuild_asset_metadata"
+
+
 def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
@@ -2529,6 +2544,8 @@ def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     assert "queueDeviceAction('update')" not in html
     assert ">Update<" not in html
     assert ">Remote Restart<" in html
+    assert "queueDeviceAction('rebuild_asset_metadata')" in html
+    assert ">Rebuild Asset Metadata<" in html
     assert "queueDeviceAction('enable_kiosk')" in html
     assert "queueDeviceAction('disable_kiosk')" in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html

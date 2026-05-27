@@ -146,13 +146,16 @@ class FakeDatabase:
         self._load_persistent_state()
 
     def _state_snapshot(self) -> dict:
-        return {field: getattr(self, field) for field in self._PERSISTED_FIELDS}
+        skipped = {"roms", "bios", "artwork"} if self._asset_store_enabled() else set()
+        return {field: getattr(self, field) for field in self._PERSISTED_FIELDS if field not in skipped}
 
     def _load_persistent_state(self) -> None:
         state = postgres_store.load_app_state()
         if not isinstance(state, dict):
             return
         for field in self._PERSISTED_FIELDS:
+            if self._asset_store_enabled() and field in {"roms", "bios", "artwork"}:
+                continue
             value = state.get(field)
             if isinstance(value, dict):
                 setattr(self, field, value)
@@ -265,7 +268,7 @@ class FakeDatabase:
         for device in devices:
             internal_id = device.get("id")
             if asset_type == "rom":
-                for rom in self.roms.get(internal_id, []):
+                for rom in self._asset_rows_for_device_internal(internal_id, "rom"):
                     key = self._rom_key(rom)
                     if not key[1]:
                         continue
@@ -279,7 +282,7 @@ class FakeDatabase:
                     })
                     row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
             elif asset_type == "bios":
-                for bios in self.bios.get(internal_id, []):
+                for bios in self._asset_rows_for_device_internal(internal_id, "bios"):
                     key = self._bios_key(bios)
                     if not key[1]:
                         continue
@@ -292,7 +295,7 @@ class FakeDatabase:
                     })
                     row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
             elif asset_type == "artwork":
-                for artwork in self.artwork.get(internal_id, []):
+                for artwork in self._asset_rows_for_device_internal(internal_id, "artwork"):
                     for artwork_type in artwork.get("artwork_types", []):
                         key = self._artwork_key(artwork, artwork_type)
                         if not key[0] or not key[1] or not key[2]:
@@ -307,6 +310,35 @@ class FakeDatabase:
                         })
                         row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
         return rows
+
+    def _asset_store_enabled(self) -> bool:
+        return postgres_store.assets_enabled()
+
+    def _asset_rows_for_device_internal(self, internal_id: str, asset_type: str, system_name: Optional[str] = None) -> List[dict]:
+        if self._asset_store_enabled():
+            return postgres_store.list_device_assets(internal_id, asset_type, system_name=system_name)
+        bucket = {"rom": self.roms, "bios": self.bios, "artwork": self.artwork}.get(asset_type, {})
+        rows = list(bucket.get(internal_id, []))
+        if system_name and asset_type == "rom":
+            rows = [row for row in rows if str(row.get("system_name") or "").lower() == system_name.lower()]
+        return rows
+
+    def _asset_rows_for_devices(self, devices: List[dict], asset_type: str) -> List[dict]:
+        if self._asset_store_enabled():
+            return postgres_store.list_assets_for_devices([device.get("id") for device in devices], asset_type)
+        rows = []
+        bucket = {"rom": self.roms, "bios": self.bios, "artwork": self.artwork}.get(asset_type, {})
+        for device in devices:
+            for row in bucket.get(device.get("id"), []):
+                rows.append({**row, "_device_internal_id": device.get("id")})
+        return rows
+
+    def _clear_device_assets(self, internal_id: str) -> None:
+        if self._asset_store_enabled():
+            postgres_store.clear_device_assets(internal_id)
+        self.roms[internal_id] = []
+        self.bios[internal_id] = []
+        self.artwork[internal_id] = []
 
     def _notify_master_list_changes(self, swarm_id: Optional[str], before: Dict[str, Dict[tuple, dict]], after: Dict[str, Dict[tuple, dict]]) -> None:
         if not swarm_id:
@@ -1334,6 +1366,8 @@ class FakeDatabase:
         owner_id = device.get("user_id")
         self.devices.pop(internal_id, None)
         self.device_admin_claims.pop(internal_id, None)
+        if self._asset_store_enabled():
+            postgres_store.clear_device_assets(internal_id)
         for bucket in (
             self.roms,
             self.bios,
@@ -1587,9 +1621,7 @@ class FakeDatabase:
             })
         replace_rows = update_mode != "inventory_chunk"
         if update_mode == "inventory_chunk" and int(metadata.get("chunk_index") or 0) == 0:
-            self.roms[device["id"]] = []
-            self.bios[device["id"]] = []
-            self.artwork[device["id"]] = []
+            self._clear_device_assets(device["id"])
         for system_name in reported_systems:
             self.add_roms(device_id, system_name, grouped.get(system_name, []), replace=replace_rows)
         if isinstance(row_metadata.get("bios"), list):
@@ -1627,6 +1659,16 @@ class FakeDatabase:
     def _apply_rom_metadata_hash_patch(self, device: dict, metadata: dict) -> None:
         """Apply ROM hash patches directly to stored ROM rows without rebuilding snapshots."""
         internal_id = device.get("id")
+        patches = metadata.get("roms") if isinstance(metadata.get("roms"), list) else []
+        if self._asset_store_enabled():
+            postgres_store.update_rom_hashes(internal_id, patches)
+            summary = dict(device.get("rom_metadata") or {})
+            summary["type"] = metadata.get("type") or summary.get("type") or "asset_metadata"
+            summary["update_mode"] = "rom_hash_patch"
+            summary["collected_at"] = metadata.get("collected_at") or summary.get("collected_at")
+            summary["hash_progress"] = metadata.get("hash_progress") or summary.get("hash_progress")
+            device["rom_metadata"] = summary
+            return
         rows = self.roms.setdefault(internal_id, [])
 
         def row_key(row: dict) -> tuple:
@@ -1635,7 +1677,7 @@ class FakeDatabase:
             return system, path
 
         by_key = {row_key(row): row for row in rows}
-        for patch in metadata.get("roms") if isinstance(metadata.get("roms"), list) else []:
+        for patch in patches:
             if not isinstance(patch, dict):
                 continue
             key = row_key(patch)
@@ -1774,20 +1816,12 @@ class FakeDatabase:
             return []
         
         internal_id = internal_device["id"]
-        rom_ids = []
-        
-        if internal_id not in self.roms:
-            self.roms[internal_id] = []
-        if replace:
-            self.roms[internal_id] = [
-                r for r in self.roms[internal_id]
-                if r.get("system_name") != system_name
-            ]
-        
+        cleaned = []
         for rom in roms:
-            rom_id = str(uuid.uuid4())
-            rom_entry = {
-                "id": rom_id,
+            if not isinstance(rom, dict):
+                continue
+            cleaned.append({
+                "id": str(uuid.uuid4()),
                 "device_id": device_id,
                 "system_name": system_name,
                 "rom_name": rom.get("rom_name"),
@@ -1800,7 +1834,27 @@ class FakeDatabase:
                 "modified_time": rom.get("modified_time"),
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
-            }
+            })
+        if self._asset_store_enabled():
+            return postgres_store.upsert_device_assets(
+                internal_id,
+                device_id,
+                "rom",
+                cleaned,
+                replace_system=system_name if replace else None,
+            )
+        rom_ids = []
+        
+        if internal_id not in self.roms:
+            self.roms[internal_id] = []
+        if replace:
+            self.roms[internal_id] = [
+                r for r in self.roms[internal_id]
+                if r.get("system_name") != system_name
+            ]
+        
+        for rom_entry in cleaned:
+            rom_id = rom_entry["id"]
             self.roms[internal_id].append(rom_entry)
             rom_ids.append(rom_id)
         
@@ -1821,17 +1875,15 @@ class FakeDatabase:
             return []
         internal_id = internal_device["id"]
         row_ids = []
-        if replace or internal_id not in self.bios:
-            self.bios[internal_id] = []
+        cleaned = []
         for item in bios_entries:
             if not isinstance(item, dict):
                 continue
             file_path = str(item.get("file_path") or item.get("relative_path") or item.get("path") or item.get("name") or "").strip()
             if not file_path:
                 continue
-            row_id = str(uuid.uuid4())
-            entry = {
-                "id": row_id,
+            cleaned.append({
+                "id": str(uuid.uuid4()),
                 "device_id": device_id,
                 "bios_name": item.get("bios_name") or item.get("name") or file_path,
                 "file_path": file_path,
@@ -1844,9 +1896,14 @@ class FakeDatabase:
                 "modified_time": item.get("modified_time") or item.get("mtime"),
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
-            }
+            })
+        if self._asset_store_enabled():
+            return postgres_store.upsert_device_assets(internal_id, device_id, "bios", cleaned, replace=replace)
+        if replace or internal_id not in self.bios:
+            self.bios[internal_id] = []
+        for entry in cleaned:
             self.bios[internal_id].append(entry)
-            row_ids.append(row_id)
+            row_ids.append(entry["id"])
         return row_ids
 
     def _bios_key(self, bios: dict) -> tuple:
@@ -1860,17 +1917,18 @@ class FakeDatabase:
         internal_device = self.get_device_by_device_id(device_id)
         if not internal_device:
             return []
-        return self.bios.get(internal_device["id"], [])
+        return self._asset_rows_for_device_internal(internal_device["id"], "bios")
 
     def get_master_bios_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)
         if not selected or selected["user_id"] != user_id:
             return None
         devices = {device["device_id"]: device for device in self.get_user_devices(user_id)}
-        selected_keys = {self._bios_key(row) for row in self.bios.get(selected["id"], [])}
+        selected_keys = {self._bios_key(row) for row in self._asset_rows_for_device_internal(selected["id"], "bios")}
         master: Dict[tuple, dict] = {}
-        for device in devices.values():
-            for bios in self.bios.get(device["id"], []):
+        for bios in self._asset_rows_for_devices(list(devices.values()), "bios"):
+            device = devices.get(bios.get("device_id")) or {}
+            if device:
                 key = self._bios_key(bios)
                 if not key[1]:
                     continue
@@ -1901,8 +1959,10 @@ class FakeDatabase:
 
     def get_swarm_master_bios(self, user_id: str) -> List[dict]:
         master: Dict[tuple, dict] = {}
-        for device in self.get_user_devices(user_id):
-            for bios in self.bios.get(device["id"], []):
+        devices = {device["id"]: device for device in self.get_user_devices(user_id)}
+        for bios in self._asset_rows_for_devices(list(devices.values()), "bios"):
+            device = devices.get(bios.get("_device_internal_id")) or {}
+            if device:
                 key = self._bios_key(bios)
                 if not key[1]:
                     continue
@@ -1935,8 +1995,7 @@ class FakeDatabase:
             return []
         internal_id = internal_device["id"]
         row_ids = []
-        if replace or internal_id not in self.artwork:
-            self.artwork[internal_id] = []
+        cleaned = []
         for item in artwork_entries:
             if not isinstance(item, dict):
                 continue
@@ -1946,9 +2005,8 @@ class FakeDatabase:
             types = sorted({str(value).strip() for value in types if str(value).strip()})
             if not system or not rom_path or not types:
                 continue
-            row_id = str(uuid.uuid4())
-            row = {
-                "id": row_id,
+            cleaned.append({
+                "id": str(uuid.uuid4()),
                 "device_id": device_id,
                 "asset_type": "artwork",
                 "system_name": system,
@@ -1961,9 +2019,14 @@ class FakeDatabase:
                 "metadata_source": item.get("metadata_source") or "gamelist.xml",
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
-            }
+            })
+        if self._asset_store_enabled():
+            return postgres_store.upsert_device_assets(internal_id, device_id, "artwork", cleaned, replace=replace)
+        if replace or internal_id not in self.artwork:
+            self.artwork[internal_id] = []
+        for row in cleaned:
             self.artwork[internal_id].append(row)
-            row_ids.append(row_id)
+            row_ids.append(row["id"])
         return row_ids
 
     def _artwork_key(self, row: dict, artwork_type: str) -> tuple:
@@ -1980,12 +2043,13 @@ class FakeDatabase:
         devices = {device["device_id"]: device for device in self.get_user_devices(user_id)}
         selected_keys = {
             self._artwork_key(row, artwork_type)
-            for row in self.artwork.get(selected["id"], [])
+            for row in self._asset_rows_for_device_internal(selected["id"], "artwork")
             for artwork_type in row.get("artwork_types", [])
         }
         master: Dict[tuple, dict] = {}
-        for device in devices.values():
-            for item in self.artwork.get(device["id"], []):
+        for item in self._asset_rows_for_devices(list(devices.values()), "artwork"):
+            device = devices.get(item.get("device_id")) or {}
+            if device:
                 for artwork_type in item.get("artwork_types", []):
                     key = self._artwork_key(item, artwork_type)
                     if not key[0] or not key[1] or not key[2]:
@@ -2016,10 +2080,11 @@ class FakeDatabase:
         if not selected or selected["user_id"] != user_id:
             return None
         devices = {device["device_id"]: device for device in self.get_user_devices(user_id)}
-        selected_keys = {self._rom_key(rom) for rom in self.roms.get(selected["id"], [])}
+        selected_keys = {self._rom_key(rom) for rom in self._asset_rows_for_device_internal(selected["id"], "rom")}
         master: Dict[tuple, dict] = {}
-        for device in devices.values():
-            for rom in self.roms.get(device["id"], []):
+        for rom in self._asset_rows_for_devices(list(devices.values()), "rom"):
+            device = devices.get(rom.get("device_id")) or {}
+            if device:
                 key = self._rom_key(rom)
                 if not key[0] or not key[1]:
                     continue
@@ -2049,8 +2114,10 @@ class FakeDatabase:
 
     def get_swarm_master_roms(self, user_id: str) -> List[dict]:
         master: Dict[tuple, dict] = {}
-        for device in self.get_user_devices(user_id):
-            for rom in self.roms.get(device["id"], []):
+        devices = {device["id"]: device for device in self.get_user_devices(user_id)}
+        for rom in self._asset_rows_for_devices(list(devices.values()), "rom"):
+            device = devices.get(rom.get("_device_internal_id")) or {}
+            if device:
                 key = self._rom_key(rom)
                 if not key[1]:
                     continue
@@ -2213,20 +2280,21 @@ class FakeDatabase:
         internal_device = self.get_device_by_device_id(device_id)
         if not internal_device:
             return []
-        internal_id = internal_device["id"]
-        return self.roms.get(internal_id, [])
+        return self._asset_rows_for_device_internal(internal_device["id"], "rom")
     
     def get_device_roms_by_system(self, device_id: str, system_name: str) -> List[dict]:
         """Get ROMs for a device filtered by system."""
-        all_roms = self.get_device_roms(device_id)
-        return [r for r in all_roms if r.get("system_name") == system_name]
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        return self._asset_rows_for_device_internal(internal_device["id"], "rom", system_name=system_name)
 
     def get_user_systems_summary(self, user_id: str) -> List[dict]:
         """Get system summary across all devices owned by a user."""
         summary: Dict[str, dict] = {}
         for device in self.get_user_devices(user_id):
             internal_id = device["id"]
-            device_roms = self.roms.get(internal_id, [])
+            device_roms = self._asset_rows_for_device_internal(internal_id, "rom")
             for rom in device_roms:
                 system_name = rom.get("system_name")
                 if not system_name:

@@ -3376,6 +3376,7 @@
                 const shouldNotify = options.notify !== false;
                 const labels = {
                     restart: 'remote restart',
+                    rebuild_asset_metadata: 'rebuild asset metadata',
                     enable_kiosk: 'enable Kiosk mode',
                     disable_kiosk: 'disable Kiosk mode',
                     collect_rom_metadata: 'collect ROM and system metadata',
@@ -3413,6 +3414,7 @@
             function formatActionName(actionName) {
                 const labels = {
                     restart: 'Remote Restart',
+                    rebuild_asset_metadata: 'Rebuild Asset Metadata',
                     enable_kiosk: 'Enable Kiosk Mode',
                     disable_kiosk: 'Disable Kiosk Mode',
                     collect_game_logs: 'Game Logs',
@@ -3425,6 +3427,7 @@
 
             function summarizeActionResult(result) {
                 if (!result) return '';
+                if (result.type === 'asset_metadata_rebuild') return `${result.rom_count || 0} ROM entries, ${result.bios_count || 0} BIOS files, ${result.artwork_count || 0} artwork rows uploaded`;
                 if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;
                 if (result.type === 'game_logs') return `${(result.sessions || []).length} parsed play sessions, ${(result.logs || []).length} logs`;
                 if (result.type === 'emulator_configs') return `${(result.configs || []).length} config files`;

@@ -67,6 +67,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "enable_kiosk",
     "disable_kiosk",
     "collect_rom_metadata",
+    "rebuild_asset_metadata",
     "collect_game_logs",
     "collect_emulator_configs",
     "collect_log_sources",
