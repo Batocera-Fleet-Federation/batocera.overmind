@@ -99,8 +99,10 @@ DNS from EC2.
 
 ## Networking Notes
 
-Lambda functions run inside the Overmind VPC so they can reach RDS through RDS
-Proxy. The stack adds a Secrets Manager VPC endpoint for cold-start secret
-loading. External outbound access for SMTP, OAuth, Slack/Discord webhooks, or
-other public APIs still requires NAT or a provider-specific VPC endpoint. The
-existing EC2 deployment is not changed.
+Lambda functions run inside the Overmind VPC so they can reach RDS. Direct RDS
+connectivity is the default because some AWS free-plan accounts block RDS
+Proxy. Set `enable_rds_proxy = true` in Terraform when the account supports it.
+The stack adds a Secrets Manager VPC endpoint for cold-start secret loading.
+External outbound access for SMTP, OAuth, Slack/Discord webhooks, or other
+public APIs still requires NAT or a provider-specific VPC endpoint. The existing
+EC2 deployment is not changed.
