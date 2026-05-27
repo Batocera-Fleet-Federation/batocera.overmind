@@ -1541,16 +1541,16 @@ class FakeDatabase:
         swarm_id = device.get("swarm_id")
         update_mode = metadata.get("update_mode")
         is_inventory_chunk = update_mode == "inventory_chunk"
+        if update_mode == "rom_hash_patch":
+            self._apply_rom_metadata_hash_patch(device, metadata)
+            return
         before = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
             "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
         } if swarm_id and not is_inventory_chunk else {}
         row_metadata = metadata
-        if update_mode == "rom_hash_patch":
-            metadata = merge_rom_metadata_hash_patch(device.get("rom_metadata"), metadata)
-            row_metadata = metadata
-        elif update_mode == "inventory_chunk":
+        if update_mode == "inventory_chunk":
             row_metadata = metadata
             metadata = self._merge_rom_metadata_inventory_chunk(device, metadata)
         systems = metadata.get("systems") if isinstance(metadata.get("systems"), list) else []
@@ -1605,28 +1605,65 @@ class FakeDatabase:
             self._notify_master_list_changes(swarm_id, before, after)
 
     def _merge_rom_metadata_inventory_chunk(self, device: dict, incoming: dict) -> dict:
-        """Merge an inventory chunk into the device snapshot retained for UI use."""
+        """Retain lightweight inventory progress without copying every asset row."""
         chunk_index = int(incoming.get("chunk_index") or 0)
-        merged = dict(device.get("rom_metadata") or {}) if chunk_index else {}
-        for key in ("type", "device_id", "update_mode", "inventory_id", "chunk_total", "inventory_counts", "collected_at"):
+        previous = device.get("rom_metadata") if isinstance(device.get("rom_metadata"), dict) else {}
+        merged = dict(previous) if chunk_index else {}
+        for key in ("type", "device_id", "update_mode", "inventory_id", "chunk_total", "inventory_counts", "collected_at", "roms_root", "bios_root", "cache"):
             if key in incoming:
                 merged[key] = incoming[key]
-        for key in ("systems", "gamelists", "roms_root", "bios_root", "assets", "cache"):
+        for key in ("systems", "gamelists"):
             if key in incoming:
                 merged[key] = incoming[key]
-        for key in ("roms", "bios", "artwork"):
-            current = list(merged.get(key) or []) if chunk_index else []
-            current.extend([row for row in incoming.get(key) or [] if isinstance(row, dict)])
-            merged[key] = current
-        merged["assets"] = {
-            **(merged.get("assets") if isinstance(merged.get("assets"), dict) else {}),
-            "roms": merged.get("roms") or [],
-            "bios": merged.get("bios") or [],
-            "artwork": merged.get("artwork") or [],
-        }
         merged["chunk_index"] = chunk_index
         merged["inventory_complete"] = bool(incoming.get("inventory_complete"))
+        received = dict(merged.get("inventory_received") or {}) if chunk_index else {"roms": 0, "bios": 0, "artwork": 0}
+        received["roms"] = int(received.get("roms") or 0) + len(incoming.get("roms") if isinstance(incoming.get("roms"), list) else [])
+        received["bios"] = int(received.get("bios") or 0) + len(incoming.get("bios") if isinstance(incoming.get("bios"), list) else [])
+        received["artwork"] = int(received.get("artwork") or 0) + len(incoming.get("artwork") if isinstance(incoming.get("artwork"), list) else [])
+        merged["inventory_received"] = received
         return merged
+
+    def _apply_rom_metadata_hash_patch(self, device: dict, metadata: dict) -> None:
+        """Apply ROM hash patches directly to stored ROM rows without rebuilding snapshots."""
+        internal_id = device.get("id")
+        rows = self.roms.setdefault(internal_id, [])
+
+        def row_key(row: dict) -> tuple:
+            system = str(row.get("system") or row.get("system_name") or "").strip().lower()
+            path = str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_file") or row.get("rom_name") or "").replace("\\", "/").lstrip("./").lower()
+            return system, path
+
+        by_key = {row_key(row): row for row in rows}
+        for patch in metadata.get("roms") if isinstance(metadata.get("roms"), list) else []:
+            if not isinstance(patch, dict):
+                continue
+            key = row_key(patch)
+            if not key[0] or not key[1]:
+                continue
+            md5_value = patch.get("rom_md5") or patch.get("md5") or patch.get("hash")
+            current = by_key.get(key)
+            if current is None:
+                current = {
+                    "id": str(uuid.uuid4()),
+                    "device_id": device.get("device_id"),
+                    "system_name": patch.get("system") or patch.get("system_name"),
+                    "rom_name": patch.get("rom_name") or patch.get("name") or patch.get("title") or patch.get("file_path"),
+                    "file_path": patch.get("file_path") or patch.get("relative_path") or patch.get("rom_path") or patch.get("rom_file"),
+                    "file_size": patch.get("file_size") or patch.get("byte_count") or patch.get("size"),
+                    "entry_type": patch.get("entry_type") or "file",
+                    "added_at": datetime.utcnow(),
+                }
+                rows.append(current)
+                by_key[key] = current
+            current["rom_md5"] = md5_value
+            current["last_seen"] = datetime.utcnow()
+        summary = dict(device.get("rom_metadata") or {})
+        summary["type"] = metadata.get("type") or summary.get("type") or "asset_metadata"
+        summary["update_mode"] = "rom_hash_patch"
+        summary["collected_at"] = metadata.get("collected_at") or summary.get("collected_at")
+        summary["hash_progress"] = metadata.get("hash_progress") or summary.get("hash_progress")
+        device["rom_metadata"] = summary
 
     def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)
