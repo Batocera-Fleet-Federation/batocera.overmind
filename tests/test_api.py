@@ -480,6 +480,23 @@ def test_oauth_start_uses_signed_state_for_lambda(client, monkeypatch):
     assert overmind_main.oauth_states == {}
 
 
+def test_jwt_signing_secret_survives_runtime_secret_refresh(monkeypatch):
+    original_secret = auth_utils.SECRET_KEY
+    original_jwt_secret = auth_utils.JWT_SIGNING_SECRET
+    try:
+        auth_utils.SECRET_KEY = "runtime-secret-a"
+        auth_utils.JWT_SIGNING_SECRET = "stable-jwt-secret"
+        token = auth_utils.create_access_token({"sub": "user-1"})
+
+        auth_utils.SECRET_KEY = "runtime-secret-b"
+        auth_utils.JWT_SIGNING_SECRET = "stable-jwt-secret"
+
+        assert auth_utils.decode_token(token)["sub"] == "user-1"
+    finally:
+        auth_utils.SECRET_KEY = original_secret
+        auth_utils.JWT_SIGNING_SECRET = original_jwt_secret
+
+
 def test_social_auth_activates_existing_unverified_user(client, monkeypatch):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
     monkeypatch.setenv("GITHUB_CLIENT_ID", "github-client")

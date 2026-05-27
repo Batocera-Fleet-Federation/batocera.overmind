@@ -11,8 +11,10 @@ from jose import JWTError, jwt
 # Python + bcrypt/passlib combinations (notably newer Python toolchains).
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-# JWT settings
+# Secret used for account tokens. Prefer JWT_SIGNING_SECRET so Lambda tiers do
+# not depend on runtime-secret refresh timing for token compatibility.
 SECRET_KEY = os.getenv("SECRET_KEY", "overmind-secret-key-change-in-production")
+JWT_SIGNING_SECRET = os.getenv("JWT_SIGNING_SECRET") or SECRET_KEY
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -36,14 +38,19 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, JWT_SIGNING_SECRET, algorithm=ALGORITHM)
     return encoded_jwt
 
 
 def decode_token(token: str) -> Optional[dict]:
     """Decode a JWT token."""
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError:
-        return None
+    secrets = [JWT_SIGNING_SECRET]
+    if SECRET_KEY not in secrets:
+        secrets.append(SECRET_KEY)
+    for secret in secrets:
+        try:
+            payload = jwt.decode(token, secret, algorithms=[ALGORITHM])
+            return payload
+        except JWTError:
+            continue
+    return None

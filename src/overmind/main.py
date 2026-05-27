@@ -154,6 +154,9 @@ def apply_runtime_config_side_effects(values: dict[str, str]) -> None:
     postgres_host_override = os.getenv("OVERMIND_POSTGRES_HOST_OVERRIDE")
     if postgres_host_override:
         os.environ["OVERMIND_POSTGRES_HOST"] = postgres_host_override
+    jwt_signing_secret = os.getenv("JWT_SIGNING_SECRET") or values.get("JWT_SIGNING_SECRET")
+    if jwt_signing_secret:
+        auth.JWT_SIGNING_SECRET = jwt_signing_secret
     if "SECRET_KEY" in values:
         auth.SECRET_KEY = values["SECRET_KEY"]
     if "TOKEN_HASH_SECRET" in values or "SECRET_KEY" in values:
