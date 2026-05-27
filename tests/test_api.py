@@ -1975,6 +1975,58 @@ def test_rom_metadata_hash_patch_enriches_existing_inventory_without_replacing_r
     assert db.get_device_bios("drone-a")[0]["bios_md5"] == "bios-md5"
 
 
+def test_asset_metadata_inventory_chunks_append_without_replacing_previous_chunks(client):
+    client.post("/api/auth/register", json={"email": "chunks@example.com", "username": "chunks-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("chunks@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+
+    first = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_chunk",
+            "inventory_id": "inventory-1",
+            "chunk_index": 0,
+            "chunk_total": 2,
+            "inventory_complete": False,
+            "inventory_counts": {"roms": 2, "bios": 1, "artwork": 0},
+            "systems": [{"name": "snes", "rom_count": 2}],
+            "roms": [{"system": "snes", "file_path": "Game One.zip", "rom_name": "Game One", "file_size": 3}],
+            "bios": [{"file_path": "dc/flash.bin", "md5": "bios-md5"}],
+            "artwork": [],
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_chunk",
+            "inventory_id": "inventory-1",
+            "chunk_index": 1,
+            "chunk_total": 2,
+            "inventory_complete": True,
+            "inventory_counts": {"roms": 2, "bios": 1, "artwork": 0},
+            "systems": [{"name": "snes", "rom_count": 2}],
+            "roms": [{"system": "snes", "file_path": "Game Two.zip", "rom_name": "Game Two", "file_size": 3}],
+            "bios": [],
+            "artwork": [],
+        },
+    )
+    assert second.status_code == 200
+
+    stored = db.get_device_roms("drone-a")
+    assert len(stored) == 2
+    assert {row["file_path"] for row in stored} == {"Game One.zip", "Game Two.zip"}
+    assert db.get_device_bios("drone-a")[0]["bios_md5"] == "bios-md5"
+    assert db.get_device_by_device_id("drone-a")["rom_metadata"]["inventory_complete"] is True
+
+
 def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client):
     client.post("/api/auth/register", json={"email": "sync-bios@example.com", "username": "sync-bios-at-example.com", "password": "testpass123"})
     token = client.post(

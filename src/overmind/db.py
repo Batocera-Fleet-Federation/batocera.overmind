@@ -1544,8 +1544,14 @@ class FakeDatabase:
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
             "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
         } if swarm_id else {}
-        if metadata.get("update_mode") == "rom_hash_patch":
+        update_mode = metadata.get("update_mode")
+        row_metadata = metadata
+        if update_mode == "rom_hash_patch":
             metadata = merge_rom_metadata_hash_patch(device.get("rom_metadata"), metadata)
+            row_metadata = metadata
+        elif update_mode == "inventory_chunk":
+            row_metadata = metadata
+            metadata = self._merge_rom_metadata_inventory_chunk(device, metadata)
         systems = metadata.get("systems") if isinstance(metadata.get("systems"), list) else []
         self.update_device_last_seen(device["id"], rom_systems=systems)
         device["rom_metadata"] = metadata
@@ -1559,7 +1565,7 @@ class FakeDatabase:
                 system_name = str(system or "").strip()
             if system_name:
                 reported_systems.add(system_name)
-        for item in metadata.get("roms") if isinstance(metadata.get("roms"), list) else []:
+        for item in row_metadata.get("roms") if isinstance(row_metadata.get("roms"), list) else []:
             if not isinstance(item, dict):
                 continue
             system_name = str(item.get("system") or item.get("system_name") or "").strip()
@@ -1578,18 +1584,47 @@ class FakeDatabase:
                 "source": item.get("source"),
                 "modified_time": item.get("modified_time") or item.get("mtime"),
             })
+        replace_rows = update_mode != "inventory_chunk"
+        if update_mode == "inventory_chunk" and int(metadata.get("chunk_index") or 0) == 0:
+            self.roms[device["id"]] = []
+            self.bios[device["id"]] = []
+            self.artwork[device["id"]] = []
         for system_name in reported_systems:
-            self.add_roms(device_id, system_name, grouped.get(system_name, []))
-        if isinstance(metadata.get("bios"), list):
-            self.add_bios(device_id, metadata.get("bios") or [])
-        if isinstance(metadata.get("artwork"), list):
-            self.add_artwork(device_id, metadata.get("artwork") or [])
+            self.add_roms(device_id, system_name, grouped.get(system_name, []), replace=replace_rows)
+        if isinstance(row_metadata.get("bios"), list):
+            self.add_bios(device_id, row_metadata.get("bios") or [], replace=replace_rows)
+        if isinstance(row_metadata.get("artwork"), list):
+            self.add_artwork(device_id, row_metadata.get("artwork") or [], replace=replace_rows)
         after = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
             "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
         } if swarm_id else {}
         self._notify_master_list_changes(swarm_id, before, after)
+
+    def _merge_rom_metadata_inventory_chunk(self, device: dict, incoming: dict) -> dict:
+        """Merge an inventory chunk into the device snapshot retained for UI use."""
+        chunk_index = int(incoming.get("chunk_index") or 0)
+        merged = dict(device.get("rom_metadata") or {}) if chunk_index else {}
+        for key in ("type", "device_id", "update_mode", "inventory_id", "chunk_total", "inventory_counts", "collected_at"):
+            if key in incoming:
+                merged[key] = incoming[key]
+        for key in ("systems", "gamelists", "roms_root", "bios_root", "assets", "cache"):
+            if key in incoming:
+                merged[key] = incoming[key]
+        for key in ("roms", "bios", "artwork"):
+            current = list(merged.get(key) or []) if chunk_index else []
+            current.extend([row for row in incoming.get(key) or [] if isinstance(row, dict)])
+            merged[key] = current
+        merged["assets"] = {
+            **(merged.get("assets") if isinstance(merged.get("assets"), dict) else {}),
+            "roms": merged.get("roms") or [],
+            "bios": merged.get("bios") or [],
+            "artwork": merged.get("artwork") or [],
+        }
+        merged["chunk_index"] = chunk_index
+        merged["inventory_complete"] = bool(incoming.get("inventory_complete"))
+        return merged
 
     def add_speed_sample(self, device_id: str, sample: dict) -> Optional[dict]:
         device = self.get_device_by_device_id(device_id)
@@ -1693,7 +1728,7 @@ class FakeDatabase:
         return False
     
     # ROM operations
-    def add_roms(self, device_id: str, system_name: str, roms: list) -> List[str]:
+    def add_roms(self, device_id: str, system_name: str, roms: list, *, replace: bool = True) -> List[str]:
         """Add ROMs for a device. Returns list of ROM IDs."""
         internal_device = self.get_device_by_device_id(device_id)
         if not internal_device:
@@ -1702,14 +1737,13 @@ class FakeDatabase:
         internal_id = internal_device["id"]
         rom_ids = []
         
-        # Clear existing roms for this system
         if internal_id not in self.roms:
             self.roms[internal_id] = []
-        
-        self.roms[internal_id] = [
-            r for r in self.roms[internal_id] 
-            if r.get("system_name") != system_name
-        ]
+        if replace:
+            self.roms[internal_id] = [
+                r for r in self.roms[internal_id]
+                if r.get("system_name") != system_name
+            ]
         
         for rom in roms:
             rom_id = str(uuid.uuid4())
@@ -1741,14 +1775,15 @@ class FakeDatabase:
         path = str(rom.get("file_path") or rom.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
         return (system, path)
 
-    def add_bios(self, device_id: str, bios_entries: list) -> List[str]:
+    def add_bios(self, device_id: str, bios_entries: list, *, replace: bool = True) -> List[str]:
         """Replace BIOS metadata for a device. Returns list of BIOS row IDs."""
         internal_device = self.get_device_by_device_id(device_id)
         if not internal_device:
             return []
         internal_id = internal_device["id"]
         row_ids = []
-        self.bios[internal_id] = []
+        if replace or internal_id not in self.bios:
+            self.bios[internal_id] = []
         for item in bios_entries:
             if not isinstance(item, dict):
                 continue
@@ -1855,13 +1890,14 @@ class FakeDatabase:
         rows.sort(key=lambda row: str(row.get("file_path") or "").lower())
         return rows
 
-    def add_artwork(self, device_id: str, artwork_entries: list) -> List[str]:
+    def add_artwork(self, device_id: str, artwork_entries: list, *, replace: bool = True) -> List[str]:
         internal_device = self.get_device_by_device_id(device_id)
         if not internal_device:
             return []
         internal_id = internal_device["id"]
         row_ids = []
-        self.artwork[internal_id] = []
+        if replace or internal_id not in self.artwork:
+            self.artwork[internal_id] = []
         for item in artwork_entries:
             if not isinstance(item, dict):
                 continue
