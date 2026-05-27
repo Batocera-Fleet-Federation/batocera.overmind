@@ -287,7 +287,7 @@
                 const panel = document.getElementById('notification-panel');
                 if (!panel) return;
                 const shouldShow = panel.style.display === 'none' || !panel.style.display;
-                panel.style.display = shouldShow ? 'block' : 'none';
+                panel.style.display = shouldShow ? 'flex' : 'none';
                 if (shouldShow) loadNotifications();
             }
 

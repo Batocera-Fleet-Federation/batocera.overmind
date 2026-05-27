@@ -1366,6 +1366,7 @@
                 border: 1px solid var(--admin-border);
                 border-radius: 0.5rem;
                 box-shadow: 0 0.7rem 1.8rem rgba(0, 0, 0, 0.32);
+                flex-direction: column;
                 max-height: min(70vh, 34rem);
                 min-width: min(24rem, calc(100vw - 2rem));
                 overflow: hidden;
@@ -1382,7 +1383,8 @@
                 padding: 0.75rem;
             }
             .notification-list {
-                max-height: calc(min(70vh, 34rem) - 3.25rem);
+                flex: 1 1 auto;
+                min-height: 0;
                 overflow: auto;
                 padding: 0.45rem;
             }
