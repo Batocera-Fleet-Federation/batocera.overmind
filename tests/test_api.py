@@ -1761,6 +1761,50 @@ def test_swarm_master_list_deduplicates_by_md5_and_activity_search(client):
     assert activity.json()["activity"][0]["duration_ms"] == 2400
 
 
+def test_metadata_inventory_endpoints_use_database_paging_when_assets_are_stored(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "paging@example.com", "username": "paging-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "paging@example.com", "username": "paging-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("paging@example.com")
+    source_id = db.create_device(user["id"], "page-source", "Page Source", {"ip_address": "10.0.0.2"}, raw_token="source")
+    db.create_device(user["id"], "page-target", "Page Target", {"ip_address": "10.0.0.3"}, raw_token="target")
+    calls = []
+
+    def fake_page_master_assets(device_ids, asset_type, **kwargs):
+        calls.append((asset_type, kwargs))
+        common = {"_device_internal_id": source_id, "_master_key": f"key:{asset_type}", "_present_on_selected": False}
+        if asset_type == "rom":
+            row = {**common, "system_name": "snes", "rom_name": "Paged.zip", "file_path": "Paged.zip"}
+        elif asset_type == "bios":
+            row = {**common, "bios_name": "paged.bin", "file_path": "bios/paged.bin"}
+        else:
+            row = {**common, "_artwork_type": "image", "system": "snes", "rom_path": "Paged.zip"}
+        return [row], 412
+
+    monkeypatch.setattr(db, "_asset_store_enabled", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "page_master_assets", fake_page_master_assets)
+    headers = {"Authorization": f"Bearer {token}"}
+    responses = [
+        client.get("/api/devices/page-target/master-roms?page=3&per_page=17&q=paged", headers=headers),
+        client.get("/api/devices/page-target/master-bios?page=2&per_page=11", headers=headers),
+        client.get("/api/devices/page-target/master-artwork?page=4&per_page=9&artwork_type=image", headers=headers),
+        client.get("/api/master-roms?page=5&per_page=7", headers=headers),
+    ]
+
+    assert all(response.status_code == 200 for response in responses)
+    assert all(response.json()["total"] == 412 for response in responses)
+    assert [(asset_type, params["page"], params["per_page"]) for asset_type, params in calls] == [
+        ("rom", 3, 17),
+        ("bios", 2, 11),
+        ("artwork", 4, 9),
+        ("rom", 5, 7),
+    ]
+    assert calls[0][1]["query"] == "paged"
+    assert calls[2][1]["artwork_type"] == "image"
+
+
 def test_drone_sync_activity_endpoint_upserts_by_sync_id(client):
     client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     token = client.post(
@@ -2336,6 +2380,26 @@ def test_action_results_append_logs_and_cap_stored_lines(client):
     assert device["log_sources"]["max_lines"] == 1000
 
 
+def test_log_retention_keeps_emulationstation_content_when_drone_log_is_noisy(client):
+    user_id = db.create_user("es-logs@example.com", "hash")
+    internal_id = db.create_device(user_id, "es-log-drone", "ES Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
+    device = db.get_device(internal_id)
+
+    db.store_action_result(device, {
+        "type": "log_sources",
+        "logs": [
+            {"source": "es_launch_stdout", "files": [{"path": "/userdata/system/logs/es_launch_stdout.log", "content": "launch output\n"}]},
+            {"source": "es_launch_stderr", "files": [{"path": "/userdata/system/logs/es_launch_stderr.log", "content": "launch error\n"}]},
+            {"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "\n".join(f"noise-{i}" for i in range(1500))}]},
+        ],
+    })
+
+    logs = {row["source"]: row["files"][0]["content"] for row in device["log_sources"]["logs"]}
+    assert logs["es_launch_stdout"] == "launch output"
+    assert logs["es_launch_stderr"] == "launch error"
+    assert len(logs["drone_stdout"].splitlines()) == 1000
+
+
 def test_action_results_merge_configs_and_exclude_bak_files(client):
     user_id = db.create_user("configs@example.com", "hash")
     internal_id = db.create_device(user_id, "config-drone", "Config Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
@@ -2573,6 +2637,27 @@ def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
     assert "if (!shellExists) {" in js
     assert "selectOvermindLogSource(selectedIndex, shellExists);" in js
     assert "if (content.textContent !== nextContent) {" in js
+    assert "file.content || file.path" not in js
+    assert "No log output reported yet." in js
+    assert "join('\\\\n\\\\n')" not in js
+
+
+def test_metadata_panels_submit_searches_explicitly_and_show_loading_popout():
+    root = Path(__file__).resolve().parents[1]
+    html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    css = root.joinpath("src/overmind/static/css/overmind.css").read_text(encoding="utf-8")
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert 'id="ui-loading-popout"' in html
+    assert ".ui-loading-popout.show" in css
+    assert "function beginUiLoading()" in js
+    assert "function endUiLoading()" in js
+    assert 'onclick="submitDeviceRomSearch()"' in html
+    assert 'oninput="handleDeviceRomSearch(event)"' not in html
+    assert "function submitBiosSearch()" in js
+    assert "function submitArtworkSearch()" in js
+    assert 'oninput="handleBiosSearch(event)"' not in js
+    assert 'oninput="handleArtworkSearch(event)"' not in js
 
 
 def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():

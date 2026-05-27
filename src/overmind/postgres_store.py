@@ -287,6 +287,175 @@ class PostgresMetadataStore:
                 output.append(decoded)
         return output
 
+    def page_master_assets(
+        self,
+        device_internal_ids: Iterable[str],
+        asset_type: str,
+        *,
+        selected_internal_id: Optional[str] = None,
+        query: Optional[str] = None,
+        system_name: Optional[str] = None,
+        status: Optional[str] = None,
+        artwork_type: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> tuple[list[dict], int]:
+        """Return only the master-list asset rows needed to render one page."""
+        ids = [str(value) for value in device_internal_ids if value]
+        if not ids or not self.assets_enabled():
+            return [], 0
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return [], 0
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 500))
+        offset = (page - 1) * per_page
+        if asset_type == "rom":
+            master_key = """
+                CASE
+                    WHEN nullif(lower(coalesce(payload->>'rom_md5', '')), '') IS NOT NULL
+                        THEN 'md5:' || lower(payload->>'rom_md5')
+                    ELSE 'path:' || lower(coalesce(system_name, '')) || ':' || lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
+                END
+            """
+            sort_key = "lower(coalesce(system_name, '')) || ':' || lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))"
+            source = "overmind_device_assets"
+            extra_select = "NULL::text AS artwork_type"
+        elif asset_type == "bios":
+            master_key = """
+                CASE
+                    WHEN nullif(lower(coalesce(payload->>'bios_md5', payload->>'md5', '')), '') IS NOT NULL
+                        THEN 'md5:' || lower(coalesce(payload->>'bios_md5', payload->>'md5'))
+                    ELSE 'path:' || lower(coalesce(payload->>'file_path', payload->>'relative_path', payload->>'bios_name', ''))
+                END
+            """
+            sort_key = "lower(coalesce(payload->>'file_path', payload->>'relative_path', payload->>'bios_name', ''))"
+            source = "overmind_device_assets"
+            extra_select = "NULL::text AS artwork_type"
+        elif asset_type == "artwork":
+            master_key = """
+                'artwork:' || lower(coalesce(system_name, payload->>'system', '')) || ':' ||
+                lower(coalesce(payload->>'rom_path', payload->>'file_path', payload->>'rom_name', '')) || ':' ||
+                lower(artwork_type.value)
+            """
+            sort_key = """
+                lower(coalesce(system_name, payload->>'system', '')) || ':' ||
+                lower(coalesce(payload->>'rom_path', payload->>'file_path', payload->>'rom_name', '')) || ':' ||
+                lower(artwork_type.value)
+            """
+            source = """
+                overmind_device_assets
+                CROSS JOIN LATERAL jsonb_array_elements_text(coalesce(payload->'artwork_types', '[]'::jsonb)) AS artwork_type(value)
+            """
+            extra_select = "artwork_type.value AS artwork_type"
+        else:
+            return [], 0
+
+        normalized_sql = f"""
+            SELECT device_internal_id, device_id, payload, system_name, {extra_select},
+                   {master_key} AS master_key,
+                   {sort_key} AS sort_key
+            FROM {source}
+            WHERE device_internal_id = ANY(%s) AND asset_type = %s
+        """
+        clauses = ["n.master_key <> ''"]
+        filters: list[object] = []
+        clean_query = str(query or "").strip().lower()
+        if clean_query:
+            clauses.append("lower(n.payload::text) LIKE %s")
+            filters.append(f"%{clean_query}%")
+        clean_system = str(system_name or "").strip().lower()
+        if clean_system:
+            clauses.append("lower(coalesce(n.system_name, n.payload->>'system', '')) = %s")
+            filters.append(clean_system)
+        clean_artwork_type = str(artwork_type or "").strip().lower()
+        if clean_artwork_type and asset_type == "artwork":
+            clauses.append("lower(coalesce(n.artwork_type, '')) = %s")
+            filters.append(clean_artwork_type)
+        clean_status = str(status or "").strip().lower()
+        if selected_internal_id and clean_status in {"missing", "present"}:
+            presence = "EXISTS" if clean_status == "present" else "NOT EXISTS"
+            clauses.append(
+                f"{presence} (SELECT 1 FROM normalized selected WHERE selected.master_key = n.master_key AND selected.device_internal_id = %s)"
+            )
+            filters.append(str(selected_internal_id))
+        filtered_sql = f"""
+            filtered_keys AS (
+                SELECT n.master_key, min(n.sort_key) AS sort_key
+                FROM normalized n
+                WHERE {" AND ".join(clauses)}
+                GROUP BY n.master_key
+            )
+        """
+        base_params = [ids, asset_type, *filters]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"WITH normalized AS ({normalized_sql}), {filtered_sql} SELECT count(*) FROM filtered_keys",
+                    base_params,
+                )
+                total = int((cur.fetchone() or [0])[0] or 0)
+                if not total:
+                    return [], 0
+                selected_param = str(selected_internal_id) if selected_internal_id else None
+                cur.execute(
+                    f"""
+                    WITH normalized AS ({normalized_sql}), {filtered_sql},
+                    paged_keys AS (
+                        SELECT master_key
+                        FROM filtered_keys
+                        ORDER BY sort_key, master_key
+                        LIMIT %s OFFSET %s
+                    )
+                    SELECT n.device_internal_id, n.payload, n.master_key, n.artwork_type,
+                           CASE WHEN %s::text IS NULL THEN false ELSE EXISTS (
+                               SELECT 1 FROM normalized selected
+                               WHERE selected.master_key = n.master_key AND selected.device_internal_id = %s
+                           ) END AS present_on_selected
+                    FROM normalized n
+                    JOIN paged_keys p ON p.master_key = n.master_key
+                    ORDER BY n.sort_key, n.master_key, n.device_internal_id
+                    """,
+                    [*base_params, per_page, offset, selected_param, selected_param],
+                )
+                rows = cur.fetchall()
+        output = []
+        for internal_id, payload, group_key, row_artwork_type, present_on_selected in rows:
+            decoded = _decode_state(payload)
+            if isinstance(decoded, dict):
+                decoded["_device_internal_id"] = internal_id
+                decoded["_master_key"] = group_key
+                decoded["_artwork_type"] = row_artwork_type
+                decoded["_present_on_selected"] = bool(present_on_selected)
+                output.append(decoded)
+        return output, total
+
+    def summarize_rom_systems(self, device_internal_ids: Iterable[str]) -> list[dict]:
+        ids = [str(value) for value in device_internal_ids if value]
+        if not ids or not self.assets_enabled():
+            return []
+        conn = self._connect()
+        if conn is None:
+            return []
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT system_name, count(*), count(DISTINCT device_internal_id)
+                    FROM overmind_device_assets
+                    WHERE device_internal_id = ANY(%s) AND asset_type = 'rom' AND system_name IS NOT NULL
+                    GROUP BY system_name
+                    ORDER BY system_name
+                    """,
+                    (ids,),
+                )
+                rows = cur.fetchall()
+        return [
+            {"system_name": row[0], "rom_count": int(row[1]), "device_count": int(row[2])}
+            for row in rows
+        ]
+
     def update_rom_hashes(self, device_internal_id: str, patches: Iterable[dict]) -> None:
         if not self.assets_enabled():
             return

@@ -78,6 +78,8 @@
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
             let selectedDeviceDataRefreshTimer = null;
+            let uiLoadingRequests = 0;
+            let uiLoadingTimer = null;
             let devicesRefreshTimer = null;
             let downloadsRefreshTimer = null;
             let downloadsRefreshInFlight = false;
@@ -208,12 +210,43 @@
                 }
             }
 
+            function beginUiLoading() {
+                uiLoadingRequests += 1;
+                if (uiLoadingRequests !== 1) return;
+                uiLoadingTimer = setTimeout(() => {
+                    const popout = document.getElementById('ui-loading-popout');
+                    if (popout && uiLoadingRequests > 0) {
+                        popout.classList.add('show');
+                        popout.setAttribute('aria-hidden', 'false');
+                    }
+                }, 120);
+            }
+
+            function endUiLoading() {
+                uiLoadingRequests = Math.max(0, uiLoadingRequests - 1);
+                if (uiLoadingRequests > 0) return;
+                if (uiLoadingTimer) {
+                    clearTimeout(uiLoadingTimer);
+                    uiLoadingTimer = null;
+                }
+                const popout = document.getElementById('ui-loading-popout');
+                if (popout) {
+                    popout.classList.remove('show');
+                    popout.setAttribute('aria-hidden', 'true');
+                }
+            }
+
 	            async function apiGet(path) {
-                const response = await fetch(path, {
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                await handleApiAuthFailure(response);
-	                return response;
+                beginUiLoading();
+                try {
+                    const response = await fetch(path, {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    await handleApiAuthFailure(response);
+                    return response;
+                } finally {
+                    endUiLoading();
+                }
 	            }
 
 	            function withSwarm(path) {
@@ -223,25 +256,35 @@
 	            }
 
             async function apiPatch(path, payload) {
-                const response = await fetch(path, {
-                    method: 'PATCH',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${authToken}`
-                    },
-                    body: JSON.stringify(payload)
-                });
-                await handleApiAuthFailure(response);
-                return response;
+                beginUiLoading();
+                try {
+                    const response = await fetch(path, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: JSON.stringify(payload)
+                    });
+                    await handleApiAuthFailure(response);
+                    return response;
+                } finally {
+                    endUiLoading();
+                }
             }
 
             async function apiDelete(path) {
-                const response = await fetch(path, {
-                    method: 'DELETE',
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-                await handleApiAuthFailure(response);
-                return response;
+                beginUiLoading();
+                try {
+                    const response = await fetch(path, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    await handleApiAuthFailure(response);
+                    return response;
+                } finally {
+                    endUiLoading();
+                }
             }
 
             function renderNotifications(payload = {}) {
@@ -1957,8 +2000,9 @@
                     const label = row.source || row.name || row.path || 'log_source';
                     const content = (row.files || []).map(file => {
                         if (typeof file === 'string') return file;
-                        return file.content || file.path || JSON.stringify(file, null, 2);
-                    }).join('\\n\\n');
+                        if (Object.prototype.hasOwnProperty.call(file, 'content')) return String(file.content || '');
+                        return '';
+                    }).filter(Boolean).join('\n\n') || 'No log output reported yet.';
                     sources.push({id: label, label: label.replaceAll('_', ' '), path: (row.files || []).map(f => f.path || f.name).filter(Boolean).join(', '), content});
                 });
                 const gameLines = (Array.isArray(gamelogs) ? gamelogs : []).map(log => {
@@ -1970,7 +2014,7 @@
                     ].filter(Boolean).join(' | ');
                     return `${when} ${details}`.trim();
                 });
-                sources.unshift({id: 'game_logs', label: 'Game Logs', path: 'Overmind gameplay history', content: gameLines.join('\\n') || 'No game logs reported yet.'});
+                sources.unshift({id: 'game_logs', label: 'Game Logs', path: 'Overmind gameplay history', content: gameLines.join('\n') || 'No game logs reported yet.'});
                 return sources;
             }
 
@@ -2220,17 +2264,17 @@
                 }
             }
 
-            let deviceRomSearchDebounce = null;
-            function handleDeviceRomSearch(event) {
-                const val = (event.target.value || '').trim();
-                deviceRomSearchQuery = val;
+            function submitDeviceRomSearch() {
+                const input = document.getElementById('device-rom-search');
+                deviceRomSearchQuery = (input ? input.value : '').trim();
                 masterRomPage = 1;
-                // debounce server-side filtering
-                if (deviceRomSearchDebounce) clearTimeout(deviceRomSearchDebounce);
-                deviceRomSearchDebounce = setTimeout(() => {
-                    deviceRomSearchDebounce = null;
-                    loadSwarmRomAvailabilityPanel();
-                }, 300);
+                loadSwarmRomAvailabilityPanel();
+            }
+
+            function handleDeviceRomSearchKeydown(event) {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                submitDeviceRomSearch();
             }
 
             function setMasterRomPage(page) {
@@ -2717,10 +2761,17 @@
                 loadDeviceBiosPanel();
             }
 
-            function handleBiosSearch(event) {
-                biosSearchQuery = event.target.value || '';
+            function submitBiosSearch() {
+                const input = document.getElementById('device-bios-search');
+                biosSearchQuery = input ? input.value : '';
                 masterBiosPage = 1;
                 loadDeviceBiosPanel();
+            }
+
+            function handleBiosSearchKeydown(event) {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                submitBiosSearch();
             }
 
             function handleBiosStatusFilter(event) {
@@ -2759,7 +2810,10 @@
                         <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
                             <div style="flex:1;min-width:220px">
                                 <label class="form-label" for="device-bios-search">Search BIOS files</label>
-                                <input id="device-bios-search" class="form-control" type="search" placeholder="Type to filter BIOS files" value="${escapeHtml(biosSearchQuery)}" oninput="handleBiosSearch(event)">
+                                <div class="input-group">
+                                    <input id="device-bios-search" class="form-control" type="search" placeholder="Enter search terms" value="${escapeHtml(biosSearchQuery)}" onkeydown="handleBiosSearchKeydown(event)">
+                                    <button class="btn btn-primary" type="button" onclick="submitBiosSearch()">Search</button>
+                                </div>
                             </div>
                             <div style="min-width:160px">
                                 <label class="form-label" for="device-bios-status-filter">Status</label>
@@ -2839,10 +2893,17 @@
                 loadDeviceArtworkPanel();
             }
 
-            function handleArtworkSearch(event) {
-                artworkSearchQuery = event.target.value || '';
+            function submitArtworkSearch() {
+                const input = document.getElementById('device-artwork-search');
+                artworkSearchQuery = input ? input.value : '';
                 masterArtworkPage = 1;
                 loadDeviceArtworkPanel();
+            }
+
+            function handleArtworkSearchKeydown(event) {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                submitArtworkSearch();
             }
 
             function handleArtworkStatusFilter(event) {
@@ -3024,7 +3085,10 @@
                         <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
                             <div style="flex:1;min-width:220px">
                                 <label class="form-label" for="device-artwork-search">Search artwork</label>
-                                <input id="device-artwork-search" class="form-control" type="search" placeholder="Type to filter ROM artwork" value="${escapeHtml(artworkSearchQuery)}" oninput="handleArtworkSearch(event)">
+                                <div class="input-group">
+                                    <input id="device-artwork-search" class="form-control" type="search" placeholder="Enter search terms" value="${escapeHtml(artworkSearchQuery)}" onkeydown="handleArtworkSearchKeydown(event)">
+                                    <button class="btn btn-primary" type="button" onclick="submitArtworkSearch()">Search</button>
+                                </div>
                             </div>
                             <div style="min-width:150px">
                                 <label class="form-label" for="device-artwork-type-filter">Type</label>

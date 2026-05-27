@@ -667,6 +667,37 @@
                 animation: spin 1s ease-in-out infinite;
             }
 
+            .ui-loading-popout {
+                align-items: center;
+                background: #1d2841;
+                border: 1px solid rgba(255,255,255,.15);
+                border-radius: .6rem;
+                box-shadow: 0 .35rem 1rem rgba(0,0,0,.28);
+                color: white;
+                display: flex;
+                font-weight: 700;
+                gap: .65rem;
+                left: 50%;
+                opacity: 0;
+                padding: .65rem .9rem;
+                pointer-events: none;
+                position: fixed;
+                top: 1rem;
+                transform: translate(-50%, -130%);
+                transition: opacity .15s ease, transform .15s ease;
+                z-index: 100000;
+            }
+
+            .ui-loading-popout.show {
+                opacity: 1;
+                transform: translate(-50%, 0);
+            }
+
+            .ui-loading-popout .loading {
+                height: 16px;
+                width: 16px;
+            }
+
             @keyframes spin {
                 to { transform: rotate(360deg); }
             }

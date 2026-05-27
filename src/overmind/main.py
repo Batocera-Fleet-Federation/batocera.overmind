@@ -1622,38 +1622,24 @@ async def get_device_master_roms(
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    rows = db.get_master_roms_for_device(device["user_id"], device_id)
-    if rows is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-
-    filtered = rows
-    if q:
-        q_low = q.strip().lower()
-        filtered = [r for r in filtered if q_low in (str(r.get('system_name') or '').lower() or '') or q_low in (str(r.get('file_path') or r.get('rom_name') or '').lower() or '')]
-    if system:
-        s_low = system.strip().lower()
-        filtered = [r for r in filtered if (str(r.get('system_name') or '').lower() == s_low)]
-    if status:
-        stat = status.strip().lower()
-        if stat == 'missing':
-            filtered = [r for r in filtered if not r.get('present_on_selected')]
-        elif stat == 'present':
-            filtered = [r for r in filtered if r.get('present_on_selected')]
-
-    if page < 1:
-        page = 1
-    per_page = max(1, min(per_page, 500))
-    total = len(filtered)
-    start = (page - 1) * per_page
-    end = start + per_page
-    page_rows = filtered[start:end]
-
+        raise HTTPException(status_code=404, detail="Device not found")
+    result = db.get_master_assets_page_for_device(
+        device["user_id"],
+        device_id,
+        "rom",
+        query=q,
+        system_name=system,
+        status=status,
+        page=page,
+        per_page=per_page,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Device not found")
     return {
-        "roms": page_rows,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
+        "roms": result["rows"],
+        "total": result["total"],
+        "page": result["page"],
+        "per_page": result["per_page"],
     }
 
 
@@ -1667,26 +1653,8 @@ async def get_swarm_master_roms(
 ):
     """Return a swarm-wide approved-Drone ROM master list deduplicated by md5 when available."""
     user = get_current_user(authorization)
-    rows = db.get_swarm_master_roms(user["id"])
-    filtered = rows
-    if q:
-        q_low = q.strip().lower()
-        filtered = [
-            r for r in filtered
-            if q_low in " ".join(str(value or "") for value in [
-                r.get("system_name"), r.get("rom_name"), r.get("file_path"), r.get("rom_md5"),
-                " ".join(r.get("filenames") or []),
-                " ".join((d.get("device_name") or d.get("device_id") or "") for d in (r.get("devices") or [])),
-            ]).lower()
-        ]
-    if system:
-        s_low = system.strip().lower()
-        filtered = [r for r in filtered if str(r.get("system_name") or "").lower() == s_low]
-    page = max(1, page)
-    per_page = max(1, min(per_page, 500))
-    total = len(filtered)
-    start = (page - 1) * per_page
-    return {"roms": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
+    result = db.get_swarm_master_roms_page(user["id"], query=q, system_name=system, page=page, per_page=per_page)
+    return {"roms": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
 @app.get("/api/devices/{device_id}/bios")
@@ -1710,33 +1678,19 @@ async def get_device_master_bios(
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    rows = db.get_master_bios_for_device(device["user_id"], device_id)
-    if rows is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    filtered = rows
-    if q:
-        q_low = q.strip().lower()
-        filtered = [
-            row for row in filtered
-            if q_low in " ".join(str(value or "") for value in [
-                row.get("bios_name"),
-                row.get("file_path"),
-                row.get("bios_md5"),
-                " ".join((d.get("device_name") or d.get("device_id") or "") for d in (row.get("devices") or [])),
-            ]).lower()
-        ]
-    if status:
-        stat = status.strip().lower()
-        if stat == "missing":
-            filtered = [row for row in filtered if not row.get("present_on_selected")]
-        elif stat == "present":
-            filtered = [row for row in filtered if row.get("present_on_selected")]
-    page = max(1, page)
-    per_page = max(1, min(per_page, 500))
-    total = len(filtered)
-    start = (page - 1) * per_page
-    return {"bios": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
+        raise HTTPException(status_code=404, detail="Device not found")
+    result = db.get_master_assets_page_for_device(
+        device["user_id"],
+        device_id,
+        "bios",
+        query=q,
+        status=status,
+        page=page,
+        per_page=per_page,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return {"bios": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
 @app.get("/api/master-bios")
@@ -1781,36 +1735,20 @@ async def get_device_master_artwork(
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    rows = db.get_master_artwork_for_device(device["user_id"], device_id)
-    if rows is None:
+    result = db.get_master_assets_page_for_device(
+        device["user_id"],
+        device_id,
+        "artwork",
+        query=q,
+        system_name=system,
+        artwork_type=artwork_type,
+        status=status,
+        page=page,
+        per_page=per_page,
+    )
+    if result is None:
         raise HTTPException(status_code=404, detail="Device not found")
-    filtered = rows
-    if q:
-        q_low = q.strip().lower()
-        filtered = [
-            row for row in filtered
-            if q_low in " ".join(str(value or "") for value in [
-                row.get("system_name"), row.get("rom_name"), row.get("rom_path"), row.get("title"), row.get("artwork_type"),
-                " ".join((d.get("device_name") or d.get("device_id") or "") for d in (row.get("devices") or [])),
-            ]).lower()
-        ]
-    if system:
-        s_low = system.strip().lower()
-        filtered = [row for row in filtered if str(row.get("system_name") or "").lower() == s_low]
-    if artwork_type:
-        t_low = artwork_type.strip().lower()
-        filtered = [row for row in filtered if str(row.get("artwork_type") or "").lower() == t_low]
-    if status:
-        stat = status.strip().lower()
-        if stat == "missing":
-            filtered = [row for row in filtered if not row.get("present_on_selected")]
-        elif stat == "present":
-            filtered = [row for row in filtered if row.get("present_on_selected")]
-    page = max(1, page)
-    per_page = max(1, min(per_page, 500))
-    total = len(filtered)
-    start = (page - 1) * per_page
-    return {"artwork": filtered[start:start + per_page], "total": total, "page": page, "per_page": per_page}
+    return {"artwork": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
 @app.post("/api/devices/{device_id}/sync-rom")

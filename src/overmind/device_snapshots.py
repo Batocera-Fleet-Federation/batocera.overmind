@@ -38,11 +38,13 @@ def _cap_text_lines(value: str, max_lines: int) -> str:
     return "\n".join(lines[-max(1, int(max_lines)):])
 
 
-def _cap_log_payload_total_lines(payload: dict, max_lines: int) -> dict:
-    remaining = max(1, int(max_lines))
-    for source in reversed(payload.get("logs") if isinstance(payload.get("logs"), list) else []):
+def _cap_log_payload_source_lines(payload: dict, max_lines: int) -> dict:
+    """Keep a bounded recent tail for each source so one noisy log cannot hide others."""
+    max_lines = max(1, int(max_lines))
+    for source in payload.get("logs") if isinstance(payload.get("logs"), list) else []:
         if not isinstance(source, dict):
             continue
+        remaining = max_lines
         files = source.get("files") if isinstance(source.get("files"), list) else []
         for file_info in reversed(files):
             if not isinstance(file_info, dict):
@@ -93,7 +95,7 @@ def merge_log_sources(existing: Optional[dict], incoming: dict, max_lines: int =
         by_source[source_name] = target_source
     merged["logs"] = list(by_source.values())
     merged["max_lines"] = max_lines
-    return _cap_log_payload_total_lines(merged, max_lines)
+    return _cap_log_payload_source_lines(merged, max_lines)
 
 
 def merge_game_logs(existing: Optional[dict], incoming: dict, max_lines: int = 1000) -> dict:

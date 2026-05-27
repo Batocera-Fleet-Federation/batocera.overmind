@@ -2135,6 +2135,193 @@ class FakeDatabase:
         rows.sort(key=lambda row: (str(row.get("system_name") or "").lower(), str(row.get("file_path") or "").lower()))
         return rows
 
+    @staticmethod
+    def _filter_master_rows(
+        rows: List[dict],
+        *,
+        asset_type: str,
+        query: Optional[str] = None,
+        system_name: Optional[str] = None,
+        status: Optional[str] = None,
+        artwork_type: Optional[str] = None,
+    ) -> List[dict]:
+        filtered = rows
+        clean_query = str(query or "").strip().lower()
+        if clean_query:
+            filtered = [
+                row for row in filtered
+                if clean_query in " ".join(str(value or "") for value in (
+                    row.get("system_name"),
+                    row.get("rom_name"),
+                    row.get("file_path") or row.get("rom_path"),
+                    row.get("rom_md5") or row.get("bios_md5"),
+                    row.get("title"),
+                    row.get("artwork_type"),
+                    " ".join(row.get("filenames") or []),
+                    " ".join((device.get("device_name") or device.get("device_id") or "") for device in (row.get("devices") or [])),
+                )).lower()
+            ]
+        clean_system = str(system_name or "").strip().lower()
+        if clean_system:
+            filtered = [row for row in filtered if str(row.get("system_name") or "").strip().lower() == clean_system]
+        clean_type = str(artwork_type or "").strip().lower()
+        if asset_type == "artwork" and clean_type:
+            filtered = [row for row in filtered if str(row.get("artwork_type") or "").strip().lower() == clean_type]
+        clean_status = str(status or "").strip().lower()
+        if clean_status == "missing":
+            filtered = [row for row in filtered if not row.get("present_on_selected")]
+        elif clean_status == "present":
+            filtered = [row for row in filtered if row.get("present_on_selected")]
+        return filtered
+
+    def _master_page_from_asset_rows(self, asset_type: str, asset_rows: List[dict], user_id: str, *, include_presence: bool) -> List[dict]:
+        devices_by_id = {device["id"]: device for device in self.get_user_devices(user_id)}
+        master: Dict[str, dict] = {}
+        for item in asset_rows:
+            device = devices_by_id.get(item.get("_device_internal_id")) or {}
+            if not device:
+                continue
+            key = str(item.get("_master_key") or "")
+            if not key:
+                continue
+            source = {
+                "device_id": device["device_id"],
+                "device_name": device.get("device_name") or (device.get("system_info") or {}).get("hostname") or device["device_id"],
+            }
+            if asset_type == "rom":
+                row = master.setdefault(key, {
+                    "system_name": item.get("system_name"),
+                    "rom_name": item.get("rom_name") or item.get("file_path"),
+                    "file_path": item.get("file_path") or item.get("rom_name"),
+                    "filenames": [],
+                    "rom_md5": item.get("rom_md5"),
+                    "file_size": item.get("file_size"),
+                    "entry_type": item.get("entry_type") or "file",
+                    "last_seen": item.get("last_seen") or item.get("added_at"),
+                    "devices": [],
+                    **({"present_on_selected": bool(item.get("_present_on_selected"))} if include_presence else {}),
+                })
+                filename = item.get("file_path") or item.get("rom_name")
+                if filename and filename not in row["filenames"]:
+                    row["filenames"].append(filename)
+                if not row.get("rom_md5") and item.get("rom_md5"):
+                    row["rom_md5"] = item.get("rom_md5")
+                if not row.get("file_size") and item.get("file_size"):
+                    row["file_size"] = item.get("file_size")
+            elif asset_type == "bios":
+                row = master.setdefault(key, {
+                    "bios_name": item.get("bios_name") or item.get("file_path"),
+                    "file_path": item.get("file_path") or item.get("bios_name"),
+                    "relative_path": item.get("relative_path") or item.get("file_path"),
+                    "bios_md5": item.get("bios_md5") or item.get("md5"),
+                    "md5": item.get("bios_md5") or item.get("md5"),
+                    "file_size": item.get("file_size") or item.get("byte_count"),
+                    "last_seen": item.get("last_seen") or item.get("added_at"),
+                    "devices": [],
+                    "present_on_selected": bool(item.get("_present_on_selected")),
+                })
+            else:
+                row = master.setdefault(key, {
+                    "asset_type": "artwork",
+                    "system_name": item.get("system_name") or item.get("system"),
+                    "system": item.get("system_name") or item.get("system"),
+                    "rom_name": item.get("rom_name") or item.get("rom_path"),
+                    "rom_path": item.get("rom_path") or item.get("file_path"),
+                    "file_path": item.get("rom_path") or item.get("file_path"),
+                    "title": item.get("title"),
+                    "artwork_type": item.get("_artwork_type"),
+                    "devices": [],
+                    "present_on_selected": bool(item.get("_present_on_selected")),
+                })
+            if source not in row["devices"]:
+                row["devices"].append(source)
+        return list(master.values())
+
+    def get_master_assets_page_for_device(
+        self,
+        user_id: str,
+        selected_device_id: str,
+        asset_type: str,
+        *,
+        query: Optional[str] = None,
+        system_name: Optional[str] = None,
+        status: Optional[str] = None,
+        artwork_type: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> Optional[dict]:
+        selected = self.get_device_by_device_id(selected_device_id)
+        if not selected or selected["user_id"] != user_id:
+            return None
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 500))
+        if self._asset_store_enabled():
+            devices = self.get_user_devices(user_id)
+            raw_rows, total = postgres_store.page_master_assets(
+                [device["id"] for device in devices],
+                asset_type,
+                selected_internal_id=selected["id"],
+                query=query,
+                system_name=system_name,
+                status=status,
+                artwork_type=artwork_type,
+                page=page,
+                per_page=per_page,
+            )
+            return {
+                "rows": self._master_page_from_asset_rows(asset_type, raw_rows, user_id, include_presence=True),
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            }
+        loaders = {
+            "rom": self.get_master_roms_for_device,
+            "bios": self.get_master_bios_for_device,
+            "artwork": self.get_master_artwork_for_device,
+        }
+        rows = loaders[asset_type](user_id, selected_device_id) or []
+        filtered = self._filter_master_rows(
+            rows,
+            asset_type=asset_type,
+            query=query,
+            system_name=system_name,
+            status=status,
+            artwork_type=artwork_type,
+        )
+        start = (page - 1) * per_page
+        return {"rows": filtered[start:start + per_page], "total": len(filtered), "page": page, "per_page": per_page}
+
+    def get_swarm_master_roms_page(
+        self,
+        user_id: str,
+        *,
+        query: Optional[str] = None,
+        system_name: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> dict:
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 500))
+        if self._asset_store_enabled():
+            devices = self.get_user_devices(user_id)
+            raw_rows, total = postgres_store.page_master_assets(
+                [device["id"] for device in devices],
+                "rom",
+                query=query,
+                system_name=system_name,
+                page=page,
+                per_page=per_page,
+            )
+            return {
+                "rows": self._master_page_from_asset_rows("rom", raw_rows, user_id, include_presence=False),
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            }
+        rows = self._filter_master_rows(self.get_swarm_master_roms(user_id), asset_type="rom", query=query, system_name=system_name)
+        start = (page - 1) * per_page
+        return {"rows": rows[start:start + per_page], "total": len(rows), "page": page, "per_page": per_page}
+
     def add_rom_sync_activity(self, device_id: str, payload: dict) -> Optional[dict]:
         if not self.get_device_by_device_id(device_id):
             return None
@@ -2276,8 +2463,11 @@ class FakeDatabase:
 
     def get_user_systems_summary(self, user_id: str) -> List[dict]:
         """Get system summary across all devices owned by a user."""
+        devices = self.get_user_devices(user_id)
+        if self._asset_store_enabled():
+            return postgres_store.summarize_rom_systems([device["id"] for device in devices])
         summary: Dict[str, dict] = {}
-        for device in self.get_user_devices(user_id):
+        for device in devices:
             internal_id = device["id"]
             device_roms = self._asset_rows_for_device_internal(internal_id, "rom")
             for rom in device_roms:
