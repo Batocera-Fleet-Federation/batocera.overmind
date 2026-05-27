@@ -1512,6 +1512,7 @@
                                     <div class="mt-3 d-flex flex-wrap gap-1">
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
+                                        <span class="badge ${device.public_resolvable ? 'text-bg-success' : (device.public_reachability && device.public_reachability.checked_at ? 'text-bg-danger' : 'text-bg-secondary')}">${device.public_resolvable ? 'Resolvable' : (device.public_reachability && device.public_reachability.checked_at ? 'Not Resolvable' : 'Resolution Pending')}</span>
                                     </div>
                                     <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
@@ -2332,6 +2333,7 @@
                 const ipv4 = resolved.ipv4 || [];
                 const ipv6 = resolved.ipv6 || [];
                 const publicIp = (device.network || {}).public_ip || (device.network || {}).public || 'n/a';
+                const publicIpStatus = device.public_resolvable ? ' (resolvable)' : '';
                 const cert = device.certificate || {};
                 const peerChecks = device.peer_checks || [];
                 const info = device.system_info || {};
@@ -2361,7 +2363,7 @@
                         </div>
                         <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}</div>
+                        <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}${publicIpStatus}</div>
                         <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
                         <hr>
                         <strong>Certificate</strong>
@@ -2460,6 +2462,7 @@
                 const ipv4 = resolved.ipv4 || [];
                 const ipv6 = resolved.ipv6 || [];
                 const publicIp = (device.network || {}).public_ip || (device.network || {}).public || 'n/a';
+                const publicIpStatus = device.public_resolvable ? ' (resolvable)' : '';
                 const cert = device.certificate || {};
                 const info = device.system_info || {};
                 const sample = device.last_speed_sample;
@@ -2483,7 +2486,7 @@
                         </div>
                         <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}</div>
+                        <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}${publicIpStatus}</div>
                         <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
                         <hr>
                         <strong>Certificate</strong>

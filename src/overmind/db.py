@@ -62,6 +62,7 @@ class FakeDatabase:
         "create_device",
         "add_device_admin_claim",
         "update_device_last_seen",
+        "update_device_public_reachability",
         "verify_device_token",
         "rotate_device_token",
         "set_device_authorization_token",
@@ -1183,6 +1184,13 @@ class FakeDatabase:
                 {"device": {"device_id": device.get("device_id"), "device_name": self._device_label(device)}, "status": current},
             )
 
+    def update_device_public_reachability(self, internal_id: str, result: dict) -> bool:
+        device = self.devices.get(internal_id)
+        if not device:
+            return False
+        device["public_reachability"] = dict(result) if isinstance(result, dict) else {}
+        return True
+
     def get_swarm_for_device(self, device_id: str, offline_seconds: int = 90) -> List[dict]:
         device = self.get_device_by_device_id(device_id)
         if not device:
@@ -1199,7 +1207,9 @@ class FakeDatabase:
             public_host = str(public_ip or "").strip()
             if ":" in public_host and not public_host.startswith("["):
                 public_host = f"[{public_host}]"
-            public_reachable_url = f"{scheme}://{public_host}:{api_port}" if public_host else None
+            reachability = peer.get("public_reachability") if isinstance(peer.get("public_reachability"), dict) else {}
+            public_resolvable = bool(reachability.get("resolvable")) and str(reachability.get("public_ip") or "") == str(public_ip or "")
+            public_reachable_url = f"{scheme}://{public_host}:{api_port}" if public_host and public_resolvable else None
             last_seen = peer.get("last_seen")
             online = bool(last_seen and last_seen >= cutoff)
             cert = dict(peer.get("certificate") or {})
@@ -1214,6 +1224,8 @@ class FakeDatabase:
                 "private_ip": ipv4,
                 "public_ip": public_ip,
                 "public_reachable_url": public_reachable_url,
+                "public_resolvable": public_resolvable,
+                "public_reachability": reachability,
                 "api_port": api_port,
                 "scheme": scheme,
                 "reachable_url": peer.get("reachable_url"),

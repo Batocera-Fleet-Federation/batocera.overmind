@@ -115,6 +115,10 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
     cert = dict(device.get("certificate") or {})
     cert.pop("private_key", None)
     cert.pop("key", None)
+    network = device.get("network") if isinstance(device.get("network"), dict) else {}
+    public_ip = network.get("public_ip") or network.get("public")
+    public_reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
+    public_resolvable = bool(public_reachability.get("resolvable")) and str(public_reachability.get("public_ip") or "") == str(public_ip or "")
     return {
         "id": device["id"],
         "device_id": device["device_id"],
@@ -123,7 +127,7 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
         "system_info": device.get("system_info") or {},
         "registered_at": device["registered_at"],
         "last_seen": device["last_seen"],
-        "network": device.get("network") or {},
+        "network": network,
         "resolved_network": device.get("resolved_network") or {"ipv4": [], "ipv6": []},
         "swarm_connected": bool(device.get("swarm_connected")),
         "rom_systems": device.get("rom_systems") or [],
@@ -136,6 +140,8 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
         "api_port": device.get("api_port"),
         "scheme": device.get("scheme") or "https",
         "reachable_url": device.get("reachable_url"),
+        "public_resolvable": public_resolvable,
+        "public_reachability": public_reachability,
         "certificate": cert or None,
         "peer_checks": data_store.get_latest_peer_checks(device.get("device_id")) if device.get("device_id") else [],
         "online": online,

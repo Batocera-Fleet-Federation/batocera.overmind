@@ -22,6 +22,7 @@ from overmind import auth as auth_utils
 def client(monkeypatch):
     """Create a test client."""
     monkeypatch.setenv("OVERMIND_AUTO_VERIFY_REGISTRATION", "1")
+    monkeypatch.setenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "0")
     db.users.clear()
     db.user_by_email.clear()
     db.devices.clear()
@@ -48,6 +49,16 @@ def client(monkeypatch):
     db.notifications.clear()
     overmind_main.oauth_states.clear()
     return TestClient(app)
+
+
+def mark_source_resolvable(device_id: str, public_ip: str = "8.8.8.8"):
+    device = db.get_device_by_device_id(device_id)
+    assert device is not None
+    device["network"] = {**(device.get("network") or {}), "public_ip": public_ip}
+    db.update_device_public_reachability(
+        device["id"],
+        {"resolvable": True, "public_ip": public_ip, "checked_at": datetime.utcnow()},
+    )
 
 
 def test_health_check(client):
@@ -239,6 +250,7 @@ def test_notifications_capture_drone_status_transition_and_sync_trigger(client):
     user = db.get_user_by_email("syncnotify@example.com")
     db.create_device(user["id"], "source-drone", "Source Drone", {"ip_address": "10.0.0.2"}, raw_token="source-token")
     db.create_device(user["id"], "target-drone", "Target Drone", {"ip_address": "10.0.0.3"}, raw_token="target-token")
+    mark_source_resolvable("source-drone")
     db.add_roms("source-drone", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8}])
     db.devices[db.get_device_by_device_id("target-drone")["id"]]["last_seen"] = datetime.utcnow() - timedelta(seconds=999)
 
@@ -1808,6 +1820,7 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     db.create_device(user["id"], "source-without-rom", "Source Without ROM", {"ip_address": "10.0.0.2"}, raw_token="a")
     db.create_device(user["id"], "source-with-rom", "Source With ROM", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    mark_source_resolvable("source-with-rom")
     db.add_roms("source-with-rom", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8}])
 
     response = client.post(
@@ -1827,6 +1840,28 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     assert action["payload"]["devices"] == [{"device_id": "source-with-rom", "device_name": "Source With ROM"}]
 
 
+def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):
+    client.post("/api/auth/register", json={"email": "blocked@example.com", "username": "blocked-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "blocked@example.com", "username": "blocked-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("blocked@example.com")
+    db.create_device(user["id"], "unresolved-source", "Unresolved Source", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "blocked-target", "Blocked Target", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.add_roms("unresolved-source", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8}])
+
+    response = client.post(
+        "/api/devices/blocked-target/sync-rom",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No resolvable source Drone has this ROM"
+    assert db.get_device_actions(user["id"], "blocked-target") == []
+
+
 def test_sync_folder_rom_payload_matches_by_path_without_md5(client):
     client.post("/api/auth/register", json={"email": "folder@example.com", "username": "folder-at-example.com", "password": "testpass123"})
     token = client.post(
@@ -1836,6 +1871,7 @@ def test_sync_folder_rom_payload_matches_by_path_without_md5(client):
     user = db.get_user_by_email("folder@example.com")
     db.create_device(user["id"], "source-with-folder", "Source Folder", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-folder", "Target Folder", {"ip_address": "10.0.0.4"}, raw_token="c")
+    mark_source_resolvable("source-with-folder")
     db.add_roms("source-with-folder", "ps3", [{"rom_name": "Game.ps3", "file_path": "Game.ps3", "entry_type": "folder", "file_size": 10}])
 
     response = client.post(
@@ -1949,6 +1985,7 @@ def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client)
     db.create_device(user["id"], "source-without-bios", "Source Without BIOS", {"ip_address": "10.0.0.2"}, raw_token="a")
     db.create_device(user["id"], "source-with-bios", "Source With BIOS", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    mark_source_resolvable("source-with-bios")
     db.add_bios("source-with-bios", [{"bios_name": "flash.bin", "file_path": "dc/flash.bin", "bios_md5": "bios-md5", "file_size": 8}])
 
     response = client.post(
@@ -2019,6 +2056,7 @@ def test_sync_artwork_action_payload_includes_only_source_devices_with_artwork(c
     db.create_device(user["id"], "source-without-artwork", "Source Without Artwork", {"ip_address": "10.0.0.2"}, raw_token="a")
     db.create_device(user["id"], "source-with-artwork", "Source With Artwork", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    mark_source_resolvable("source-with-artwork")
     db.add_artwork("source-with-artwork", [{
         "system": "snes",
         "rom_path": "Game.zip",
@@ -2055,6 +2093,7 @@ def test_bulk_sync_artwork_filters_sources_and_systems(client):
     db.create_device(user["id"], "source-a", "Source A", {"ip_address": "10.0.0.2"}, raw_token="a")
     db.create_device(user["id"], "source-b", "Source B", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    mark_source_resolvable("source-a")
     db.add_artwork("source-a", [{
         "system": "snes",
         "rom_path": "Game.zip",
@@ -2101,6 +2140,8 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="a")
     db.create_device(user["id"], "drone-b", "Drone B", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "drone-c", "Drone C", {"ip_address": "10.0.0.4"}, raw_token="c")
+    mark_source_resolvable("drone-a", "8.8.8.8")
+    mark_source_resolvable("drone-b", "1.1.1.1")
     db.add_roms("drone-a", "snes", [{"rom_name": "A.zip", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 8}])
     db.add_roms("drone-b", "snes", [{"rom_name": "B.zip", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 9}])
     db.add_roms("drone-c", "snes", [{"rom_name": "C.zip", "file_path": "C.zip", "rom_md5": "ccc", "file_size": 10}])
@@ -2123,6 +2164,32 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     assert claim_a.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-b", "device_name": "Drone B"}]
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "A.zip"
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
+
+
+def test_sync_system_queues_only_roms_from_resolvable_sources(client):
+    client.post("/api/auth/register", json={"email": "system-sync@example.com", "username": "system-sync-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "system-sync@example.com", "username": "system-sync-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("system-sync@example.com")
+    db.create_device(user["id"], "good-source", "Good Source", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "blocked-source", "Blocked Source", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.create_device(user["id"], "target-system", "Target System", {"ip_address": "10.0.0.4"}, raw_token="c")
+    mark_source_resolvable("good-source")
+    db.add_roms("good-source", "snes", [{"rom_name": "Good.zip", "file_path": "Good.zip", "rom_md5": "good"}])
+    db.add_roms("blocked-source", "snes", [{"rom_name": "Blocked.zip", "file_path": "Blocked.zip", "rom_md5": "blocked"}])
+
+    response = client.post(
+        "/api/devices/target-system/sync-system",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "snes"},
+    )
+
+    assert response.status_code == 200
+    roms = response.json()["action"]["payload"]["roms"]
+    assert [row["file_path"] for row in roms] == ["Good.zip"]
+    assert roms[0]["devices"] == [{"device_id": "good-source", "device_name": "Good Source"}]
 
 
 def test_device_action_lifecycle(client):
@@ -2429,6 +2496,8 @@ def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
 
     assert "Drone ID" not in tile_renderer
     assert "Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}" in tile_renderer
+    assert "'Resolvable'" in tile_renderer
+    assert "'Resolution Pending'" in tile_renderer
 
 
 def test_profile_swarm_access_exposes_remove_overseer_action():
@@ -2456,6 +2525,13 @@ def test_profile_swarm_access_exposes_pending_invite_remove_action():
     assert "function removePendingOverseerInvite(invitationId)" in js
     assert "/invitations/${encodeURIComponent(invitationId)}`" in js
     assert "invitation link will no longer work" in js
+
+
+def test_drone_metadata_shows_resolvable_public_ip_state():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "const publicIpStatus = device.public_resolvable ? ' (resolvable)' : '';" in js
+    assert "Public IP: ${escapeHtml(publicIp)}${publicIpStatus}" in js
 
 
 def test_signup_form_requires_username_and_posts_it():
@@ -2606,6 +2682,59 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
     assert detail["peer_checks"][0]["target_name"]
 
 
+def test_public_peer_poll_marks_public_endpoint_resolvable_for_swarm_transfer(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(
+        owner["id"],
+        "public-drone",
+        "Public Drone",
+        {"network": {"public_ip": "8.8.8.8"}, "api_port": 8443, "scheme": "https"},
+        raw_token="drone-token",
+    )
+    calls = []
+
+    class FakeConnection:
+        def close(self):
+            return None
+
+    def connect(address, timeout):
+        calls.append((address, timeout))
+        return FakeConnection()
+
+    monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
+    overmind_main.poll_public_drone_reachability_once()
+
+    response = client.get("/api/devices/public-drone", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert response.json()["public_resolvable"] is True
+    assert response.json()["public_reachability"]["public_ip"] == "8.8.8.8"
+    swarm_peer = db.get_swarm_for_device("public-drone")[0]
+    assert swarm_peer["public_resolvable"] is True
+    assert swarm_peer["public_reachable_url"] == "https://8.8.8.8:8443"
+    assert calls and calls[0][0] == ("8.8.8.8", 8443)
+
+
+def test_public_peer_poll_rejects_private_reported_addresses_without_connecting(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(
+        owner["id"],
+        "private-drone",
+        "Private Drone",
+        {"network": {"public_ip": "192.168.0.206"}, "api_port": 8443, "scheme": "https"},
+        raw_token="drone-token",
+    )
+    monkeypatch.setattr(overmind_main.socket, "create_connection", lambda *args, **kwargs: pytest.fail("private IP must not be probed"))
+    overmind_main.poll_public_drone_reachability_once()
+
+    swarm_peer = db.get_swarm_for_device("private-drone")[0]
+    assert swarm_peer["public_resolvable"] is False
+    assert swarm_peer["public_reachable_url"] is None
+    assert "not globally routable" in swarm_peer["public_reachability"]["failure_reason"]
+
+
 def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(client):
     db.populate_fake_data()
     login_response = client.post(
@@ -2637,7 +2766,8 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
     swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["device_id"] == "arcade-cabinet-001")
     assert swarm_peer["reachable_url"] == "https://bff-drone-a:8443"
     assert swarm_peer["public_ip"] == "198.51.100.50"
-    assert swarm_peer["public_reachable_url"] == "https://198.51.100.50:8443"
+    assert swarm_peer["public_resolvable"] is False
+    assert swarm_peer["public_reachable_url"] is None
 
     roms_response = client.get(
         "/api/devices/arcade-cabinet-001/roms",

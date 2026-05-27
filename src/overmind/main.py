@@ -1,9 +1,13 @@
 """Main FastAPI application."""
 
 import html
+import ipaddress
 import logging
 import os
 import secrets
+import socket
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -73,6 +77,8 @@ SUPPORTED_DEVICE_ACTIONS = {
     "cancel_download",
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
+PUBLIC_PEER_PROBE_INTERVAL_SECONDS = int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "60"))
+PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "3"))
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
@@ -121,6 +127,7 @@ app = FastAPI(
     version=APP_VERSION.lstrip("v"),
 )
 _RUNTIME_SECRET_REFRESHER = None
+_PUBLIC_PEER_PROBE_THREAD = None
 
 
 def apply_runtime_config_side_effects(values: dict[str, str]) -> None:
@@ -137,6 +144,73 @@ def ensure_self_signed_cert():
 
 def run_https_app() -> None:
     _run_https_app(app, certificate_loader=ensure_self_signed_cert)
+
+
+def probe_device_public_endpoint(device: dict) -> dict:
+    """Check whether a Drone's globally routed peer endpoint accepts connections."""
+    checked_at = datetime.utcnow()
+    network = device.get("network") if isinstance(device.get("network"), dict) else {}
+    value = str(network.get("public_ip") or network.get("public") or "").strip()
+    try:
+        port = int(device.get("api_port") or 8443)
+    except (TypeError, ValueError):
+        port = 0
+    result = {
+        "resolvable": False,
+        "public_ip": value or None,
+        "api_port": port,
+        "checked_at": checked_at,
+        "latency_ms": None,
+        "failure_reason": None,
+    }
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        result["failure_reason"] = "No valid public IP reported"
+        return result
+    if not address.is_global:
+        result["failure_reason"] = "Reported IP is not globally routable"
+        return result
+    if port < 1 or port > 65535:
+        result["failure_reason"] = "Reported API port is invalid"
+        return result
+    started = time.monotonic()
+    try:
+        connection = socket.create_connection((str(address), port), timeout=max(0.1, PUBLIC_PEER_PROBE_TIMEOUT_SECONDS))
+        connection.close()
+    except OSError as error:
+        result["failure_reason"] = str(error) or error.__class__.__name__
+        return result
+    result["resolvable"] = True
+    result["latency_ms"] = int((time.monotonic() - started) * 1000)
+    return result
+
+
+def poll_public_drone_reachability_once() -> None:
+    """Probe public peer endpoints for all approved Drones."""
+    for device in list(db.devices.values()):
+        if device.get("approval_status", "approved") != "approved":
+            continue
+        db.update_device_public_reachability(device["id"], probe_device_public_endpoint(device))
+
+
+def start_public_drone_reachability_poller() -> None:
+    """Start periodic public endpoint probes unless disabled by configuration."""
+    global _PUBLIC_PEER_PROBE_THREAD
+    interval_seconds = max(0, int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", str(PUBLIC_PEER_PROBE_INTERVAL_SECONDS))))
+    if interval_seconds == 0 or (_PUBLIC_PEER_PROBE_THREAD and _PUBLIC_PEER_PROBE_THREAD.is_alive()):
+        return
+
+    def loop() -> None:
+        while True:
+            try:
+                poll_public_drone_reachability_once()
+            except Exception as error:
+                logger.warning("Public Drone endpoint poll failed: %s", error)
+            time.sleep(max(5, interval_seconds))
+
+    _PUBLIC_PEER_PROBE_THREAD = threading.Thread(target=loop, name="public-drone-reachability-poller", daemon=True)
+    _PUBLIC_PEER_PROBE_THREAD.start()
 
 # Add CORS middleware
 app.add_middleware(
@@ -327,6 +401,34 @@ def notify_sync_triggered(user: dict, device: dict, sync_type: str, nature: str,
         },
         actor_user_id=user.get("id"),
     )
+
+
+def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = None) -> list:
+    """Return sources whose latest public endpoint probe succeeded."""
+    eligible = []
+    for source in sources if isinstance(sources, list) else []:
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("device_id") or source.get("drone_id") or "").strip()
+        if not source_id or source_id == str(target_device_id or ""):
+            continue
+        source_device = db.get_device_by_device_id(source_id)
+        if not source_device:
+            continue
+        network = source_device.get("network") if isinstance(source_device.get("network"), dict) else {}
+        public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
+        reachability = source_device.get("public_reachability") if isinstance(source_device.get("public_reachability"), dict) else {}
+        if (
+            not public_ip
+            or not reachability.get("resolvable")
+            or str(reachability.get("public_ip") or "").strip() != public_ip
+        ):
+            continue
+        eligible.append({
+            "device_id": source_id,
+            "device_name": source.get("device_name") or source_device.get("device_name") or source_id,
+        })
+    return eligible
 
 
 # ==================== Authentication ====================
@@ -1732,6 +1834,9 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
             if not requested_md5 and row_path == requested_path:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                 break
+    source_devices = resolvable_asset_sources(source_devices, device_id)
+    if not source_devices:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has this ROM")
     action = db.create_device_action(device["user_id"], device_id, "sync_rom", {
         "system_name": system_name,
         "rom_name": payload.get("rom_name") or rom_path,
@@ -1781,6 +1886,9 @@ async def sync_device_bios(device_id: str, payload: dict, authorization: Optiona
             if not requested_md5 and row_path == requested_path:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                 break
+    source_devices = resolvable_asset_sources(source_devices, device_id)
+    if not source_devices:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has this BIOS")
     action = db.create_device_action(device["user_id"], device_id, "sync_bios", {
         "bios_name": payload.get("bios_name") or bios_path,
         "file_path": bios_path,
@@ -1830,6 +1938,9 @@ async def sync_device_artwork(device_id: str, payload: dict, authorization: Opti
             if row_system == system_name.lower() and row_path == requested_path and row_type == requested_type:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                 break
+    source_devices = resolvable_asset_sources(source_devices, device_id)
+    if not source_devices:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has this artwork")
     action = db.create_device_action(device["user_id"], device_id, "sync_artwork", {
         "asset_type": "artwork",
         "system_name": system_name,
@@ -1900,10 +2011,7 @@ async def sync_device_artwork_bulk(device_id: str, payload: dict, authorization:
             continue
 
         available_sources = row.get("devices") if isinstance(row.get("devices"), list) else []
-        source_devices = [
-            source for source in available_sources
-            if source.get("device_id") and source.get("device_id") != device_id
-        ]
+        source_devices = resolvable_asset_sources(available_sources, device_id)
         if source_device_ids:
             source_devices = [
                 source for source in source_devices
@@ -1971,9 +2079,13 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name is required")
     master_rows = db.get_master_roms_for_device(device["user_id"], device_id) or []
     missing = [
-        row for row in master_rows
+        {**row, "devices": resolvable_asset_sources(row.get("devices") or [], device_id)}
+        for row in master_rows
         if str(row.get("system_name") or "").lower() == system_name.lower() and not row.get("present_on_selected")
     ]
+    missing = [row for row in missing if row["devices"]]
+    if not missing:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has missing ROMs for this system")
     action = db.create_device_action(device["user_id"], device_id, "sync_system", {"system_name": system_name, "roms": missing})
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
@@ -2056,10 +2168,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
         for key, row in union.items():
             if key in target_keys:
                 continue
-            source_devices = [
-                source for source in row.get("devices", [])
-                if source.get("device_id") and source.get("device_id") != target_id
-            ]
+            source_devices = resolvable_asset_sources(row.get("devices", []), target_id)
             if not source_devices:
                 continue
             system_name = str(row.get("system_name") or "").strip()
@@ -2341,6 +2450,8 @@ async def startup_event():
         print("\n  Or:")
         print("  Email: arcade@example.com")
         print("  Password: ArcadePass123\n")
+
+    start_public_drone_reachability_poller()
 
 
 if __name__ == "__main__":

@@ -18,3 +18,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pending Overseer invitations can now be removed from Profile Swarm Access, revoking unused invitation links immediately.
 - Password signup now requires a unique username, with duplicate prevention also enforced on Profile username changes.
 - Heartbeat swarm responses now provide each Drone's public peer endpoint for remote Drone-to-Drone transfers and display reported public IP details.
+- Overmind now periodically probes public Drone endpoints, marks reachable Drones as resolvable in swarm and metadata views, and only advertises verified public endpoints as transfer candidates.
+- ROM, BIOS, artwork, system, and bulk sync jobs now queue only Drones with verified publicly resolvable peer endpoints.
