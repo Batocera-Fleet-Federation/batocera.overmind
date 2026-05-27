@@ -51,3 +51,9 @@ jobs:
           export TAG=${{ github.sha }}
           export AWS_REGION=${{ secrets.AWS_DEFAULT_REGION || env.AWS_REGION }}
           ./scripts/docker-publish-ecr.sh
+      - name: Push Lambda image to AWS ECR
+        if: github.event_name == 'push'
+        run: |
+          export TAG=lambda-latest
+          export AWS_REGION=${{ secrets.AWS_DEFAULT_REGION || env.AWS_REGION }}
+          ./scripts/docker-publish-lambda-ecr.sh
