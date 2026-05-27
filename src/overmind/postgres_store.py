@@ -83,8 +83,29 @@ class PostgresMetadataStore:
                 )
                 cur.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS overmind_device_asset_staging (
+                        device_internal_id TEXT NOT NULL,
+                        inventory_id TEXT NOT NULL,
+                        device_id TEXT NOT NULL,
+                        asset_type TEXT NOT NULL,
+                        item_key TEXT NOT NULL,
+                        system_name TEXT,
+                        payload JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        PRIMARY KEY (device_internal_id, inventory_id, asset_type, item_key)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_device_type
                     ON overmind_device_assets (device_internal_id, asset_type)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_overmind_device_asset_staging_inventory
+                    ON overmind_device_asset_staging (device_internal_id, inventory_id, asset_type)
                     """
                 )
                 cur.execute(
@@ -180,6 +201,144 @@ class PostgresMetadataStore:
                         "DELETE FROM overmind_device_assets WHERE device_internal_id = %s",
                         (device_internal_id,),
                     )
+
+    def begin_device_asset_inventory(self, device_internal_id: str, inventory_id: str) -> None:
+        if not self.assets_enabled():
+            return
+        conn = self._connect()
+        if conn is None:
+            return
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM overmind_device_asset_staging WHERE device_internal_id = %s",
+                    (device_internal_id,),
+                )
+
+    def stage_device_assets(
+        self,
+        device_internal_id: str,
+        device_id: str,
+        inventory_id: str,
+        asset_type: str,
+        rows: Iterable[dict],
+    ) -> list[str]:
+        if not self.assets_enabled():
+            return []
+        conn = self._connect()
+        if conn is None:
+            return []
+        prepared = []
+        row_ids = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            item_key = _asset_key(asset_type, row)
+            if not item_key:
+                continue
+            system_name = str(row.get("system_name") or row.get("system") or "").strip() or None
+            row_id = str(row.get("id") or item_key)
+            payload = {**row, "id": row_id, "device_id": row.get("device_id") or device_id}
+            prepared.append((device_internal_id, inventory_id, device_id, asset_type, item_key, system_name, json.dumps(_encode_state(payload))))
+            row_ids.append(row_id)
+        if not prepared:
+            return row_ids
+        with conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO overmind_device_asset_staging
+                        (device_internal_id, inventory_id, device_id, asset_type, item_key, system_name, payload, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                    ON CONFLICT (device_internal_id, inventory_id, asset_type, item_key)
+                    DO UPDATE SET device_id = EXCLUDED.device_id,
+                                  system_name = EXCLUDED.system_name,
+                                  payload = EXCLUDED.payload,
+                                  updated_at = now()
+                    """,
+                    prepared,
+                )
+        return row_ids
+
+    def publish_device_asset_inventory(self, device_internal_id: str, inventory_id: str) -> None:
+        if not self.assets_enabled():
+            return
+        conn = self._connect()
+        if conn is None:
+            return
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM overmind_device_assets WHERE device_internal_id = %s",
+                    (device_internal_id,),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO overmind_device_assets
+                        (device_internal_id, device_id, asset_type, item_key, system_name, payload, updated_at)
+                    SELECT device_internal_id, device_id, asset_type, item_key, system_name, payload, now()
+                    FROM overmind_device_asset_staging
+                    WHERE device_internal_id = %s AND inventory_id = %s
+                    """,
+                    (device_internal_id, inventory_id),
+                )
+                cur.execute(
+                    "DELETE FROM overmind_device_asset_staging WHERE device_internal_id = %s",
+                    (device_internal_id,),
+                )
+
+    def delete_device_asset_rows(self, device_internal_id: str, asset_type: str, rows: Iterable[dict]) -> None:
+        if not self.assets_enabled():
+            return
+        source_rows = [row for row in rows if isinstance(row, dict)]
+        keys = [_asset_key(asset_type, row) for row in source_rows]
+        keys = [key for key in keys if key]
+        paths = [
+            str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or "").replace("\\", "/").strip().lstrip("./").lower()
+            for row in source_rows
+        ]
+        paths = [path for path in paths if path]
+        if not keys and not paths:
+            return
+        conn = self._connect()
+        if conn is None:
+            return
+        with conn:
+            with conn.cursor() as cur:
+                if asset_type == "rom":
+                    cur.execute(
+                        "DELETE FROM overmind_device_assets WHERE device_internal_id = %s AND asset_type = %s AND item_key = ANY(%s)",
+                        (device_internal_id, asset_type, keys),
+                    )
+                elif asset_type == "bios":
+                    cur.execute(
+                        """
+                        DELETE FROM overmind_device_assets
+                        WHERE device_internal_id = %s AND asset_type = %s
+                          AND (
+                              item_key = ANY(%s)
+                              OR lower(coalesce(payload->>'file_path', payload->>'relative_path', payload->>'rom_path', '')) = ANY(%s)
+                          )
+                        """,
+                        (device_internal_id, asset_type, keys, paths),
+                    )
+                else:
+                    for row in source_rows:
+                        key = _asset_key(asset_type, row)
+                        system = str(row.get("system_name") or row.get("system") or "").strip().lower()
+                        path = str(row.get("rom_path") or row.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower()
+                        cur.execute(
+                            """
+                            DELETE FROM overmind_device_assets
+                            WHERE device_internal_id = %s AND asset_type = %s
+                              AND (
+                                  item_key = %s
+                                  OR (lower(coalesce(system_name, payload->>'system', '')) = %s
+                                      AND lower(coalesce(payload->>'rom_path', payload->>'file_path', '')) = %s)
+                              )
+                            """,
+                            (device_internal_id, asset_type, key, system, path),
+                        )
 
     def upsert_device_assets(
         self,

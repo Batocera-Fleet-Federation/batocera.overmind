@@ -127,6 +127,7 @@ class FakeDatabase:
         self.roms: Dict[str, list] = {}  # device_id -> list of roms
         self.bios: Dict[str, list] = {}  # device_id -> list of bios files
         self.artwork: Dict[str, list] = {}  # device_id -> gamelist artwork availability rows
+        self._asset_inventory_staging: Dict[str, dict] = {}
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
         self.device_actions: Dict[str, list] = {}  # internal device_id -> queued actions
         self.speed_samples: Dict[str, list] = {}  # internal device_id -> speed samples
@@ -339,6 +340,90 @@ class FakeDatabase:
         self.roms[internal_id] = []
         self.bios[internal_id] = []
         self.artwork[internal_id] = []
+
+    def _store_asset_inventory_chunk(
+        self,
+        device_id: str,
+        device: dict,
+        metadata: dict,
+        grouped: Dict[str, list],
+    ) -> None:
+        internal_id = device["id"]
+        inventory_id = str(metadata.get("inventory_id") or "").strip()
+        if not inventory_id:
+            return
+        chunk_index = int(metadata.get("chunk_index") or 0)
+        complete = bool(metadata.get("inventory_complete"))
+        cleaned = {"rom": [], "bios": [], "artwork": []}
+        for system_name, rows in grouped.items():
+            cleaned["rom"].extend(self._clean_rom_rows(device_id, system_name, rows))
+        if isinstance(metadata.get("bios"), list):
+            cleaned["bios"] = self._clean_bios_rows(device_id, metadata.get("bios") or [])
+        if isinstance(metadata.get("artwork"), list):
+            cleaned["artwork"] = self._clean_artwork_rows(device_id, metadata.get("artwork") or [])
+
+        if self._asset_store_enabled():
+            if chunk_index == 0:
+                postgres_store.begin_device_asset_inventory(internal_id, inventory_id)
+            for asset_type, rows in cleaned.items():
+                postgres_store.stage_device_assets(internal_id, device_id, inventory_id, asset_type, rows)
+            if complete:
+                postgres_store.publish_device_asset_inventory(internal_id, inventory_id)
+            return
+
+        staged = self._asset_inventory_staging.get(internal_id)
+        if chunk_index == 0 or not staged or staged.get("inventory_id") != inventory_id:
+            staged = {"inventory_id": inventory_id, "rom": [], "bios": [], "artwork": []}
+            self._asset_inventory_staging[internal_id] = staged
+        for asset_type, rows in cleaned.items():
+            staged[asset_type].extend(rows)
+        if complete:
+            self.roms[internal_id] = staged["rom"]
+            self.bios[internal_id] = staged["bios"]
+            self.artwork[internal_id] = staged["artwork"]
+            self._asset_inventory_staging.pop(internal_id, None)
+
+    def _delete_asset_rows(self, device_id: str, asset_type: str, rows: list) -> None:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return
+        internal_id = device["id"]
+        if self._asset_store_enabled():
+            postgres_store.delete_device_asset_rows(internal_id, asset_type, rows)
+            return
+        if asset_type == "rom":
+            keys = {
+                (
+                    str(row.get("system") or row.get("system_name") or "").strip().lower(),
+                    str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or "").replace("\\", "/").strip().lstrip("./").lower(),
+                )
+                for row in rows if isinstance(row, dict)
+            }
+            self.roms[internal_id] = [
+                row for row in self.roms.get(internal_id, [])
+                if (
+                    str(row.get("system_name") or "").strip().lower(),
+                    str(row.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower(),
+                ) not in keys
+            ]
+        elif asset_type == "bios":
+            keys = {self._bios_key(row) for row in rows if isinstance(row, dict)}
+            self.bios[internal_id] = [row for row in self.bios.get(internal_id, []) if self._bios_key(row) not in keys]
+        elif asset_type == "artwork":
+            keys = {
+                (
+                    str(row.get("system_name") or row.get("system") or "").strip().lower(),
+                    str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
+                )
+                for row in rows if isinstance(row, dict)
+            }
+            self.artwork[internal_id] = [
+                row for row in self.artwork.get(internal_id, [])
+                if (
+                    str(row.get("system_name") or row.get("system") or "").strip().lower(),
+                    str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
+                ) not in keys
+            ]
 
     def _notify_master_list_changes(self, swarm_id: Optional[str], before: Dict[str, Dict[tuple, dict]], after: Dict[str, Dict[tuple, dict]]) -> None:
         if not swarm_id:
@@ -1560,6 +1645,7 @@ class FakeDatabase:
         swarm_id = device.get("swarm_id")
         update_mode = metadata.get("update_mode")
         is_inventory_chunk = update_mode == "inventory_chunk"
+        is_inventory_delta = update_mode == "inventory_delta"
         if update_mode == "rom_hash_patch":
             self._apply_rom_metadata_hash_patch(device, metadata)
             return
@@ -1577,21 +1663,12 @@ class FakeDatabase:
         device["rom_metadata"] = metadata
 
         grouped: Dict[str, list] = {}
-        reported_systems = set()
-        for system in systems:
-            if isinstance(system, dict):
-                system_name = str(system.get("name") or system.get("system_name") or "").strip()
-            else:
-                system_name = str(system or "").strip()
-            if system_name:
-                reported_systems.add(system_name)
         for item in row_metadata.get("roms") if isinstance(row_metadata.get("roms"), list) else []:
             if not isinstance(item, dict):
                 continue
             system_name = str(item.get("system") or item.get("system_name") or "").strip()
             if not system_name:
                 continue
-            reported_systems.add(system_name)
             rom_name = str(item.get("rom_name") or item.get("name") or item.get("title") or "").strip()
             file_path = str(item.get("file_path") or item.get("relative_path") or item.get("rom_path") or item.get("rom_file") or rom_name).strip()
             grouped.setdefault(system_name, []).append({
@@ -1604,15 +1681,26 @@ class FakeDatabase:
                 "source": item.get("source"),
                 "modified_time": item.get("modified_time") or item.get("mtime"),
             })
-        replace_rows = update_mode != "inventory_chunk"
-        if update_mode == "inventory_chunk" and int(metadata.get("chunk_index") or 0) == 0:
-            self._clear_device_assets(device["id"])
-        for system_name in reported_systems:
-            self.add_roms(device_id, system_name, grouped.get(system_name, []), replace=replace_rows)
-        if isinstance(row_metadata.get("bios"), list):
-            self.add_bios(device_id, row_metadata.get("bios") or [], replace=replace_rows)
-        if isinstance(row_metadata.get("artwork"), list):
-            self.add_artwork(device_id, row_metadata.get("artwork") or [], replace=replace_rows)
+        replace_all = bool(row_metadata.get("replace_all"))
+        if is_inventory_chunk and replace_all:
+            self._store_asset_inventory_chunk(device_id, device, row_metadata, grouped)
+        else:
+            if replace_all:
+                self._clear_device_assets(device["id"])
+            if is_inventory_delta or not replace_all:
+                self._delete_asset_rows(device_id, "rom", row_metadata.get("roms") or [])
+                self._delete_asset_rows(device_id, "bios", row_metadata.get("bios") or [])
+                self._delete_asset_rows(device_id, "artwork", row_metadata.get("artwork") or [])
+            for system_name, rows in grouped.items():
+                self.add_roms(device_id, system_name, rows, replace=False)
+            if row_metadata.get("bios"):
+                self.add_bios(device_id, row_metadata["bios"], replace=False)
+            if row_metadata.get("artwork"):
+                self.add_artwork(device_id, row_metadata["artwork"], replace=False)
+            deleted = row_metadata.get("deleted") if is_inventory_delta and isinstance(row_metadata.get("deleted"), dict) else {}
+            self._delete_asset_rows(device_id, "rom", deleted.get("roms") or [])
+            self._delete_asset_rows(device_id, "bios", deleted.get("bios") or [])
+            self._delete_asset_rows(device_id, "artwork", deleted.get("artwork") or [])
         after = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
@@ -1794,13 +1882,7 @@ class FakeDatabase:
         return False
     
     # ROM operations
-    def add_roms(self, device_id: str, system_name: str, roms: list, *, replace: bool = True) -> List[str]:
-        """Add ROMs for a device. Returns list of ROM IDs."""
-        internal_device = self.get_device_by_device_id(device_id)
-        if not internal_device:
-            return []
-        
-        internal_id = internal_device["id"]
+    def _clean_rom_rows(self, device_id: str, system_name: str, roms: list) -> list:
         cleaned = []
         for rom in roms:
             if not isinstance(rom, dict):
@@ -1820,6 +1902,16 @@ class FakeDatabase:
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             })
+        return cleaned
+
+    def add_roms(self, device_id: str, system_name: str, roms: list, *, replace: bool = True) -> List[str]:
+        """Add ROMs for a device. Returns list of ROM IDs."""
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+
+        internal_id = internal_device["id"]
+        cleaned = self._clean_rom_rows(device_id, system_name, roms)
         if self._asset_store_enabled():
             return postgres_store.upsert_device_assets(
                 internal_id,
@@ -1853,13 +1945,7 @@ class FakeDatabase:
         path = str(rom.get("file_path") or rom.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
         return (system, path)
 
-    def add_bios(self, device_id: str, bios_entries: list, *, replace: bool = True) -> List[str]:
-        """Replace BIOS metadata for a device. Returns list of BIOS row IDs."""
-        internal_device = self.get_device_by_device_id(device_id)
-        if not internal_device:
-            return []
-        internal_id = internal_device["id"]
-        row_ids = []
+    def _clean_bios_rows(self, device_id: str, bios_entries: list) -> list:
         cleaned = []
         for item in bios_entries:
             if not isinstance(item, dict):
@@ -1882,6 +1968,16 @@ class FakeDatabase:
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             })
+        return cleaned
+
+    def add_bios(self, device_id: str, bios_entries: list, *, replace: bool = True) -> List[str]:
+        """Replace BIOS metadata for a device. Returns list of BIOS row IDs."""
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        internal_id = internal_device["id"]
+        row_ids = []
+        cleaned = self._clean_bios_rows(device_id, bios_entries)
         if self._asset_store_enabled():
             return postgres_store.upsert_device_assets(internal_id, device_id, "bios", cleaned, replace=replace)
         if replace or internal_id not in self.bios:
@@ -1974,12 +2070,7 @@ class FakeDatabase:
         rows.sort(key=lambda row: str(row.get("file_path") or "").lower())
         return rows
 
-    def add_artwork(self, device_id: str, artwork_entries: list, *, replace: bool = True) -> List[str]:
-        internal_device = self.get_device_by_device_id(device_id)
-        if not internal_device:
-            return []
-        internal_id = internal_device["id"]
-        row_ids = []
+    def _clean_artwork_rows(self, device_id: str, artwork_entries: list) -> list:
         cleaned = []
         for item in artwork_entries:
             if not isinstance(item, dict):
@@ -2005,6 +2096,15 @@ class FakeDatabase:
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             })
+        return cleaned
+
+    def add_artwork(self, device_id: str, artwork_entries: list, *, replace: bool = True) -> List[str]:
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        internal_id = internal_device["id"]
+        row_ids = []
+        cleaned = self._clean_artwork_rows(device_id, artwork_entries)
         if self._asset_store_enabled():
             return postgres_store.upsert_device_assets(internal_id, device_id, "artwork", cleaned, replace=replace)
         if replace or internal_id not in self.artwork:

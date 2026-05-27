@@ -32,6 +32,7 @@ def client(monkeypatch):
     db.roms.clear()
     db.bios.clear()
     db.artwork.clear()
+    db._asset_inventory_staging.clear()
     db.gamelogs.clear()
     db.device_actions.clear()
     db.speed_samples.clear()
@@ -2072,6 +2073,126 @@ def test_asset_metadata_inventory_chunks_append_without_replacing_previous_chunk
     assert db.get_device_by_device_id("drone-a")["rom_metadata"]["inventory_complete"] is True
 
 
+def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_last_chunk(client):
+    client.post("/api/auth/register", json={"email": "refresh@example.com", "username": "refresh-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("refresh@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    headers = {"Authorization": "Bearer drone-token-a"}
+
+    original = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory",
+            "systems": [{"name": "snes", "rom_count": 1}],
+            "roms": [{"system": "snes", "file_path": "Old Game.zip", "rom_name": "Old Game"}],
+            "bios": [{"file_path": "old/bios.bin", "md5": "old-bios"}],
+            "artwork": [],
+        },
+    )
+    assert original.status_code == 200
+
+    first = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_chunk",
+            "replace_all": True,
+            "inventory_id": "replacement-1",
+            "chunk_index": 0,
+            "chunk_total": 2,
+            "inventory_complete": False,
+            "systems": [{"name": "snes", "rom_count": 2}],
+            "roms": [{"system": "snes", "file_path": "New One.zip", "rom_name": "New One"}],
+            "bios": [{"file_path": "new/bios.bin", "md5": "new-bios"}],
+            "artwork": [],
+        },
+    )
+    assert first.status_code == 200
+    assert {row["file_path"] for row in db.get_device_roms("drone-a")} == {"Old Game.zip"}
+    assert {row["file_path"] for row in db.get_device_bios("drone-a")} == {"old/bios.bin"}
+
+    second = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_chunk",
+            "replace_all": True,
+            "inventory_id": "replacement-1",
+            "chunk_index": 1,
+            "chunk_total": 2,
+            "inventory_complete": True,
+            "systems": [{"name": "snes", "rom_count": 2}],
+            "roms": [{"system": "snes", "file_path": "New Two.zip", "rom_name": "New Two"}],
+            "bios": [],
+            "artwork": [],
+        },
+    )
+    assert second.status_code == 200
+    assert {row["file_path"] for row in db.get_device_roms("drone-a")} == {"New One.zip", "New Two.zip"}
+    assert {row["file_path"] for row in db.get_device_bios("drone-a")} == {"new/bios.bin"}
+
+
+def test_asset_metadata_delta_only_upserts_and_deletes_listed_assets(client):
+    client.post("/api/auth/register", json={"email": "delta@example.com", "username": "delta-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("delta@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    headers = {"Authorization": "Bearer drone-token-a"}
+    client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_delta",
+            "roms": [
+                {"system": "snes", "file_path": "Keep.zip", "rom_name": "Keep"},
+                {"system": "snes", "file_path": "Remove.zip", "rom_name": "Remove"},
+            ],
+            "bios": [{"file_path": "keep/bios.bin", "md5": "keep-bios"}],
+            "artwork": [],
+            "deleted": {"roms": [], "bios": [], "artwork": []},
+        },
+    )
+    client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory",
+            "systems": [],
+            "roms": [],
+            "bios": [],
+            "artwork": [],
+        },
+    )
+    assert {row["file_path"] for row in db.get_device_roms("drone-a")} == {"Keep.zip", "Remove.zip"}
+
+    response = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_delta",
+            "roms": [{"system": "snes", "file_path": "Added.zip", "rom_name": "Added"}],
+            "bios": [],
+            "artwork": [],
+            "deleted": {"roms": [{"system": "snes", "file_path": "Remove.zip"}], "bios": [], "artwork": []},
+        },
+    )
+    assert response.status_code == 200
+    assert {row["file_path"] for row in db.get_device_roms("drone-a")} == {"Keep.zip", "Added.zip"}
+    assert {row["file_path"] for row in db.get_device_bios("drone-a")} == {"keep/bios.bin"}
+
+
 def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client):
     client.post("/api/auth/register", json={"email": "sync-bios@example.com", "username": "sync-bios-at-example.com", "password": "testpass123"})
     token = client.post(
@@ -2962,6 +3083,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         json={
             "device_id": "arcade-cabinet-001",
             "type": "rom_metadata",
+            "replace_all": True,
             "roms_root": "/userdata/roms",
             "systems": [{"name": "snes", "rom_count": 2}],
             "roms": [
@@ -2979,6 +3101,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         json={
             "device_id": "arcade-cabinet-001",
             "type": "rom_metadata",
+            "replace_all": True,
             "roms_root": "/userdata/roms",
             "systems": [{"name": "snes", "rom_count": 2}],
             "roms": [
@@ -3006,6 +3129,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         json={
             "device_id": "arcade-cabinet-001",
             "type": "rom_metadata",
+            "replace_all": True,
             "roms_root": "/userdata/roms",
             "systems": [{"name": "snes", "rom_count": 0}],
             "roms": [],
