@@ -80,6 +80,15 @@ def test_ui_header_hides_version_badge_without_environment_value(client, monkeyp
     assert "__OVERMIND_VERSION_BADGE__" not in html
 
 
+def test_ui_fallback_serves_client_routes_but_not_api(client):
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "Batocera Overmind" in dashboard.text
+
+    missing_api = client.get("/api/not-a-real-route")
+    assert missing_api.status_code == 404
+
+
 def test_ui_header_shows_environment_version_badge(client, monkeypatch):
     monkeypatch.setenv("OVERMIND_VERSION", "local:console & safe")
     html = client.get("/").text
@@ -453,6 +462,22 @@ def test_social_auth_buttons_disabled_without_env(client, monkeypatch):
     response = client.get("/api/auth/providers")
     assert response.status_code == 200
     assert response.json()["providers"] == {"google": False, "github": False}
+
+
+def test_oauth_start_uses_signed_state_for_lambda(client, monkeypatch):
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "github-client")
+    monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
+
+    response = client.get("/api/auth/github/start", follow_redirects=False)
+
+    assert response.status_code == 307
+    location = response.headers["location"]
+    parsed = overmind_main.urllib.parse.urlparse(location)
+    params = overmind_main.urllib.parse.parse_qs(parsed.query)
+    state = params["state"][0]
+    assert "." in state
+    assert overmind_main.verify_oauth_state(state, "github") is True
+    assert overmind_main.oauth_states == {}
 
 
 def test_social_auth_activates_existing_unverified_user(client, monkeypatch):

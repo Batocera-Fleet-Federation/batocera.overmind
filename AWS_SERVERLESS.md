@@ -103,4 +103,10 @@ connectivity is the default because some AWS free-plan accounts block RDS
 Proxy. Set `enable_rds_proxy = true` in Terraform when the account supports it.
 The stack adds a Secrets Manager VPC endpoint for cold-start secret loading.
 External outbound access for SMTP, OAuth, Slack/Discord webhooks, or other
-public APIs still requires NAT or a provider-specific VPC endpoint.
+public APIs requires NAT or a provider-specific VPC endpoint.
+
+Production enables `lambda_create_nat_gateway = true`, which creates private
+Lambda subnets, a NAT Gateway in a public subnet, and a private route table for
+Lambda outbound internet access. Without this, requests that call public
+services, such as email verification and Google/GitHub OAuth callbacks, can
+hang until the Lambda timeout.

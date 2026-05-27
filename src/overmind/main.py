@@ -1,5 +1,9 @@
 """Main FastAPI application."""
 
+import base64
+import binascii
+import hashlib
+import hmac
 import html
 import ipaddress
 import logging
@@ -87,6 +91,7 @@ NOTIFICATION_DELIVERY_INTERVAL_SECONDS = int(os.getenv("NOTIFICATION_DELIVERY_IN
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
+OAUTH_STATE_TTL_SECONDS = int(os.getenv("OAUTH_STATE_TTL_SECONDS", "600"))
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONTENT_DIR = Path(__file__).resolve().parent.parent.parent / "content"
@@ -403,6 +408,50 @@ def oauth_provider_enabled(provider: str) -> bool:
     return bool(config and os.getenv(config["client_id"]) and os.getenv(config["client_secret"]))
 
 
+def _urlsafe_b64encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _urlsafe_b64decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}")
+
+
+def create_oauth_state(provider: str) -> str:
+    """Create a signed OAuth state value that works across Lambda instances."""
+    payload = {
+        "provider": provider,
+        "nonce": secrets.token_urlsafe(16),
+        "exp": int(time.time()) + OAUTH_STATE_TTL_SECONDS,
+    }
+    payload_b64 = _urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode())
+    signature = hmac.new(auth.SECRET_KEY.encode(), payload_b64.encode(), hashlib.sha256).digest()
+    return f"{payload_b64}.{_urlsafe_b64encode(signature)}"
+
+
+def verify_oauth_state(state_value: str, provider: str) -> bool:
+    """Validate OAuth state without relying on process-local memory."""
+    if not state_value:
+        return False
+
+    try:
+        payload_b64, signature_b64 = state_value.split(".", 1)
+        expected = hmac.new(auth.SECRET_KEY.encode(), payload_b64.encode(), hashlib.sha256).digest()
+        supplied = _urlsafe_b64decode(signature_b64)
+        if not hmac.compare_digest(expected, supplied):
+            return False
+        payload = json.loads(_urlsafe_b64decode(payload_b64).decode())
+    except (ValueError, json.JSONDecodeError, binascii.Error):
+        return False
+
+    if payload.get("provider") != provider:
+        return False
+    try:
+        return int(payload.get("exp", 0)) >= int(time.time())
+    except (TypeError, ValueError):
+        return False
+
+
 def get_public_base_url(request: Request) -> str:
     """Build redirect base URL from ENV or current request."""
     configured = os.getenv("OAUTH_REDIRECT_BASE_URL", "").strip().rstrip("/")
@@ -707,8 +756,7 @@ async def social_auth_start(provider: str, request: Request):
     if not config or not oauth_provider_enabled(provider):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not configured")
 
-    state = secrets.token_urlsafe(24)
-    oauth_states[state] = provider
+    state = create_oauth_state(provider)
     redirect_uri = f"{get_public_base_url(request)}/api/auth/{provider}/callback"
     params = {
         "client_id": os.getenv(config["client_id"]),
@@ -731,7 +779,7 @@ async def social_auth_callback(provider: str, request: Request):
     state_value = request.query_params.get("state")
     if not config or not oauth_provider_enabled(provider) or not code:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth callback")
-    if oauth_states.pop(state_value or "", None) != provider:
+    if not verify_oauth_state(state_value or "", provider) and oauth_states.pop(state_value or "", None) != provider:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth state")
 
     redirect_uri = f"{get_public_base_url(request)}/api/auth/{provider}/callback"
@@ -2492,6 +2540,14 @@ def get_ui_html() -> str:
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok", "version": APP_VERSION}
+
+
+@app.get("/{ui_path:path}", response_class=HTMLResponse)
+async def serve_ui_route(ui_path: str):
+    """Serve the web UI for direct browser navigation to client-side routes."""
+    if ui_path.startswith(("api/", "static/", "content/")):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    return get_ui_html()
 
 
 # ==================== Startup ====================
