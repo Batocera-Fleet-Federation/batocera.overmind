@@ -1445,9 +1445,10 @@
                 }
             }
 
-            async function loadDevices() {
+            async function loadDevices(options = {}) {
+                const applyRoute = options.applyRoute !== false;
                 try {
-	                    const response = await apiGet(withSwarm('/api/devices'));
+                    const response = await apiGet(withSwarm('/api/devices'));
                     if (!response.ok) throw new Error('Failed to load devices');
                     const data = await response.json();
                     currentDevices = data.devices;
@@ -1455,7 +1456,7 @@
                     displayDevices();
                     updateSelectedDeviceSummary();
                     updateSelectedDeviceWorkspace();
-                    applyRouteFromHash();
+                    if (applyRoute) applyRouteFromHash();
                 } catch (error) {
                     console.error('Error loading devices:', error);
                 }
@@ -1880,7 +1881,7 @@
                 params.set('per_page', '250');
                 panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading swarm master list...</div></div>`;
                 try {
-                    if (!currentDevices.length) await loadDevices();
+                    if (!currentDevices.length) await loadDevices({applyRoute: false});
                     const response = await apiGet('/api/master-roms' + (params.toString() ? `?${params.toString()}` : ''));
                     if (!response.ok) throw new Error('Failed to load master list');
                     const payload = await response.json();

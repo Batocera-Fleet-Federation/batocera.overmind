@@ -1698,6 +1698,28 @@ def test_list_devices_uses_authorization_header(client):
     assert "devices" in response.json()
 
 
+def test_list_devices_refreshes_persistent_state_before_read(client, monkeypatch):
+    client.post(
+        "/api/auth/register",
+        json={"email": "fresh-devices@example.com", "username": "fresh-devices", "password": "testpass123"},
+    )
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "fresh-devices@example.com", "username": "fresh-devices", "password": "testpass123"},
+    )
+    token = login_response.json()["access_token"]
+    calls = {"count": 0}
+
+    def count_refresh():
+        calls["count"] += 1
+
+    monkeypatch.setattr(db, "refresh_persistent_state", count_refresh)
+    response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert calls["count"] == 1
+
+
 def test_demo_seed_exposes_devices_and_systems(client):
     """Seeded demo user should have visible devices/systems data."""
     db.populate_fake_data()
@@ -3050,6 +3072,15 @@ def test_shared_swarm_navigation_state_is_reflected_in_ui_routes():
     assert "parts[3] === 'device'" in js
     assert "row.can_view && !row.current" in js
     assert "Use My Swarm to view your own swarm." in js
+
+
+def test_master_list_refreshes_devices_without_reapplying_route():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "async function loadDevices(options = {})" in js
+    assert "const applyRoute = options.applyRoute !== false;" in js
+    assert "if (applyRoute) applyRouteFromHash();" in js
+    assert "if (!currentDevices.length) await loadDevices({applyRoute: false});" in js
 
 
 def test_drone_alive_claims_data_action_and_stores_result(client):

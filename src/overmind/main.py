@@ -1367,6 +1367,7 @@ async def deny_drone_connection(device_id: str, authorization: Optional[str] = H
 async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List all devices for the authenticated user."""
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     db.update_device_status_notifications(SWARM_OFFLINE_THRESHOLD_SECONDS)
     sid = selected_swarm_id(user, swarm_id) if swarm_id else None
     devices = db.get_user_devices(user["id"], sid)
@@ -1841,6 +1842,7 @@ async def get_device_master_roms(
     - per_page: number of rows per page
     """
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -1874,6 +1876,7 @@ async def get_swarm_master_roms(
 ):
     """Return a swarm-wide approved-Drone ROM master list deduplicated by md5 when available."""
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     result = db.get_swarm_master_roms_page(user["id"], query=q, system_name=system, page=page, per_page=per_page)
     return {"roms": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
@@ -1897,6 +1900,7 @@ async def get_device_master_bios(
     authorization: Optional[str] = Header(default=None),
 ):
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -1922,6 +1926,7 @@ async def get_swarm_master_bios(
     authorization: Optional[str] = Header(default=None),
 ):
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     rows = db.get_swarm_master_bios(user["id"])
     filtered = rows
     if q:
@@ -1953,6 +1958,7 @@ async def get_device_master_artwork(
     authorization: Optional[str] = Header(default=None),
 ):
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
