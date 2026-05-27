@@ -9,6 +9,7 @@ ECR_REPO="${ECR_REPO:-batocera-overmind}"
 TAG="${TAG:-latest}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER_NAME="${BUILDER_NAME:-batocera-ecr-builder}"
+DOCKERFILE="${DOCKERFILE:-Dockerfile}"
 
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
@@ -16,8 +17,8 @@ ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPO}"
 
 cd "${REPO_ROOT}"
 
-if [[ ! -f Dockerfile ]]; then
-  echo "ERROR: Dockerfile not found at repo root: ${REPO_ROOT}" >&2
+if [[ ! -f "${DOCKERFILE}" ]]; then
+  echo "ERROR: ${DOCKERFILE} not found at repo root: ${REPO_ROOT}" >&2
   echo "Run this script from anywhere; it will automatically build from ${REPO_ROOT}." >&2
   exit 1
 fi
@@ -27,6 +28,7 @@ echo "AWS Account:  ${AWS_ACCOUNT_ID}"
 echo "AWS Region:   ${AWS_REGION}"
 echo "ECR Repo:     ${ECR_REPO}"
 echo "ECR Image:    ${ECR_IMAGE}:${TAG}"
+echo "Dockerfile:   ${DOCKERFILE}"
 echo "Platforms:    ${PLATFORMS}"
 echo
 
@@ -51,6 +53,7 @@ docker buildx inspect --bootstrap >/dev/null
 echo "Building and pushing multi-arch Docker image..."
 docker buildx build \
   --platform "${PLATFORMS}" \
+  -f "${DOCKERFILE}" \
   -t "${ECR_IMAGE}:${TAG}" \
   --push \
   .
@@ -59,6 +62,7 @@ if [[ "${TAG}" != "latest" ]]; then
   echo "Also tagging and pushing latest multi-arch image..."
   docker buildx build \
     --platform "${PLATFORMS}" \
+    -f "${DOCKERFILE}" \
     -t "${ECR_IMAGE}:latest" \
     --push \
     .

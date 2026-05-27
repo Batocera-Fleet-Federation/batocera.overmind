@@ -1,0 +1,16 @@
+FROM public.ecr.aws/lambda/python:3.11
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/var/task/src \
+    OVERMIND_RUNTIME=lambda
+
+WORKDIR /var/task
+
+COPY requirements.txt pyproject.toml ./
+COPY src ./src
+COPY content ./content
+COPY VERSION ./VERSION
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+CMD ["overmind.lambda_handler.handler"]

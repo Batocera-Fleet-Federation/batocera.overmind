@@ -29,6 +29,13 @@ class PostgresMetadataStore:
         self.url = database_url()
         self._ready = False
 
+    def refresh_from_environment(self) -> None:
+        """Refresh the connection URL after runtime secrets are applied."""
+        updated = database_url()
+        if updated != self.url:
+            self.url = updated
+            self._ready = False
+
     def _connect(self):
         if not self.url:
             return None

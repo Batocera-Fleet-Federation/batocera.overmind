@@ -8,6 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from overmind import emailer
+from overmind import main as overmind_main
+from overmind.postgres_store import PostgresMetadataStore
 from overmind.runtime_secrets import RuntimeSecretRefresher
 
 
@@ -144,6 +146,44 @@ def test_secret_overrides_environment(monkeypatch):
     assert refresher.refresh_once() is True
     assert os.environ["SMTP_PASSWORD"] == "from-secret"
     assert os.environ["EMAIL_FROM"] == "noreply@example.com"
+
+
+def test_lambda_runtime_detection(monkeypatch):
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    monkeypatch.delenv("OVERMIND_RUNTIME", raising=False)
+    assert overmind_main.is_lambda_runtime() is False
+
+    monkeypatch.setenv("OVERMIND_RUNTIME", "lambda")
+    assert overmind_main.is_lambda_runtime() is True
+
+    monkeypatch.setenv("OVERMIND_RUNTIME", "")
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "bff-overmind-prod-low")
+    assert overmind_main.is_lambda_runtime() is True
+
+
+def test_postgres_store_refreshes_after_runtime_secret(monkeypatch):
+    monkeypatch.delenv("OVERMIND_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("OVERMIND_POSTGRES_HOST", raising=False)
+    store = PostgresMetadataStore()
+    assert store.url is None
+
+    monkeypatch.setenv("OVERMIND_POSTGRES_HOST", "db.example.internal")
+    monkeypatch.setenv("OVERMIND_POSTGRES_USER", "overmind")
+    monkeypatch.setenv("OVERMIND_POSTGRES_PASSWORD", "secret")
+    monkeypatch.setenv("OVERMIND_POSTGRES_DB", "overmind")
+    store.refresh_from_environment()
+
+    assert store.url == "postgresql://overmind:secret@db.example.internal:5432/overmind"
+
+
+def test_runtime_config_can_override_postgres_host_for_lambda(monkeypatch):
+    monkeypatch.setenv("OVERMIND_POSTGRES_HOST", "rds-direct.example.internal")
+    monkeypatch.setenv("OVERMIND_POSTGRES_HOST_OVERRIDE", "rds-proxy.example.internal")
+
+    overmind_main.apply_runtime_config_side_effects({})
+
+    assert os.environ["OVERMIND_POSTGRES_HOST"] == "rds-proxy.example.internal"
 
 
 def test_empty_secret_fallback_keeps_existing_env(monkeypatch):

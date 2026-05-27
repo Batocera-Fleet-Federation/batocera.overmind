@@ -84,6 +84,8 @@
             let devicesRefreshTimer = null;
             let downloadsRefreshTimer = null;
             let downloadsRefreshInFlight = false;
+            let systemFilterOptionsRequestId = 0;
+            let superAdminMetricsTimer = null;
             let notificationsRefreshTimer = null;
             let inactivityTimer = null;
             let lastAuthRefreshAt = 0;
@@ -1602,11 +1604,12 @@
                                         <h5 class="card-title mb-0">${device.device_name}</h5>
                                         <i class="bi bi-hdd-network text-muted"></i>
                                     </div>
-                                    <div class="small text-muted mb-3">Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}</div>
+                                    <div class="small text-muted mb-1">Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}</div>
+                                    <div class="small text-muted mb-3">ROMs: ${Number(device.rom_count || 0).toLocaleString()}</div>
                                     <div class="mt-3 d-flex flex-wrap gap-1">
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
-                                        <span class="badge ${device.public_resolvable ? 'text-bg-success' : (device.public_reachability && device.public_reachability.checked_at ? 'text-bg-danger' : 'text-bg-secondary')}">${device.public_resolvable ? 'Resolvable' : (device.public_reachability && device.public_reachability.checked_at ? 'Not Resolvable' : 'Resolution Pending')}</span>
+                                        <span class="badge ${device.public_resolvable ? 'text-bg-success' : (device.public_reachability && device.public_reachability.checked_at ? 'text-bg-warning' : 'text-bg-secondary')}">${device.public_resolvable ? 'Resolvable' : (device.public_reachability && device.public_reachability.checked_at ? 'Not Resolvable' : 'Resolution Pending')}</span>
                                     </div>
                                     <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
@@ -2348,18 +2351,30 @@
                 // populate systems dropdown from currentDeviceSystems or from server summary
                 const select = document.getElementById('device-rom-system-filter');
                 if (!select) return;
-                select.innerHTML = '<option value="">All systems</option>';
+                const requestId = ++systemFilterOptionsRequestId;
+                const selectedSystem = select.value || '';
                 try {
                     const resp = await apiGet('/api/systems');
                     if (!resp.ok) return;
                     const data = await resp.json();
+                    if (requestId !== systemFilterOptionsRequestId) return;
+                    const currentSelection = select.value || selectedSystem;
+                    select.innerHTML = '<option value="">All systems</option>';
                     const systems = data.systems || [];
                     systems.forEach(s => {
                         const opt = document.createElement('option');
                         opt.value = s.system_name;
                         opt.text = `${s.system_name} (${s.rom_count})`;
+                        opt.selected = s.system_name === currentSelection;
                         select.appendChild(opt);
                     });
+                    if (currentSelection && select.value !== currentSelection) {
+                        const opt = document.createElement('option');
+                        opt.value = currentSelection;
+                        opt.text = currentSelection;
+                        opt.selected = true;
+                        select.appendChild(opt);
+                    }
                 } catch (e) {
                     // ignore
                 }
@@ -2507,6 +2522,9 @@
                             <div class="col-12 col-md-6"><div class="small text-muted">${escapeHtml(label)}</div><div class="small">${escapeHtml(String(value || ''))}</div></div>
                         `).join('')}</div>` : '<div class="small text-muted mt-1">No system information reported yet.</div>'}
                         <hr>
+                        <strong>Performance Metrics</strong>
+                        <div class="mt-2">${renderMetricsGrid(info.performance || {})}</div>
+                        <hr>
                         <strong>Peer-to-Peer Checks</strong>
                         ${latestPeers.length ? latestPeers.map(check => `
                             <div class="mt-2 p-2 rounded border">
@@ -2628,6 +2646,9 @@
                         ${systemRows.length ? `<div class="row g-2 mt-1">${systemRows.map(([label, value]) => `
                             <div class="col-12 col-md-6"><div class="small text-muted">${escapeHtml(label)}</div><div class="small">${escapeHtml(String(value || ''))}</div></div>
                         `).join('')}</div>` : '<div class="small text-muted mt-1">No system information reported yet.</div>'}
+                        <hr>
+                        <strong>Performance Metrics</strong>
+                        <div class="mt-2">${renderMetricsGrid(info.performance || {})}</div>
                         <hr>
                         <strong>Speed Sample</strong>
                         ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
@@ -3580,6 +3601,49 @@
                 return value ? new Date(value).toLocaleString() : 'n/a';
             }
 
+            function formatBytes(value) {
+                const num = Number(value);
+                if (!Number.isFinite(num)) return 'n/a';
+                const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+                let scaled = Math.max(0, num);
+                let index = 0;
+                while (scaled >= 1024 && index < units.length - 1) {
+                    scaled /= 1024;
+                    index += 1;
+                }
+                return `${scaled.toFixed(index ? 1 : 0)} ${units[index]}`;
+            }
+
+            function formatPercent(value) {
+                const num = Number(value);
+                return Number.isFinite(num) ? `${num.toFixed(1)}%` : 'n/a';
+            }
+
+            function renderMetricsGrid(metrics) {
+                const cpu = metrics?.cpu || {};
+                const memory = metrics?.memory || {};
+                const process = metrics?.process || {};
+                const disk = metrics?.disk || {};
+                const rows = [
+                    ['CPU host', formatPercent(cpu.host_percent)],
+                    ['CPU app', formatPercent(cpu.process_percent)],
+                    ['Load average', Array.isArray(cpu.load_average) ? cpu.load_average.map(v => Number(v).toFixed(2)).join(', ') : 'n/a'],
+                    ['Memory', `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)} (${formatPercent(memory.used_percent)})`],
+                    ['App RSS', formatBytes(process.rss_bytes)],
+                    ['Disk used', `${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)} (${formatPercent(disk.used_percent)})`],
+                    ['Disk read', `${formatBytes(disk.read_bytes_per_second)}/s`],
+                    ['Disk write', `${formatBytes(disk.write_bytes_per_second)}/s`],
+                    ['Disk contention', formatPercent(disk.contention_percent)],
+                    ['Updated', metrics?.collected_at ? new Date(metrics.collected_at).toLocaleString() : 'n/a'],
+                ];
+                return `<div class="row g-2">${rows.map(([label, value]) => `
+                    <div class="col-12 col-md-6 col-xl-4">
+                        <div class="small text-muted">${escapeHtml(label)}</div>
+                        <div class="small fw-semibold">${escapeHtml(String(value || 'n/a'))}</div>
+                    </div>
+                `).join('')}</div>`;
+            }
+
             async function loadSuperAdmin() {
                 const summary = document.getElementById('super-admin-summary');
                 const container = document.getElementById('super-admin-content');
@@ -3656,6 +3720,42 @@
                 }
             }
 
+            async function loadSuperAdminMetrics() {
+                const container = document.getElementById('super-admin-metrics');
+                if (!container || !isSuperAdmin()) return;
+                try {
+                    const response = await apiGet('/api/admin/runtime-metrics');
+                    if (!response.ok) throw new Error('Failed to load runtime metrics');
+                    const payload = await response.json();
+                    container.innerHTML = `
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                            <h4 class="h5 mb-0">Overmind Runtime Metrics</h4>
+                            <span class="badge text-bg-secondary">refreshes every 5s</span>
+                        </div>
+                        ${renderMetricsGrid(payload.metrics || {})}
+                    `;
+                } catch (error) {
+                    console.error('Error loading runtime metrics:', error);
+                    container.innerHTML = '<div class="empty-state">Unable to load runtime metrics.</div>';
+                }
+            }
+
+            function startSuperAdminMetricsPolling() {
+                if (!isSuperAdmin()) return;
+                loadSuperAdminMetrics();
+                if (superAdminMetricsTimer) return;
+                superAdminMetricsTimer = setInterval(() => {
+                    if (currentTab === 'super-admin') loadSuperAdminMetrics();
+                }, 5000);
+            }
+
+            function stopSuperAdminMetricsPolling() {
+                if (superAdminMetricsTimer) {
+                    clearInterval(superAdminMetricsTimer);
+                    superAdminMetricsTimer = null;
+                }
+            }
+
             async function deleteSuperAdminRecord(kind, id) {
                 if (!isSuperAdmin()) return;
                 if (!window.confirm(`Delete this ${kind.slice(0, -1)}? This cannot be undone.`)) return;
@@ -3728,7 +3828,12 @@
                     markNotificationsRead();
                     loadNotificationsPage();
                 }
-                if (tabName === 'super-admin') loadSuperAdmin();
+                if (tabName === 'super-admin') {
+                    loadSuperAdmin();
+                    startSuperAdminMetricsPolling();
+                } else {
+                    stopSuperAdminMetricsPolling();
+                }
                 updateSelectedDeviceSummary();
                 applyRbacUI();
                 setPageChrome(tabName);

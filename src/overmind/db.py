@@ -350,6 +350,16 @@ class FakeDatabase:
         self.bios[internal_id] = []
         self.artwork[internal_id] = []
 
+    def clear_device_asset_metadata(self, user_id: str, device_id: str) -> bool:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device.get("user_id") != user_id:
+            return False
+        self._clear_device_assets(device["id"])
+        self._asset_inventory_staging.pop(device["id"], None)
+        device["rom_metadata"] = {}
+        device["rom_systems"] = []
+        return True
+
     def _store_asset_inventory_chunk(
         self,
         device_id: str,
@@ -1952,6 +1962,21 @@ class FakeDatabase:
                 r for r in self.roms[internal_id]
                 if r.get("system_name") != system_name
             ]
+        else:
+            incoming_keys = {
+                (
+                    str(row.get("system_name") or "").strip().lower(),
+                    str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
+                )
+                for row in cleaned
+            }
+            self.roms[internal_id] = [
+                row for row in self.roms[internal_id]
+                if (
+                    str(row.get("system_name") or "").strip().lower(),
+                    str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
+                ) not in incoming_keys
+            ]
         
         for rom_entry in cleaned:
             rom_id = rom_entry["id"]
@@ -2005,6 +2030,15 @@ class FakeDatabase:
             return postgres_store.upsert_device_assets(internal_id, device_id, "bios", cleaned, replace=replace)
         if replace or internal_id not in self.bios:
             self.bios[internal_id] = []
+        elif cleaned:
+            incoming_keys = {
+                str(entry.get("file_path") or entry.get("relative_path") or entry.get("bios_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+                for entry in cleaned
+            }
+            self.bios[internal_id] = [
+                row for row in self.bios[internal_id]
+                if str(row.get("file_path") or row.get("relative_path") or row.get("bios_name") or "").replace("\\", "/").strip().lstrip("./").lower() not in incoming_keys
+            ]
         for entry in cleaned:
             self.bios[internal_id].append(entry)
             row_ids.append(entry["id"])
@@ -2132,6 +2166,21 @@ class FakeDatabase:
             return postgres_store.upsert_device_assets(internal_id, device_id, "artwork", cleaned, replace=replace)
         if replace or internal_id not in self.artwork:
             self.artwork[internal_id] = []
+        elif cleaned:
+            incoming_keys = {
+                (
+                    str(row.get("system_name") or row.get("system") or "").strip().lower(),
+                    str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
+                )
+                for row in cleaned
+            }
+            self.artwork[internal_id] = [
+                row for row in self.artwork[internal_id]
+                if (
+                    str(row.get("system_name") or row.get("system") or "").strip().lower(),
+                    str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
+                ) not in incoming_keys
+            ]
         for row in cleaned:
             self.artwork[internal_id].append(row)
             row_ids.append(row["id"])

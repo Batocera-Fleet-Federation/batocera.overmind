@@ -572,6 +572,11 @@ def test_super_admin_overview_and_delete_permissions(client):
     assert any(user["email"] == "regular@example.com" for user in payload["users"])
     assert any(drone["device_id"] == "admin-visible-drone" for drone in payload["drones"])
 
+    metrics = client.get("/api/admin/runtime-metrics", headers={"Authorization": f"Bearer {admin_token}"})
+    assert metrics.status_code == 200
+    assert "cpu" in metrics.json()["metrics"]
+    assert "memory" in metrics.json()["metrics"]
+
     self_delete = client.delete(
         f"/api/admin/users/{db.get_user_by_email('mr_jerrodh@hotmail.com')['id']}",
         headers={"Authorization": f"Bearer {admin_token}"},
@@ -2794,6 +2799,65 @@ def test_rebuild_asset_metadata_action_is_supported(client):
     assert response.json()["action"]["action"] == "rebuild_asset_metadata"
 
 
+def test_rebuild_asset_metadata_action_clears_existing_device_assets(client):
+    client.post(
+        "/api/auth/register",
+        json={"email": "asset-clear@example.com", "username": "asset-clear", "password": "testpass123"},
+    )
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "asset-clear@example.com", "username": "asset-clear", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("asset-clear@example.com")
+    db.create_device(user["id"], "clear-drone", "Clear Drone", {})
+    db.add_roms("clear-drone", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "file_size": 3}])
+    db.add_bios("clear-drone", [{"bios_name": "bios.bin", "file_path": "bios.bin"}])
+    db.add_artwork("clear-drone", [{"system": "snes", "rom_path": "Game.zip", "artwork_types": ["image"]}])
+    device = db.get_device_by_device_id("clear-drone")
+    device["rom_metadata"] = {"systems": [{"name": "snes", "rom_count": 1}]}
+    device["rom_systems"] = [{"name": "snes", "rom_count": 1}]
+
+    response = client.post(
+        "/api/devices/clear-drone/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "rebuild_asset_metadata"},
+    )
+
+    assert response.status_code == 200
+    assert db.get_device_roms("clear-drone") == []
+    assert db.get_device_bios("clear-drone") == []
+    assert db._asset_rows_for_device_internal(device["id"], "artwork") == []
+    assert device["rom_metadata"] == {}
+    assert db.get_user_systems_summary(user["id"]) == []
+
+
+def test_asset_metadata_delta_upserts_existing_rows_without_duplicate_system_counts(client):
+    client.post(
+        "/api/auth/register",
+        json={"email": "asset-upsert@example.com", "username": "asset-upsert", "password": "testpass123"},
+    )
+    user = db.get_user_by_email("asset-upsert@example.com")
+    db.create_device(user["id"], "upsert-drone", "Upsert Drone", {})
+
+    db.store_rom_metadata("upsert-drone", {
+        "type": "asset_metadata",
+        "update_mode": "inventory_delta",
+        "systems": [{"name": "snes", "rom_count": 1}],
+        "roms": [{"system": "snes", "rom_name": "Game", "file_path": "Game.zip", "file_size": 3}],
+    })
+    db.store_rom_metadata("upsert-drone", {
+        "type": "asset_metadata",
+        "update_mode": "inventory_delta",
+        "systems": [{"name": "snes", "rom_count": 1}],
+        "roms": [{"system": "snes", "rom_name": "Game Updated", "file_path": "Game.zip", "file_size": 4}],
+    })
+
+    roms = db.get_device_roms("upsert-drone")
+    assert len(roms) == 1
+    assert roms[0]["rom_name"] == "Game Updated"
+    assert db.get_user_systems_summary(user["id"]) == [{"system_name": "snes", "rom_count": 1, "device_count": 1}]
+
+
 def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
@@ -2859,8 +2923,10 @@ def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
 
     assert "Drone ID" not in tile_renderer
     assert "Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}" in tile_renderer
+    assert "ROMs: ${Number(device.rom_count || 0).toLocaleString()}" in tile_renderer
     assert "'Resolvable'" in tile_renderer
     assert "'Resolution Pending'" in tile_renderer
+    assert "text-bg-warning" in tile_renderer
 
 
 def test_profile_swarm_access_exposes_remove_overseer_action():
@@ -2895,6 +2961,19 @@ def test_drone_metadata_shows_resolvable_public_ip_state():
 
     assert "const publicIpStatus = device.public_resolvable ? ' (resolvable)' : '';" in js
     assert "Public IP: ${escapeHtml(publicIp)}${publicIpStatus}" in js
+    assert "Performance Metrics" in js
+    assert "renderMetricsGrid(info.performance || {})" in js
+
+
+def test_super_admin_runtime_metrics_ui_refreshes_when_viewed():
+    root = Path(__file__).resolve().parents[1]
+    html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert 'id="super-admin-metrics"' in html
+    assert "apiGet('/api/admin/runtime-metrics')" in js
+    assert "setInterval(() =>" in js
+    assert "5000" in js
 
 
 def test_signup_form_requires_username_and_posts_it():
@@ -3005,6 +3084,7 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
                 "hostname": "arcade-alpha",
                 "architecture": "x86_64",
                 "container": True,
+                "performance": {"cpu": {"host_percent": 12.5}},
             },
         },
     )
@@ -3044,6 +3124,7 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
     detail = detail_response.json()
     assert detail["system_info"]["hostname"] == "arcade-alpha"
     assert detail["system_info"]["container"] is True
+    assert detail["system_info"]["performance"]["cpu"]["host_percent"] == 12.5
     assert len(detail["peer_checks"]) == 1
     assert detail["peer_checks"][0]["status"] == "pass"
     assert detail["peer_checks"][0]["target_address"] == "https://new.example"

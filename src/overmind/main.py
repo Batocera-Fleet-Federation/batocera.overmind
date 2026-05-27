@@ -44,6 +44,7 @@ from overmind.account_notifications import (
     send_verification_email as _send_verification_email,
 )
 from overmind.runtime_secrets import load_runtime_secret_once
+from overmind.runtime_metrics import collect_runtime_metrics
 from overmind.drone_ca import sign_drone_csr
 from overmind.drone_security import generate_drone_token, hash_drone_token
 from overmind.postgres_store import database_url, postgres_store
@@ -133,14 +134,26 @@ app = FastAPI(
 _RUNTIME_SECRET_REFRESHER = None
 _PUBLIC_PEER_PROBE_THREAD = None
 _NOTIFICATION_DELIVERY_THREAD = None
+_RUNTIME_INITIALIZED = False
+_FAKE_DATA_LOADED = False
+
+
+def is_lambda_runtime() -> bool:
+    """Return whether Overmind is running inside AWS Lambda."""
+    runtime = (os.getenv("OVERMIND_RUNTIME") or "").strip().lower()
+    return runtime == "lambda" or bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
 
 def apply_runtime_config_side_effects(values: dict[str, str]) -> None:
     global TOKEN_HASH_SECRET
+    postgres_host_override = os.getenv("OVERMIND_POSTGRES_HOST_OVERRIDE")
+    if postgres_host_override:
+        os.environ["OVERMIND_POSTGRES_HOST"] = postgres_host_override
     if "SECRET_KEY" in values:
         auth.SECRET_KEY = values["SECRET_KEY"]
     if "TOKEN_HASH_SECRET" in values or "SECRET_KEY" in values:
         TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
+    postgres_store.refresh_from_environment()
 
 
 def ensure_self_signed_cert():
@@ -223,6 +236,26 @@ def poll_notification_delivery_once() -> int:
     return notification_delivery.deliver_pending_notifications(db)
 
 
+def poll_device_status_notifications_once() -> None:
+    """Detect offline/online Drone status transitions once."""
+    db.update_device_status_notifications(SWARM_OFFLINE_THRESHOLD_SECONDS)
+
+
+def run_scheduled_job(job_name: str) -> dict:
+    """Run a single background job by name for EventBridge or local scripts."""
+    job = str(job_name or "").strip().lower().replace("_", "-")
+    if job in {"public-reachability", "public-peer-probe", "peer-probe"}:
+        poll_public_drone_reachability_once()
+        return {"job": job, "status": "ok"}
+    if job in {"notification-delivery", "notifications"}:
+        delivered = poll_notification_delivery_once()
+        return {"job": job, "status": "ok", "delivered": delivered}
+    if job in {"device-status", "offline-status", "status-notifications"}:
+        poll_device_status_notifications_once()
+        return {"job": job, "status": "ok"}
+    raise ValueError(f"Unknown Overmind scheduled job: {job_name}")
+
+
 def start_notification_delivery_poller() -> None:
     """Start batched delivery for notifications that do not require real-time alerts."""
     global _NOTIFICATION_DELIVERY_THREAD
@@ -240,6 +273,83 @@ def start_notification_delivery_poller() -> None:
 
     _NOTIFICATION_DELIVERY_THREAD = threading.Thread(target=loop, name="notification-delivery-poller", daemon=True)
     _NOTIFICATION_DELIVERY_THREAD.start()
+
+
+def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Optional[bool] = None) -> None:
+    """Initialize runtime services once for local, container, or Lambda execution."""
+    global _RUNTIME_SECRET_REFRESHER, _RUNTIME_INITIALIZED, _FAKE_DATA_LOADED
+    if _RUNTIME_INITIALIZED:
+        return
+
+    lambda_runtime = is_lambda_runtime()
+    if start_pollers is None:
+        start_pollers = not lambda_runtime
+    if prepare_tls is None:
+        prepare_tls = not lambda_runtime
+
+    _RUNTIME_SECRET_REFRESHER = load_runtime_secret_once(on_apply=apply_runtime_config_side_effects)
+    if not lambda_runtime:
+        _RUNTIME_SECRET_REFRESHER.start()
+
+    environment = (os.getenv("OVERMIND_ENVIRONMENT") or os.getenv("ENVIRONMENT") or "").lower()
+    if environment in {"prod", "production"} and not database_url():
+        raise RuntimeError("OVERMIND_DATABASE_URL or PostgreSQL environment variables are required in production mode")
+
+    if environment in {"prod", "production"}:
+        selected_provider = emailer.provider()
+        if selected_provider == "smtp":
+            required = ["EMAIL_FROM", "SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"]
+            missing = [name for name in required if not os.getenv(name)]
+            if missing:
+                raise RuntimeError(f"SMTP email requires environment variable(s) in production: {', '.join(missing)}")
+        elif selected_provider == "ses":
+            aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+            aws_ses_from = os.getenv("EMAIL_FROM") or os.getenv("AWS_SES_FROM_ADDRESS") or os.getenv("SES_FROM_EMAIL")
+            if not aws_region:
+                raise RuntimeError("AWS_REGION environment variable is required in production mode for AWS SES email")
+            if not aws_ses_from:
+                raise RuntimeError("EMAIL_FROM or AWS_SES_FROM_ADDRESS environment variable is required in production mode for AWS SES email.")
+
+    key_file, cert_file = (None, None)
+    if prepare_tls:
+        key_file, cert_file = ensure_self_signed_cert()
+
+    print("🎮 Batocera Overmind API started")
+    print("📖 API Documentation: http://localhost:8000/docs")
+    print("🏠 UI: http://localhost:8000/")
+    if key_file and cert_file:
+        print(f"🔐 Self-signed cert ready: {cert_file} / {key_file}")
+
+    env_provider = (os.getenv("EMAIL_PROVIDER") or "").strip().lower()
+    if env_provider or environment in {"prod", "production"}:
+        print(f"📧 Email provider: {emailer.provider()}")
+
+    postgres_store.ensure_schema()
+
+    if os.getenv("USE_FAKE_DATA", "").lower() == "true" and not _FAKE_DATA_LOADED:
+        print("\n📚 Loading sample data...")
+        db.populate_fake_data()
+        db.populate_fake_notifications()
+        _FAKE_DATA_LOADED = True
+        print("✓ Sample data loaded successfully!")
+        print("  • 2 demo users")
+        print("  • 3 sample devices")
+        print("  • 2 pending drone psionic connections")
+        print("  • 10+ sample ROMs")
+        print("  • 8 sample game plays")
+        print("  • sample notifications")
+        print("\n  Demo Credentials:")
+        print("  Email: demo@example.com")
+        print("  Password: DemoPass123")
+        print("\n  Or:")
+        print("  Email: arcade@example.com")
+        print("  Password: ArcadePass123\n")
+
+    if start_pollers:
+        start_public_drone_reachability_poller()
+        start_notification_delivery_poller()
+
+    _RUNTIME_INITIALIZED = True
 
 # Add CORS middleware
 app.add_middleware(
@@ -791,6 +901,12 @@ async def admin_overview(authorization: Optional[str] = Header(default=None)):
     swarms = sorted((admin_swarm_row(swarm) for swarm in db.swarms.values()), key=lambda row: str(row.get("name") or "").lower())
     drones = sorted((admin_drone_row(device) for device in db.devices.values()), key=lambda row: str(row.get("device_name") or row.get("device_id") or "").lower())
     return {"users": users, "swarms": swarms, "drones": drones}
+
+
+@app.get("/api/admin/runtime-metrics")
+async def admin_runtime_metrics(authorization: Optional[str] = Header(default=None)):
+    require_super_admin(authorization)
+    return {"metrics": collect_runtime_metrics(Path.cwd())}
 
 
 @app.delete("/api/admin/users/{user_id}")
@@ -1390,6 +1506,8 @@ async def create_device_action(
         action_type = "restart"
     if action_type not in SUPPORTED_DEVICE_ACTIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported action")
+    if action_type == "rebuild_asset_metadata":
+        db.clear_device_asset_metadata(device["user_id"], device_id)
     action = db.create_device_action(device["user_id"], device_id, action_type, payload.get("payload") if isinstance(payload.get("payload"), dict) else {})
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
@@ -2381,64 +2499,7 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Print startup message and load fake data if requested."""
-    global _RUNTIME_SECRET_REFRESHER
-    _RUNTIME_SECRET_REFRESHER = load_runtime_secret_once(on_apply=apply_runtime_config_side_effects)
-    _RUNTIME_SECRET_REFRESHER.start()
-    environment = (os.getenv("OVERMIND_ENVIRONMENT") or os.getenv("ENVIRONMENT") or "").lower()
-    if environment in {"prod", "production"} and not database_url():
-        raise RuntimeError("OVERMIND_DATABASE_URL or PostgreSQL environment variables are required in production mode")
-    
-    # Validate email configuration in production.
-    if environment in {"prod", "production"}:
-        selected_provider = emailer.provider()
-        if selected_provider == "smtp":
-            required = ["EMAIL_FROM", "SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"]
-            missing = [name for name in required if not os.getenv(name)]
-            if missing:
-                raise RuntimeError(f"SMTP email requires environment variable(s) in production: {', '.join(missing)}")
-        elif selected_provider == "ses":
-            aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-            aws_ses_from = os.getenv("EMAIL_FROM") or os.getenv("AWS_SES_FROM_ADDRESS") or os.getenv("SES_FROM_EMAIL")
-            if not aws_region:
-                raise RuntimeError("AWS_REGION environment variable is required in production mode for AWS SES email")
-            if not aws_ses_from:
-                raise RuntimeError("EMAIL_FROM or AWS_SES_FROM_ADDRESS environment variable is required in production mode for AWS SES email.")
-    
-    key_file, cert_file = ensure_self_signed_cert()
-    print("🎮 Batocera Overmind API started")
-    print("📖 API Documentation: http://localhost:8000/docs")
-    print("🏠 UI: http://localhost:8000/")
-    if key_file and cert_file:
-        print(f"🔐 Self-signed cert ready: {cert_file} / {key_file}")
-    
-    # Print email provider
-    env_provider = (os.getenv("EMAIL_PROVIDER") or "").strip().lower()
-    if env_provider or environment in {"prod", "production"}:
-        print(f"📧 Email provider: {emailer.provider()}")
-    
-    postgres_store.ensure_schema()
-    
-    # Load fake data if USE_FAKE_DATA environment variable is set to true
-    if os.getenv("USE_FAKE_DATA", "").lower() == "true":
-        print("\n📚 Loading sample data...")
-        db.populate_fake_data()
-        db.populate_fake_notifications()
-        print("✓ Sample data loaded successfully!")
-        print("  • 2 demo users")
-        print("  • 3 sample devices")
-        print("  • 2 pending drone psionic connections")
-        print("  • 10+ sample ROMs")
-        print("  • 8 sample game plays")
-        print("  • sample notifications")
-        print("\n  Demo Credentials:")
-        print("  Email: demo@example.com")
-        print("  Password: DemoPass123")
-        print("\n  Or:")
-        print("  Email: arcade@example.com")
-        print("  Password: ArcadePass123\n")
-
-    start_public_drone_reachability_poller()
-    start_notification_delivery_poller()
+    initialize_runtime()
 
 
 if __name__ == "__main__":
