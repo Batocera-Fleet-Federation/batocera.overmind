@@ -161,6 +161,10 @@ class FakeDatabase:
             if isinstance(value, dict):
                 setattr(self, field, value)
 
+    def refresh_persistent_state(self) -> None:
+        """Reload shared persisted state after runtime database config is available."""
+        self._load_persistent_state()
+
     def _persist_state(self) -> None:
         try:
             postgres_store.store_app_state(self._state_snapshot())

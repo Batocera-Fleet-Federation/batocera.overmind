@@ -333,6 +333,7 @@ def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Opt
         print(f"📧 Email provider: {emailer.provider()}")
 
     postgres_store.ensure_schema()
+    db.refresh_persistent_state()
 
     if os.getenv("USE_FAKE_DATA", "").lower() == "true" and not _FAKE_DATA_LOADED:
         print("\n📚 Loading sample data...")
@@ -520,6 +521,9 @@ def build_login_response(user: dict) -> dict:
 
 def _authenticate_password_user(email: str, password: str) -> Optional[dict]:
     user = db.get_user_by_email(email)
+    if not user:
+        db.refresh_persistent_state()
+        user = db.get_user_by_email(email)
     if not user or not auth.verify_password(password, user["password"]):
         return None
     ensure_active_user(user)
@@ -627,6 +631,7 @@ def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = No
 @app.post("/api/auth/register", response_model=User)
 async def register(user_data: UserRegister):
     """Register a new user."""
+    db.refresh_persistent_state()
     username = user_data.username.strip()
     if not username:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username is required")
@@ -748,6 +753,7 @@ async def social_auth_dev(provider: str, payload: SocialAuthRequest):
     """
     if not oauth_provider_enabled(provider):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"{provider} auth is disabled")
+    db.refresh_persistent_state()
     user = db.get_or_create_social_user(payload.email, payload.full_name, provider)
     return build_login_response(user)
 
@@ -842,6 +848,7 @@ async def social_auth_callback(provider: str, request: Request):
         logger.warning("OAuth provider did not return an email provider=%s", provider)
         return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login did not return a verified email.")
 
+    db.refresh_persistent_state()
     user = db.get_or_create_social_user(email, full_name, provider)
     login_data = build_login_response(user)
     token = urllib.parse.quote(login_data["access_token"])
@@ -884,6 +891,9 @@ def get_current_user(authorization: Optional[str]) -> dict:
     
     user_id = payload.get("sub")
     user = db.get_user(user_id)
+    if not user:
+        db.refresh_persistent_state()
+        user = db.get_user(user_id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
