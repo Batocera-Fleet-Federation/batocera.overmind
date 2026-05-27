@@ -1244,34 +1244,19 @@ class FakeDatabase:
             public_reachable_url = f"{scheme}://{public_host}:{api_port}" if public_host and public_resolvable else None
             last_seen = peer.get("last_seen")
             online = bool(last_seen and last_seen >= cutoff)
-            cert = dict(peer.get("certificate") or {})
-            cert.pop("public_certificate", None)
-            cert.pop("certificate_pem", None)
             output.append({
                 "drone_id": peer.get("device_id"),
-                "device_id": peer.get("device_id"),
                 "name": peer.get("device_name"),
-                "hostname": (peer.get("batocera_info") or {}).get("hostname"),
                 "local_ip": ipv4[0] if ipv4 else (peer.get("batocera_info") or {}).get("ip_address"),
-                "private_ip": ipv4,
                 "public_ip": public_ip,
                 "public_reachable_url": public_reachable_url,
                 "public_resolvable": public_resolvable,
-                "public_reachability": reachability,
                 "api_port": api_port,
                 "scheme": scheme,
                 "reachable_url": peer.get("reachable_url"),
-                "last_heartbeat": last_seen,
-                "last_seen": last_seen,
                 "online": online,
-                "status": "online" if online else "offline",
-                "certificate": cert or None,
                 "rom_systems": peer.get("rom_systems") or [],
                 "last_speed_sample": peer.get("last_speed_sample"),
-                "network": peer.get("network") or {},
-                "resolved_network": resolved,
-                "swarm_connected": bool(peer.get("swarm_connected")),
-                "peer_checks": list(reversed(self.peer_checks.get(peer["id"], [])))[:50],
             })
         output.sort(key=lambda row: (not row["online"], str(row.get("name") or row.get("drone_id") or "").lower()))
         return output

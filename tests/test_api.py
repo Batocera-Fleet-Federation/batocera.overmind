@@ -1034,7 +1034,7 @@ def test_download_state_and_cancel_rbac(client):
         },
     )
     assert live_update.status_code == 200
-    assert live_update.json()["active"] == 1
+    assert live_update.json() == {"status": "accepted"}
     downloads = client.get("/api/downloads", headers={"Authorization": f"Bearer {owner_token}"})
     assert downloads.json()["targets"][0]["active"][0]["downloaded_bytes"] == 75
     assert downloads.json()["targets"][0]["active"][0]["asset_type"] == "artwork"
@@ -2279,7 +2279,7 @@ def test_device_action_lifecycle(client):
         },
     )
     assert complete_response.status_code == 200
-    assert complete_response.json()["action"]["status"] == "completed"
+    assert complete_response.json() == {"status": "accepted"}
     actions_response = client.get(
         "/api/devices/arcade-cabinet-001/actions",
         headers={"Authorization": f"Bearer {token}"},
@@ -2397,7 +2397,7 @@ def test_game_log_upload_stores_sessions_for_game_log_list(client):
     )
 
     assert response.status_code == 200
-    assert response.json()["session_count"] == 1
+    assert response.json() == {"status": "accepted"}
     logs = db.get_device_gamelogs("game-drone")
     assert len(logs) == 1
     assert logs[0]["system_name"] == "snes"
@@ -2437,7 +2437,7 @@ def test_emulator_config_upload_stores_changed_configs(client):
     )
 
     assert response.status_code == 200
-    assert response.json()["config_count"] == 1
+    assert response.json() == {"status": "accepted"}
     device = db.get_device_by_device_id("config-upload-drone")
     assert device["emulator_configs"]["configs"][0]["relative_path"] == "retroarch.cfg"
     assert device["emulator_configs"]["configs"][0]["versions"][0]["content"] == "video_driver = vulkan"
@@ -2680,8 +2680,8 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
         },
     )
     assert heartbeat_response.status_code == 200
-    assert heartbeat_response.json()["action"]["id"] == action_id
-    assert heartbeat_response.json()["action"]["status"] == "in_progress"
+    assert heartbeat_response.json()["actions"][0]["id"] == action_id
+    assert heartbeat_response.json()["actions"][0]["status"] == "in_progress"
 
     result = {
         "type": "rom_metadata",
@@ -2699,7 +2699,12 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
         },
     )
     assert complete_response.status_code == 200
-    action = complete_response.json()["action"]
+    assert complete_response.json() == {"status": "accepted"}
+    action = next(
+        row
+        for row in db.device_actions[db.get_device_by_device_id("arcade-cabinet-001")["id"]]
+        if row["id"] == action_id
+    )
     assert action["result"] == result
     assert action["result_received_at"] is not None
 
@@ -2818,7 +2823,7 @@ def test_public_peer_poll_rejects_private_reported_addresses_without_connecting(
     swarm_peer = db.get_swarm_for_device("private-drone")[0]
     assert swarm_peer["public_resolvable"] is False
     assert swarm_peer["public_reachable_url"] is None
-    assert "not globally routable" in swarm_peer["public_reachability"]["failure_reason"]
+    assert "not globally routable" in db.get_device_by_device_id("private-drone")["public_reachability"]["failure_reason"]
 
 
 def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(client):
@@ -2849,11 +2854,15 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         },
     )
     assert heartbeat_response.status_code == 200
-    swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["device_id"] == "arcade-cabinet-001")
+    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_sources_initialized"}
+    assert "device" not in heartbeat_response.json()
+    swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["drone_id"] == "arcade-cabinet-001")
     assert swarm_peer["reachable_url"] == "https://bff-drone-a:8443"
     assert swarm_peer["public_ip"] == "198.51.100.50"
     assert swarm_peer["public_resolvable"] is False
     assert swarm_peer["public_reachable_url"] is None
+    assert "peer_checks" not in swarm_peer
+    assert "network" not in swarm_peer
 
     roms_response = client.get(
         "/api/devices/arcade-cabinet-001/roms",

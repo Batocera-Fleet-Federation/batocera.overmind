@@ -1328,7 +1328,7 @@ async def update_device_downloads(device_id: str, payload: dict, authorization: 
     queued_count = len(state.get("queued") or [])
     recent_count = len(state.get("recent") or [])
     print(f"Download state accepted for {device_id}: active={active_count} queued={queued_count} recent={recent_count}")
-    return {"status": "accepted", "device_id": device_id, "active": active_count, "queued": queued_count, "recent": recent_count}
+    return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/actions")
@@ -1388,7 +1388,12 @@ async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional
     actions = db.claim_pending_device_actions(device_id)
     updated = db.get_device(device["id"])
     swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
-    return {"status": "ok", "actions": actions, "action": actions[0] if actions else None, "device": device_response(updated), "swarm": swarm}
+    log_sources = updated.get("log_sources") if isinstance(updated.get("log_sources"), dict) else {}
+    return {
+        "actions": actions,
+        "swarm": swarm,
+        "log_sources_initialized": bool(log_sources.get("logs")),
+    }
 
 
 @app.post("/api/devices/{device_id}/rom-metadata")
@@ -1404,7 +1409,7 @@ async def upload_drone_rom_metadata(device_id: str, payload: dict, authorization
     artwork = payload.get("artwork") if isinstance(payload.get("artwork"), list) else []
     db.store_rom_metadata(device_id, payload)
     print(f"Asset metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)} artwork_count={len(artwork)}")
-    return {"status": "accepted", "device_id": device_id, "rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork)}
+    return {"rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork)}
 
 
 @app.post("/api/drones/rom-metadata")
@@ -1422,7 +1427,7 @@ async def add_drone_event(device_id: str, payload: dict, authorization: Optional
     event = db.add_device_event(device_id, payload)
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    return {"event": event}
+    return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/peer-checks")
@@ -1433,7 +1438,7 @@ async def add_peer_checks(device_id: str, payload: dict, authorization: Optional
     stored = db.add_peer_checks(device_id, results)
     if stored is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    return {"results": stored}
+    return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/actions/{action_id}/complete")
@@ -1447,7 +1452,7 @@ async def complete_device_action(device_id: str, action_id: str, payload: dict, 
     action = db.complete_device_action(device_id, action_id, result_status, payload.get("message"), result)
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found")
-    return {"action": action}
+    return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/speed")
@@ -1458,7 +1463,7 @@ async def add_speed_sample(device_id: str, payload: dict, authorization: Optiona
     if not sample:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     print(f"Speed sample accepted for {device_id}: up={sample.get('upload_mbps')} down={sample.get('download_mbps')}")
-    return {"sample": sample}
+    return {"status": "accepted"}
 
 
 @app.get("/api/devices/{device_id}/speed/download")
@@ -2220,7 +2225,7 @@ async def add_device_sync_activity(device_id: str, payload: dict, authorization:
     entry = db.add_rom_sync_activity(device_id, payload)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    return {"activity": entry}
+    return {"status": "accepted"}
 
 
 @app.get("/api/devices/{device_id}/sync-activity")
@@ -2308,7 +2313,7 @@ async def upload_device_game_logs(device_id: str, payload: dict, authorization: 
     result = dict(payload or {})
     result["type"] = "game_logs"
     db.store_action_result(device, result)
-    return {"status": "accepted", "session_count": len(result.get("sessions") if isinstance(result.get("sessions"), list) else [])}
+    return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/log-sources")
@@ -2318,7 +2323,7 @@ async def upload_device_log_sources(device_id: str, payload: dict, authorization
     result = dict(payload or {})
     result["type"] = "log_sources"
     db.store_action_result(device, result)
-    return {"status": "accepted", "source_count": len(result.get("logs") if isinstance(result.get("logs"), list) else [])}
+    return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/emulator-configs")
@@ -2328,7 +2333,7 @@ async def upload_device_emulator_configs(device_id: str, payload: dict, authoriz
     result = dict(payload or {})
     result["type"] = "emulator_configs"
     db.store_action_result(device, result)
-    return {"status": "accepted", "config_count": len(result.get("configs") if isinstance(result.get("configs"), list) else [])}
+    return {"status": "accepted"}
 
 
 @app.get("/api/devices/{device_id}/gamelogs")
