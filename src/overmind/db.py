@@ -1539,12 +1539,13 @@ class FakeDatabase:
         if not device or not isinstance(metadata, dict):
             return
         swarm_id = device.get("swarm_id")
+        update_mode = metadata.get("update_mode")
+        is_inventory_chunk = update_mode == "inventory_chunk"
         before = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
             "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
-        } if swarm_id else {}
-        update_mode = metadata.get("update_mode")
+        } if swarm_id and not is_inventory_chunk else {}
         row_metadata = metadata
         if update_mode == "rom_hash_patch":
             metadata = merge_rom_metadata_hash_patch(device.get("rom_metadata"), metadata)
@@ -1599,8 +1600,9 @@ class FakeDatabase:
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
             "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
-        } if swarm_id else {}
-        self._notify_master_list_changes(swarm_id, before, after)
+        } if swarm_id and not is_inventory_chunk else {}
+        if not is_inventory_chunk:
+            self._notify_master_list_changes(swarm_id, before, after)
 
     def _merge_rom_metadata_inventory_chunk(self, device: dict, incoming: dict) -> dict:
         """Merge an inventory chunk into the device snapshot retained for UI use."""
