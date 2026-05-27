@@ -206,11 +206,20 @@ class FakeDatabase:
             "actor_user_id": actor_user_id,
             "created_at": datetime.utcnow(),
             "read_by": {},
+            "delivery_pending": event_type not in notification_delivery.REALTIME_EVENT_TYPES,
         }
         bucket = self.notifications.setdefault(swarm_id, [])
         bucket.append(entry)
-        del bucket[:-500]
-        notification_delivery.deliver_notification(self, entry)
+        overflow = max(0, len(bucket) - 500)
+        removable_indexes = [
+            index for index, notification in enumerate(bucket)
+            if notification.get("delivery_pending") is not True
+        ][:overflow]
+        for index in reversed(removable_indexes):
+            bucket.pop(index)
+        if event_type in notification_delivery.REALTIME_EVENT_TYPES:
+            notification_delivery.deliver_notification(self, entry)
+            entry["delivery_completed_at"] = datetime.utcnow()
         return entry
 
     def get_user_notifications(self, user_id: str, limit: int = 50) -> List[dict]:
@@ -1536,6 +1545,20 @@ class FakeDatabase:
             if action.get("status") in {"pending", "in_progress"}
         ]
         return list(reversed(active))
+
+    def clear_device_actions(self, user_id: str, device_id: str) -> Optional[int]:
+        """Remove currently queued or running actions for a user's device."""
+        device = self.get_device_by_device_id(device_id)
+        if not device or device["user_id"] != user_id:
+            return None
+        actions = self.device_actions.get(device["id"], [])
+        retained = [
+            action for action in actions
+            if action.get("status") not in {"pending", "in_progress"}
+        ]
+        deleted_count = len(actions) - len(retained)
+        self.device_actions[device["id"]] = retained
+        return deleted_count
 
     def claim_next_device_action(self, device_id: str) -> Optional[dict]:
         """Claim the oldest pending action for a device."""

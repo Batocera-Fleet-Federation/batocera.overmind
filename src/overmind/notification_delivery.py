@@ -47,6 +47,7 @@ EVENT_TYPE_TO_SETTING = {
 }
 
 DEFAULT_NOTIFICATION_TYPES = {setting: True for setting in NOTIFICATION_TYPE_GROUPS}
+REALTIME_EVENT_TYPES = {"drone_online", "drone_offline"}
 
 _TEMPLATE_BY_EVENT_TYPE = {
     "master_rom_added": "notification_master_asset_added.html",
@@ -92,6 +93,61 @@ def deliver_notification(data_store: Any, notification: dict, *, email_client: A
                     error.__class__.__name__,
                     str(error),
                 )
+
+
+def deliver_pending_notifications(data_store: Any, *, email_client: Any = emailer) -> int:
+    """Deliver one digest per enabled user/channel for all queued events."""
+    pending = [
+        (notification, data_store.swarms.get(swarm_id) or {})
+        for swarm_id, notifications in list(data_store.notifications.items())
+        for notification in notifications
+        if notification.get("delivery_pending") is True
+    ]
+    if not pending:
+        return 0
+
+    sent_count = 0
+    for user_id, user in list(data_store.users.items()):
+        items = [
+            (notification, swarm)
+            for notification, swarm in pending
+            if user_id in data_store.swarm_memberships.get(notification.get("swarm_id"), {})
+        ]
+        if not items:
+            continue
+        for channel, sender in (
+            ("email", lambda selected: send_email_digest(user, selected, email_client=email_client)),
+            ("slack", lambda selected: send_slack_digest(user, selected)),
+            ("discord", lambda selected: send_discord_digest(user, selected)),
+        ):
+            selected = [
+                item for item in items
+                if should_notify_user(user, str(item[0].get("event_type") or ""), channel)
+            ]
+            if not selected:
+                continue
+            try:
+                if sender(selected):
+                    sent_count += 1
+            except Exception as error:
+                logger.error(
+                    "Notification digest delivery failed channel=%s user_id=%s error=%s: %s",
+                    channel,
+                    user_id,
+                    error.__class__.__name__,
+                    str(error),
+                )
+
+    completed_at = datetime.utcnow()
+    for notification, _ in pending:
+        notification["delivery_pending"] = False
+        notification["delivery_completed_at"] = completed_at
+    for notifications in data_store.notifications.values():
+        del notifications[:-500]
+    persist = getattr(data_store, "_persist_state", None)
+    if callable(persist):
+        persist()
+    return sent_count
 
 
 def should_notify_user(user: dict, event_type: str, channel: str) -> bool:
@@ -180,6 +236,56 @@ def send_discord_notification(user: dict, notification: dict, swarm: Optional[di
     return post_webhook(webhook, payload)
 
 
+def send_email_digest(user: dict, items: list[tuple[dict, dict]], *, email_client: Any) -> bool:
+    to_email = str(user.get("email") or "").strip()
+    if not to_email:
+        return False
+    count = len(items)
+    heading = f"{count} swarm update{'s' if count != 1 else ''}"
+    body_rows = "".join(
+        f"<li><strong>{escape(str(notification.get('title') or 'Swarm notification'))}</strong>"
+        f" - {escape(_digest_detail(notification))}<br>"
+        f"<small>{escape(str((swarm or {}).get('name') or 'your swarm'))} | "
+        f"{escape(_format_datetime(notification.get('created_at')))}</small></li>"
+        for notification, swarm in items
+    )
+    body_html = f"<p>Updates recorded during the last notification interval:</p><ul>{body_rows}</ul>"
+    text_body = "\n".join(
+        f"- {notification.get('title') or 'Swarm notification'}: {_digest_detail(notification)} "
+        f"[{(swarm or {}).get('name') or 'your swarm'}; {_format_datetime(notification.get('created_at'))}]"
+        for notification, swarm in items
+    )
+    html_body, text_body = email_client.themed_email(heading, body_html, text_body)
+    return email_client.send_email(to_email, f"Batocera Overmind: {heading}", html_body, text_body)
+
+
+def send_slack_digest(user: dict, items: list[tuple[dict, dict]]) -> bool:
+    webhook = str((user.get("notification_settings") or {}).get("slack_webhook") or "").strip()
+    if not webhook:
+        return False
+    heading = f"{len(items)} Batocera Overmind update{'s' if len(items) != 1 else ''}"
+    lines = "\n".join(_digest_webhook_line(notification, swarm) for notification, swarm in items)[:2900]
+    return post_webhook(webhook, {
+        "text": f"{heading}\n{lines}",
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": heading[:150]}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": lines}},
+        ],
+    })
+
+
+def send_discord_digest(user: dict, items: list[tuple[dict, dict]]) -> bool:
+    webhook = str((user.get("notification_settings") or {}).get("discord_webhook") or "").strip()
+    if not webhook:
+        return False
+    heading = f"{len(items)} Batocera Overmind update{'s' if len(items) != 1 else ''}"
+    lines = "\n".join(_digest_discord_line(notification, swarm) for notification, swarm in items)[:3900]
+    return post_webhook(webhook, {
+        "username": "Batocera Overmind",
+        "embeds": [{"title": heading[:256], "description": lines, "color": 5025535}],
+    })
+
+
 def post_webhook(webhook_url: str, payload: dict) -> bool:
     request = urllib.request.Request(
         webhook_url,
@@ -243,6 +349,29 @@ def _webhook_text(notification: dict, context: dict) -> str:
         f"Event: {context['event_label']}",
         f"When: {context['created_at']}",
     ])
+
+
+def _digest_detail(notification: dict) -> str:
+    details = notification.get("details") if isinstance(notification.get("details"), dict) else {}
+    nature = str(details.get("nature") or "").strip()
+    message = str(notification.get("message") or "").strip()
+    if nature and nature not in message:
+        return f"{message} {nature}".strip()
+    return message
+
+
+def _digest_webhook_line(notification: dict, swarm: dict) -> str:
+    return (
+        f"*{notification.get('title') or 'Swarm notification'}*: {_digest_detail(notification)} "
+        f"_({(swarm or {}).get('name') or 'your swarm'}, {_format_datetime(notification.get('created_at'))})_"
+    )
+
+
+def _digest_discord_line(notification: dict, swarm: dict) -> str:
+    return (
+        f"**{notification.get('title') or 'Swarm notification'}**: {_digest_detail(notification)} "
+        f"({(swarm or {}).get('name') or 'your swarm'}, {_format_datetime(notification.get('created_at'))})"
+    )
 
 
 def _format_datetime(value: object) -> str:

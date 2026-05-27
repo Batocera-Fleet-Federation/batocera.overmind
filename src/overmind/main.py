@@ -30,6 +30,7 @@ from overmind.models import (
 from overmind.db import db
 from overmind import auth
 from overmind import emailer
+from overmind import notification_delivery
 from overmind.access_policy import (
     ensure_active_user as _ensure_active_user,
     require_device_admin as _require_device_admin,
@@ -71,6 +72,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "collect_game_logs",
     "collect_emulator_configs",
     "collect_log_sources",
+    "refresh_emulator_list",
     "sync_rom",
     "sync_system",
     "sync_bios",
@@ -80,6 +82,7 @@ SUPPORTED_DEVICE_ACTIONS = {
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
 PUBLIC_PEER_PROBE_INTERVAL_SECONDS = int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "60"))
 PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "3"))
+NOTIFICATION_DELIVERY_INTERVAL_SECONDS = int(os.getenv("NOTIFICATION_DELIVERY_INTERVAL_SECONDS", "60"))
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
@@ -129,6 +132,7 @@ app = FastAPI(
 )
 _RUNTIME_SECRET_REFRESHER = None
 _PUBLIC_PEER_PROBE_THREAD = None
+_NOTIFICATION_DELIVERY_THREAD = None
 
 
 def apply_runtime_config_side_effects(values: dict[str, str]) -> None:
@@ -212,6 +216,30 @@ def start_public_drone_reachability_poller() -> None:
 
     _PUBLIC_PEER_PROBE_THREAD = threading.Thread(target=loop, name="public-drone-reachability-poller", daemon=True)
     _PUBLIC_PEER_PROBE_THREAD.start()
+
+
+def poll_notification_delivery_once() -> int:
+    """Deliver queued notification events in per-channel digests."""
+    return notification_delivery.deliver_pending_notifications(db)
+
+
+def start_notification_delivery_poller() -> None:
+    """Start batched delivery for notifications that do not require real-time alerts."""
+    global _NOTIFICATION_DELIVERY_THREAD
+    interval_seconds = max(0, int(os.getenv("NOTIFICATION_DELIVERY_INTERVAL_SECONDS", str(NOTIFICATION_DELIVERY_INTERVAL_SECONDS))))
+    if interval_seconds == 0 or (_NOTIFICATION_DELIVERY_THREAD and _NOTIFICATION_DELIVERY_THREAD.is_alive()):
+        return
+
+    def loop() -> None:
+        while True:
+            time.sleep(max(5, interval_seconds))
+            try:
+                poll_notification_delivery_once()
+            except Exception as error:
+                logger.warning("Notification digest delivery poll failed: %s", error)
+
+    _NOTIFICATION_DELIVERY_THREAD = threading.Thread(target=loop, name="notification-delivery-poller", daemon=True)
+    _NOTIFICATION_DELIVERY_THREAD.start()
 
 # Add CORS middleware
 app.add_middleware(
@@ -1288,6 +1316,20 @@ async def list_device_actions(device_id: str, authorization: Optional[str] = Hea
     if actions is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"actions": actions}
+
+
+@app.delete("/api/devices/{device_id}/actions")
+async def delete_device_actions(device_id: str, authorization: Optional[str] = Header(default=None)):
+    """Clear queued or in-progress remote actions for a device."""
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_device_admin(user, device)
+    deleted_count = db.clear_device_actions(device["user_id"], device_id)
+    if deleted_count is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"status": "deleted", "deleted_count": deleted_count}
 
 
 @app.get("/api/downloads")
@@ -2396,6 +2438,7 @@ async def startup_event():
         print("  Password: ArcadePass123\n")
 
     start_public_drone_reachability_poller()
+    start_notification_delivery_poller()
 
 
 if __name__ == "__main__":

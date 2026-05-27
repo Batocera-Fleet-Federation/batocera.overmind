@@ -323,9 +323,12 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
         {"device": {"device_id": "mail-drone", "device_name": "Mail Drone"}, "status": "offline"},
     )
 
+    assert sent == []
+    assert webhooks == []
+    assert db_module.notification_delivery.deliver_pending_notifications(db) == 2
     assert len(sent) == 1
     assert sent[0]["to"] == "mailnotify@example.com"
-    assert "ROM sync triggered" in sent[0]["subject"]
+    assert "1 swarm update" in sent[0]["subject"]
     assert "ROM sync for snes/Game.zip" in sent[0]["html"]
     assert len(webhooks) == 1
     assert webhooks[0]["url"] == "https://hooks.slack.com/services/T/B/X"
@@ -339,6 +342,7 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
         "Remote Restart completed on Mail Drone.",
         {"device": {"device_id": "mail-drone", "device_name": "Mail Drone"}, "status": "completed"},
     )
+    db_module.notification_delivery.deliver_pending_notifications(db)
     assert len(sent) == 2
     assert "Remote Restart completed on Mail Drone." in sent[1]["html"]
     assert len(webhooks) == 2
@@ -367,9 +371,50 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
         actor_user_id=user["id"],
     )
     assert sent == []
+    db_module.notification_delivery.deliver_pending_notifications(db)
     assert len(webhooks) == 1
     assert webhooks[0]["url"] == "https://discord.com/api/webhooks/1/secret"
-    assert webhooks[0]["payload"]["embeds"][0]["title"] == "BIOS sync triggered"
+    assert "BIOS sync triggered" in webhooks[0]["payload"]["embeds"][0]["description"]
+
+    client.patch(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"notification_settings": {"notify_email": True, "types": {"drone_status": True}}},
+    )
+    db.add_swarm_notification(
+        swarm_id,
+        "drone_online",
+        "Drone online",
+        "Mail Drone is online.",
+        {"device": {"device_id": "mail-drone", "device_name": "Mail Drone"}, "status": "online"},
+    )
+    assert len(sent) == 1
+    assert "Drone online" in sent[0]["subject"]
+
+
+def test_notification_delivery_batches_multiple_asset_updates_in_one_email(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        db_module.notification_delivery.emailer,
+        "send_email",
+        lambda to_email, subject, html_body, text_body, from_email=None: sent.append(subject) or True,
+    )
+    client.post("/api/auth/register", json={"email": "digest@example.com", "username": "digest-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "digest@example.com", "username": "digest-at-example.com", "password": "testpass123"}).json()["access_token"]
+    user = db.get_user_by_email("digest@example.com")
+    swarm_id = db.default_swarm_id(user["id"])
+    client.patch(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"notification_settings": {"notify_email": True, "types": {"master_rom": True}}},
+    )
+
+    for name in ("A.zip", "B.zip"):
+        db.add_swarm_notification(swarm_id, "master_rom_added", "New ROM added", name, {"asset": {"path": name}})
+
+    assert sent == []
+    db_module.notification_delivery.deliver_pending_notifications(db)
+    assert sent == ["Batocera Overmind: 2 swarm updates"]
 
 
 def test_fake_data_populates_demo_notifications(client):
@@ -2696,7 +2741,7 @@ def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
     ).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    for action_name in ("enable_kiosk", "disable_kiosk"):
+    for action_name in ("enable_kiosk", "disable_kiosk", "refresh_emulator_list"):
         response = client.post(
             "/api/devices/arcade-cabinet-001/actions",
             headers=headers,
@@ -2711,6 +2756,27 @@ def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
         json={"action": "update"},
     )
     assert update_response.status_code == 400
+
+
+def test_delete_actions_clears_device_queue(client):
+    db.populate_fake_data()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    for action_name in ("refresh_emulator_list", "enable_kiosk"):
+        assert client.post(
+            "/api/devices/arcade-cabinet-001/actions",
+            headers=headers,
+            json={"action": action_name},
+        ).status_code == 200
+
+    response = client.delete("/api/devices/arcade-cabinet-001/actions", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "deleted", "deleted_count": 2}
+    assert client.get("/api/devices/arcade-cabinet-001/actions", headers=headers).json()["actions"] == []
 
 
 def test_rebuild_asset_metadata_action_is_supported(client):
@@ -2737,9 +2803,11 @@ def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     assert ">Update<" not in html
     assert ">Remote Restart<" in html
     assert "queueDeviceAction('rebuild_asset_metadata')" in html
+    assert "queueDeviceAction('refresh_emulator_list')" in html
     assert ">Rebuild Asset Metadata<" in html
     assert "queueDeviceAction('enable_kiosk')" in html
     assert "queueDeviceAction('disable_kiosk')" in html
+    assert "deleteDeviceActions()" in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_log_sources')\"" not in html
@@ -2763,16 +2831,19 @@ def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
     assert "join('\\\\n\\\\n')" not in js
 
 
-def test_metadata_panels_submit_searches_explicitly_and_show_loading_popout():
+def test_metadata_panels_submit_searches_explicitly_and_show_loading_toast():
     root = Path(__file__).resolve().parents[1]
     html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     css = root.joinpath("src/overmind/static/css/overmind.css").read_text(encoding="utf-8")
     js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
 
-    assert 'id="ui-loading-popout"' in html
-    assert ".ui-loading-popout.show" in css
+    assert 'id="ui-loading-popout"' not in html
+    assert ".ui-loading-popout.show" not in css
+    assert ".toast-alert.alert-loading" in css
     assert "function beginUiLoading()" in js
     assert "function endUiLoading()" in js
+    assert "function showToast(" in js
+    assert "function showLoadingToast(" in js
     assert 'onclick="submitDeviceRomSearch()"' in html
     assert 'oninput="handleDeviceRomSearch(event)"' not in html
     assert "function submitBiosSearch()" in js
