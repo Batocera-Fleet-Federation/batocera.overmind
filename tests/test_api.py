@@ -16,6 +16,7 @@ from overmind import db as db_module
 from overmind.main import app, ensure_self_signed_cert, TOKEN_HASH_SECRET
 from overmind.db import db
 from overmind import auth as auth_utils
+from overmind.postgres_store import _encode_state
 
 
 @pytest.fixture
@@ -2368,6 +2369,12 @@ def test_action_results_merge_configs_and_exclude_bak_files(client):
     assert retroarch["versions"][0]["content"] == "video_driver = driver-11"
     assert retroarch["versions"][-1]["content"] == "video_driver = driver-2"
     assert all(".bak" not in row["relative_path"] for row in device["emulator_configs"]["configs"])
+
+
+def test_postgres_state_encoding_strips_nul_bytes():
+    encoded = _encode_state({"bad\x00key": [{"content": "\x00binary\x00text"}]})
+    assert "\x00" not in json.dumps(encoded)
+    assert encoded["badkey"][0]["content"] == "binarytext"
 
 
 def test_game_log_upload_stores_sessions_for_game_log_list(client):

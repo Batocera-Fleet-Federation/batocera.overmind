@@ -320,8 +320,10 @@ class PostgresMetadataStore:
 def _encode_state(value):
     if isinstance(value, datetime):
         return {"__overmind_type": "datetime", "value": value.isoformat()}
+    if isinstance(value, str):
+        return value.replace("\x00", "")
     if isinstance(value, dict):
-        return {str(key): _encode_state(item) for key, item in value.items()}
+        return {str(key).replace("\x00", ""): _encode_state(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_encode_state(item) for item in value]
     return value
