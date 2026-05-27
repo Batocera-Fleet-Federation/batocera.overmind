@@ -1,7 +1,7 @@
 # Overmind AWS Serverless Deployment
 
-Overmind now supports a Lambda-first AWS deployment while keeping the same
-FastAPI codebase and the existing EC2/Docker deployment as a rollback path.
+Overmind now uses a Lambda-first AWS deployment while keeping the same FastAPI
+codebase. Local Docker/Uvicorn workflows remain available for development.
 
 ## Local Development
 
@@ -35,7 +35,7 @@ After the Lambda functions exist, refresh them to the pushed image:
 TAG=lambda-latest scripts/update-lambda-functions.sh
 ```
 
-The standard `Dockerfile` remains for local/EC2 use. `Dockerfile.lambda` uses
+The standard `Dockerfile` remains for local Docker use. `Dockerfile.lambda` uses
 the AWS Lambda Python base image and starts `overmind.lambda_handler.handler`.
 
 ## Endpoint Tiers
@@ -45,7 +45,7 @@ three API functions from the same image:
 
 - `low`: 1024 MB, short timeout, default route for simple requests.
 - `medium`: 2048 MB, admin/device/system/log/config routes.
-- `high`: 4096 MB, ROM metadata, master asset, and bulk sync routes.
+- `high`: 3008 MB, ROM metadata, master asset, and bulk sync routes.
 
 The explicit route map lives in `.github/terraform/aws/us-east-1/locals.tf`.
 Routes not listed there fall through to the low tier through API Gateway's
@@ -93,9 +93,8 @@ terraform plan
 terraform apply
 ```
 
-The current EC2 deployment remains in place. The Lambda endpoint is available
-from the `lambda_api_endpoint` Terraform output and can be tested before moving
-DNS from EC2.
+Terraform maps the configured public domains to API Gateway custom domains. The
+raw Lambda endpoint is also available from the `lambda_api_endpoint` output.
 
 ## Networking Notes
 
@@ -104,5 +103,4 @@ connectivity is the default because some AWS free-plan accounts block RDS
 Proxy. Set `enable_rds_proxy = true` in Terraform when the account supports it.
 The stack adds a Secrets Manager VPC endpoint for cold-start secret loading.
 External outbound access for SMTP, OAuth, Slack/Discord webhooks, or other
-public APIs still requires NAT or a provider-specific VPC endpoint. The existing
-EC2 deployment is not changed.
+public APIs still requires NAT or a provider-specific VPC endpoint.
