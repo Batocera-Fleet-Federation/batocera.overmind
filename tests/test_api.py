@@ -2489,6 +2489,16 @@ def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     assert "if (currentDeviceView === 'configs') loadDeviceConfigs();" in js
 
 
+def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "function renderCombinedLogsShell()" in js
+    assert "const shellExists = Boolean(document.getElementById('overmindLogContent'));" in js
+    assert "if (!shellExists) {" in js
+    assert "selectOvermindLogSource(selectedIndex, shellExists);" in js
+    assert "if (content.textContent !== nextContent) {" in js
+
+
 def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     start = js.index("function displayDevices()")

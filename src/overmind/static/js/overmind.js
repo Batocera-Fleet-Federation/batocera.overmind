@@ -1949,8 +1949,7 @@
                 return `<div class="small text-muted mb-2">${escapeHtml(label)} update automatically every 30 seconds.</div>`;
             }
 
-            function displayCombinedLogs({gamelogs, emulator_configs, log_sources}) {
-                const container = document.getElementById('gamelogs-list');
+            function buildCombinedLogSources(gamelogs, log_sources) {
                 const sources = [];
                 const logPayload = log_sources && !Array.isArray(log_sources) ? log_sources : {};
                 const sourceRows = Array.isArray(logPayload.logs) ? logPayload.logs : (Array.isArray(log_sources) ? log_sources : []);
@@ -1972,20 +1971,19 @@
                     return `${when} ${details}`.trim();
                 });
                 sources.unshift({id: 'game_logs', label: 'Game Logs', path: 'Overmind gameplay history', content: gameLines.join('\\n') || 'No game logs reported yet.'});
-                const previousIndex = Number.isInteger(window.overmindSelectedLogIndex) ? window.overmindSelectedLogIndex : 0;
+                return sources;
+            }
+
+            function renderCombinedLogsShell() {
+                const container = document.getElementById('gamelogs-list');
+                if (!container) return;
                 container.innerHTML = `
                     ${renderPassiveUpdateNotice('Logs')}
                     <div class="row">
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
                                     <div class="card-header">Log Sources</div>
-                                    <div class="list-group list-group-flush source-selector" id="overmindLogSources">
-                                        ${sources.map((source, index) => `
-                                        <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindLogSource(${index})">
-                                            <i class="bi bi-journal-text me-2"></i>${escapeHtml(source.label)}
-                                        </button>
-                                    `).join('')}
-                                </div>
+                                    <div class="list-group list-group-flush source-selector" id="overmindLogSources"></div>
                             </div>
                         </div>
                         <div class="col-md-9">
@@ -2006,17 +2004,43 @@
                         </div>
                     </div>
                 `;
+            }
+
+            function updateOvermindLogSourceButtons(sources) {
+                const list = document.getElementById('overmindLogSources');
+                if (!list) return;
+                const signature = sources.map(source => `${source.id}|${source.label}|${source.path}`).join('||');
+                if (list.dataset.signature === signature) return;
+                list.dataset.signature = signature;
+                list.innerHTML = sources.map((source, index) => `
+                    <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindLogSource(${index})">
+                        <i class="bi bi-journal-text me-2"></i>${escapeHtml(source.label)}
+                    </button>
+                `).join('');
+            }
+
+            function displayCombinedLogs({gamelogs, emulator_configs, log_sources}) {
+                const sources = buildCombinedLogSources(gamelogs, log_sources);
+                const shellExists = Boolean(document.getElementById('overmindLogContent'));
+                const previousSource = (window.overmindLogSources || [])[window.overmindSelectedLogIndex];
+                const selectedSourceId = window.overmindSelectedLogSourceId || (previousSource && previousSource.id) || 'game_logs';
+                if (!shellExists) {
+                    renderCombinedLogsShell();
+                }
                 window.overmindLogSources = sources;
+                updateOvermindLogSourceButtons(sources);
                 if (sources.length) {
-                    setTimeout(() => selectOvermindLogSource(Math.min(previousIndex, sources.length - 1)), 0);
+                    const selectedIndex = Math.max(0, sources.findIndex(source => source.id === selectedSourceId));
+                    selectOvermindLogSource(selectedIndex, shellExists);
                 }
             }
 
-            function selectOvermindLogSource(index) {
+            function selectOvermindLogSource(index, preserveScroll = false) {
                 const sources = window.overmindLogSources || [];
                 const source = sources[index];
                 if (!source) return;
                 window.overmindSelectedLogIndex = index;
+                window.overmindSelectedLogSourceId = source.id;
                 document.querySelectorAll('#overmindLogSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
                 const title = document.getElementById('overmindLogTitle');
                 const path = document.getElementById('overmindLogPath');
@@ -2025,7 +2049,15 @@
                 if (path) path.textContent = source.path || '';
                 if (content) {
                     const lines = String(source.content || '').split(/\r?\n/);
-                    content.textContent = lines.slice(-getOvermindLogLineLimit()).join('\n');
+                    const nextContent = lines.slice(-getOvermindLogLineLimit()).join('\n');
+                    const wasAtBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 24;
+                    const previousScrollTop = content.scrollTop;
+                    if (content.textContent !== nextContent) {
+                        content.textContent = nextContent;
+                        if (preserveScroll) {
+                            content.scrollTop = wasAtBottom ? content.scrollHeight : previousScrollTop;
+                        }
+                    }
                 }
             }
 
