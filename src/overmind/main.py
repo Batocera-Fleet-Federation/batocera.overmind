@@ -30,6 +30,8 @@ from overmind.models import (
     RomListUpdate, GamePlayLog, SocialAuthRequest,
     EmailVerificationRequest, EmailVerificationResendRequest, ForgotPasswordRequest, ResetPasswordRequest,
     SwarmCreateRequest, SwarmInviteRequest,
+    DroneActionCompleteRequest, DroneAssetMetadataUpload, DroneDownloadsReport, DroneEmulatorConfigsUpload,
+    DroneGameLogsUpload, DroneHeartbeatRequest, DroneLogSourcesUpload, DronePeerChecksUpload, DroneSpeedSampleUpload,
 )
 from overmind.db import db
 from overmind import auth
@@ -1538,10 +1540,11 @@ async def cancel_device_download(device_id: str, job_id: str, authorization: Opt
 
 
 @app.post("/api/devices/{device_id}/downloads")
-async def update_device_downloads(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def update_device_downloads(device_id: str, payload: DroneDownloadsReport, authorization: Optional[str] = Header(default=None)):
     """Persist a live download-state snapshot pushed by a Drone."""
     get_current_drone(device_id, authorization)
-    state = db.store_download_state(device_id, payload)
+    report = payload.model_dump(exclude_none=True)
+    state = db.store_download_state(device_id, report)
     if state is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     active_count = len(state.get("active") or [])
@@ -1585,28 +1588,29 @@ async def claim_device_action(device_id: str, payload: dict, authorization: Opti
 
 
 @app.post("/api/devices/{device_id}/heartbeat")
-async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, authorization: Optional[str] = Header(default=None)):
     """Update drone last-seen and return the next pending action, if any."""
     device = get_current_drone(device_id, authorization)
+    heartbeat = payload.model_dump(exclude_none=True)
     db.update_device_last_seen(
         device["id"],
-        network=payload.get("network") if isinstance(payload.get("network"), dict) else None,
+        network=heartbeat.get("network") if isinstance(heartbeat.get("network"), dict) else None,
         rom_systems=None,
-        api_port=payload.get("api_port") if payload.get("api_port") is not None else None,
-        scheme=str(payload.get("scheme") or payload.get("protocol") or "").strip() or None,
-        reachable_url=str(payload.get("reachable_url") or "").strip() or None,
-        certificate=payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
-        system_info=payload.get("system_info") if isinstance(payload.get("system_info"), dict) else None,
+        api_port=heartbeat.get("api_port") if heartbeat.get("api_port") is not None else None,
+        scheme=str(heartbeat.get("scheme") or heartbeat.get("protocol") or "").strip() or None,
+        reachable_url=str(heartbeat.get("reachable_url") or "").strip() or None,
+        certificate=heartbeat.get("certificate") if isinstance(heartbeat.get("certificate"), dict) else None,
+        system_info=heartbeat.get("system_info") if isinstance(heartbeat.get("system_info"), dict) else None,
     )
-    drone_name = str(payload.get("device_name") or "").strip()
+    drone_name = str(heartbeat.get("device_name") or "").strip()
     if drone_name:
         db.update_device_name(device_id, drone_name)
-    if isinstance(payload.get("rom_metadata"), dict):
+    if isinstance(heartbeat.get("rom_metadata"), dict):
         print(f"Heartbeat ROM metadata ignored for {device_id}: use /api/devices/{device_id}/rom-metadata")
-    if isinstance(payload.get("rom_systems"), list):
+    if isinstance(heartbeat.get("rom_systems"), list) and heartbeat.get("rom_systems"):
         print(f"Heartbeat ROM systems ignored for {device_id}: use /api/devices/{device_id}/rom-metadata")
-    if isinstance(payload.get("downloads"), dict):
-        db.store_download_state(device_id, payload["downloads"])
+    if isinstance(heartbeat.get("downloads"), dict):
+        db.store_download_state(device_id, heartbeat["downloads"])
     actions = db.claim_pending_device_actions(device_id)
     updated = db.get_device(device["id"])
     swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
@@ -1619,24 +1623,25 @@ async def drone_heartbeat(device_id: str, payload: dict, authorization: Optional
 
 
 @app.post("/api/devices/{device_id}/rom-metadata")
-async def upload_drone_rom_metadata(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataUpload, authorization: Optional[str] = Header(default=None)):
     """Receive full asset metadata snapshots from a Drone outside heartbeat."""
     get_current_drone(device_id, authorization)
-    payload_device_id = str(payload.get("device_id") or device_id)
+    metadata = payload.model_dump(exclude_none=True)
+    payload_device_id = str(metadata.get("device_id") or device_id)
     if payload_device_id != device_id:
         print(f"Asset metadata upload rejected for {device_id}: payload_device_id={payload_device_id}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload device_id mismatch")
-    roms = payload.get("roms") if isinstance(payload.get("roms"), list) else []
-    bios = payload.get("bios") if isinstance(payload.get("bios"), list) else []
-    artwork = payload.get("artwork") if isinstance(payload.get("artwork"), list) else []
-    db.store_rom_metadata(device_id, payload)
+    roms = metadata.get("roms") if isinstance(metadata.get("roms"), list) else []
+    bios = metadata.get("bios") if isinstance(metadata.get("bios"), list) else []
+    artwork = metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else []
+    db.store_rom_metadata(device_id, metadata)
     print(f"Asset metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)} artwork_count={len(artwork)}")
     return {"rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork)}
 
 
 @app.post("/api/drones/rom-metadata")
-async def upload_drone_rom_metadata_by_payload(payload: dict, authorization: Optional[str] = Header(default=None)):
-    device_id = str(payload.get("device_id") or "").strip()
+async def upload_drone_rom_metadata_by_payload(payload: DroneAssetMetadataUpload, authorization: Optional[str] = Header(default=None)):
+    device_id = str(payload.device_id or "").strip()
     if not device_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_id is required")
     return await upload_drone_rom_metadata(device_id, payload, authorization)
@@ -1653,10 +1658,10 @@ async def add_drone_event(device_id: str, payload: dict, authorization: Optional
 
 
 @app.post("/api/devices/{device_id}/peer-checks")
-async def add_peer_checks(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def add_peer_checks(device_id: str, payload: DronePeerChecksUpload, authorization: Optional[str] = Header(default=None)):
     """Persist peer-to-peer health results reported by a Drone."""
     get_current_drone(device_id, authorization)
-    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    results = payload.model_dump(exclude_none=True).get("results") or []
     stored = db.add_peer_checks(device_id, results)
     if stored is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
@@ -1664,24 +1669,25 @@ async def add_peer_checks(device_id: str, payload: dict, authorization: Optional
 
 
 @app.post("/api/devices/{device_id}/actions/{action_id}/complete")
-async def complete_device_action(device_id: str, action_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def complete_device_action(device_id: str, action_id: str, payload: DroneActionCompleteRequest, authorization: Optional[str] = Header(default=None)):
     """Mark a claimed device action completed or failed."""
     get_current_drone(device_id, authorization)
-    result_status = str(payload.get("status") or "").strip().lower()
+    action_payload = payload.model_dump(exclude_none=True)
+    result_status = str(action_payload.get("status") or "").strip().lower()
     if result_status not in {"completed", "failed"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="status must be completed or failed")
-    result = payload.get("result") if isinstance(payload.get("result"), dict) else None
-    action = db.complete_device_action(device_id, action_id, result_status, payload.get("message"), result)
+    result = action_payload.get("result") if isinstance(action_payload.get("result"), dict) else None
+    action = db.complete_device_action(device_id, action_id, result_status, action_payload.get("message"), result)
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found")
     return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/speed")
-async def add_speed_sample(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def add_speed_sample(device_id: str, payload: DroneSpeedSampleUpload, authorization: Optional[str] = Header(default=None)):
     """Store a Drone upload/download speed sample."""
     get_current_drone(device_id, authorization)
-    sample = db.add_speed_sample(device_id, payload)
+    sample = db.add_speed_sample(device_id, payload.model_dump(exclude_none=True))
     if not sample:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     print(f"Speed sample accepted for {device_id}: up={sample.get('upload_mbps')} down={sample.get('download_mbps')}")
@@ -2472,30 +2478,30 @@ async def log_gameplay(
 
 
 @app.post("/api/devices/{device_id}/game-logs")
-async def upload_device_game_logs(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def upload_device_game_logs(device_id: str, payload: DroneGameLogsUpload, authorization: Optional[str] = Header(default=None)):
     """Accept newly detected game launches from a Drone."""
     device = get_current_drone(device_id, authorization)
-    result = dict(payload or {})
+    result = payload.model_dump(exclude_none=True)
     result["type"] = "game_logs"
     db.store_action_result(device, result)
     return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/log-sources")
-async def upload_device_log_sources(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def upload_device_log_sources(device_id: str, payload: DroneLogSourcesUpload, authorization: Optional[str] = Header(default=None)):
     """Accept changed log source content from a Drone."""
     device = get_current_drone(device_id, authorization)
-    result = dict(payload or {})
+    result = payload.model_dump(exclude_none=True)
     result["type"] = "log_sources"
     db.store_action_result(device, result)
     return {"status": "accepted"}
 
 
 @app.post("/api/devices/{device_id}/emulator-configs")
-async def upload_device_emulator_configs(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorConfigsUpload, authorization: Optional[str] = Header(default=None)):
     """Accept changed emulator configs from a Drone."""
     device = get_current_drone(device_id, authorization)
-    result = dict(payload or {})
+    result = payload.model_dump(exclude_none=True)
     result["type"] = "emulator_configs"
     db.store_action_result(device, result)
     return {"status": "accepted"}

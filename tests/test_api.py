@@ -3533,5 +3533,44 @@ def test_profile_username_change_cannot_take_existing_username(client):
     assert db.get_user_by_email("beta@example.com")["username"] == "ArcadeBeta"
 
 
+def test_relational_schema_declares_domain_tables():
+    source = Path(__file__).resolve().parents[1].joinpath("src/overmind/postgres_store.py").read_text(encoding="utf-8")
+
+    for table_name in [
+        "user_profiles",
+        "user_auth_identities",
+        "swarms",
+        "swarm_memberships",
+        "drones",
+        "drone_network_state",
+        "drone_system_info",
+        "drone_certificates",
+        "drone_roms",
+        "drone_bios",
+        "drone_artwork",
+        "gameplay_sessions",
+        "drone_log_sources",
+        "drone_emulator_configs",
+        "download_items",
+        "sync_activity",
+        "notifications",
+    ]:
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in source
+    assert "OVERMIND_RESET_RELATIONAL_SCHEMA" in source
+
+
+def test_drone_api_uses_explicit_contract_models():
+    source = Path(__file__).resolve().parents[1].joinpath("src/overmind/main.py").read_text(encoding="utf-8")
+    models = Path(__file__).resolve().parents[1].joinpath("src/overmind/models.py").read_text(encoding="utf-8")
+
+    assert "async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest" in source
+    assert "async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataUpload" in source
+    assert "async def update_device_downloads(device_id: str, payload: DroneDownloadsReport" in source
+    assert "async def complete_device_action(device_id: str, action_id: str, payload: DroneActionCompleteRequest" in source
+    assert "async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorConfigsUpload" in source
+    assert "class StrictContractModel(BaseModel):" in models
+    assert 'ConfigDict(extra="forbid")' in models
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
