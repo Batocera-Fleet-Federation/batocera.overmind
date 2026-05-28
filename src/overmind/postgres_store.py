@@ -468,6 +468,7 @@ class PostgresMetadataStore:
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 swarm_id TEXT REFERENCES swarms(id) ON DELETE SET NULL,
                 device_name TEXT NOT NULL,
+                batocera_info JSONB,
                 authorization_token_id TEXT REFERENCES integration_tokens(id) ON DELETE SET NULL,
                 requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 status TEXT NOT NULL DEFAULT 'pending'
@@ -767,6 +768,7 @@ class PostgresMetadataStore:
         ]
         for statement in statements:
             cur.execute(statement)
+        cur.execute("ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS batocera_info JSONB")
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_drones_user_swarm ON drones(user_id, swarm_id)",
             "CREATE INDEX IF NOT EXISTS idx_drones_device_id ON drones(device_id)",
@@ -987,14 +989,15 @@ class PostgresMetadataStore:
         for drone_id, user_id in cur.fetchall():
             state["device_admin_claims"].setdefault(drone_id, []).append(user_id)
 
-        cur.execute("SELECT device_id, user_id, swarm_id, device_name, authorization_token_id, requested_at, status FROM pending_drone_connections")
-        for device_id, user_id, swarm_id, device_name, authorization_token_id, requested_at, status in cur.fetchall():
+        cur.execute("SELECT device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status FROM pending_drone_connections")
+        for device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status in cur.fetchall():
             state["pending_drone_connections"][device_id] = {
                 "id": device_id,
                 "user_id": user_id,
                 "swarm_id": swarm_id,
                 "device_id": device_id,
                 "device_name": device_name,
+                "batocera_info": _decode_state(batocera_info) if isinstance(batocera_info, dict) else {},
                 "authorization_token_id": authorization_token_id,
                 "detected_at": requested_at,
                 "last_seen": requested_at,
@@ -1799,12 +1802,13 @@ class PostgresMetadataStore:
             cur.execute(
                 """
                 INSERT INTO pending_drone_connections
-                    (device_id, user_id, swarm_id, device_name, authorization_token_id, requested_at, status)
-                VALUES (%s, %s, %s, %s, %s, COALESCE(%s, now()), %s)
+                    (device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, COALESCE(%s, now()), %s)
                 ON CONFLICT (device_id) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
                     swarm_id = EXCLUDED.swarm_id,
                     device_name = EXCLUDED.device_name,
+                    batocera_info = EXCLUDED.batocera_info,
                     authorization_token_id = EXCLUDED.authorization_token_id,
                     status = EXCLUDED.status
                 """,
@@ -1813,6 +1817,7 @@ class PostgresMetadataStore:
                     conn.get("user_id"),
                     conn.get("swarm_id"),
                     conn.get("device_name") or conn.get("device_id"),
+                    self._json(conn.get("batocera_info") if isinstance(conn.get("batocera_info"), dict) else {}),
                     conn.get("authorization_token_id"),
                     self._dt(conn.get("detected_at") or conn.get("last_seen")),
                     conn.get("status") or "pending",

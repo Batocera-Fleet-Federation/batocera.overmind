@@ -1334,6 +1334,7 @@ async def revoke_integration_token(token_id: str, authorization: Optional[str] =
 async def list_drone_connections(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List pending drone connection attempts for the Overlord."""
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     sid = selected_swarm_id(user, swarm_id)
     require_swarm_role(user, sid, {"overlord"})
     return {"connections": db.get_pending_drone_connections(user["id"])}
@@ -1343,6 +1344,7 @@ async def list_drone_connections(swarm_id: Optional[str] = None, authorization: 
 async def accept_drone_connection(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Accept a pending drone connection."""
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     sid = selected_swarm_id(user)
     require_swarm_role(user, sid, {"overlord"})
     device = db.accept_pending_drone_connection(user["id"], device_id)
@@ -1359,6 +1361,7 @@ async def accept_drone_connection(device_id: str, authorization: Optional[str] =
 async def deny_drone_connection(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Deny a pending drone connection."""
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     sid = selected_swarm_id(user)
     require_swarm_role(user, sid, {"overlord"})
     if not db.deny_pending_drone_connection(user["id"], device_id):

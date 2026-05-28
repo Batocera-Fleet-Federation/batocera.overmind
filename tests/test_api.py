@@ -1729,6 +1729,35 @@ def test_deny_pending_drone_connection(client):
     assert pending_response.json()["connections"] == []
 
 
+def test_accept_pending_drone_connection_tolerates_relational_row_without_batocera_info(client):
+    client.post(
+        "/api/auth/register",
+        json={"email": "accept-missing-info@example.com", "username": "accept-missing-info", "password": "testpass123"},
+    )
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "accept-missing-info@example.com", "username": "accept-missing-info", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("accept-missing-info@example.com")
+    db.pending_drone_connections["58:47:ca:7e:38:57"] = {
+        "id": "58:47:ca:7e:38:57",
+        "user_id": user["id"],
+        "device_id": "58:47:ca:7e:38:57",
+        "device_name": "Colon Drone",
+        "status": "pending",
+        "detected_at": datetime.utcnow(),
+        "last_seen": datetime.utcnow(),
+    }
+
+    response = client.post(
+        "/api/drone-connections/58:47:ca:7e:38:57/accept",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["device"]["device_id"] == "58:47:ca:7e:38:57"
+
+
 def test_list_devices_uses_authorization_header(client):
     """Authenticated routes should accept Bearer token from header."""
     client.post(

@@ -1157,7 +1157,7 @@ class OvermindDatabase:
             existing["approval_status"] = "approved"
             existing["last_seen"] = datetime.utcnow()
             existing["device_name"] = connection.get("device_name") or existing.get("device_name")
-            existing["batocera_info"] = connection.get("batocera_info") or existing.get("batocera_info")
+            existing["batocera_info"] = connection.get("batocera_info") or existing.get("batocera_info") or {}
             if existing["id"] not in self.user_devices.get(user_id, []):
                 self.user_devices.setdefault(user_id, []).append(existing["id"])
             self.pending_drone_connections.pop(device_id, None)
@@ -1178,7 +1178,7 @@ class OvermindDatabase:
             user_id,
             connection["device_id"],
             connection["device_name"],
-            connection["batocera_info"],
+            connection.get("batocera_info") if isinstance(connection.get("batocera_info"), dict) else {},
             raw_token=raw_token,
             token_hash=token_hash,
             authorization_token_id=authorization_token_id,
