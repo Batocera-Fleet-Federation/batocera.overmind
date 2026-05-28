@@ -46,6 +46,17 @@ class PostgresMetadataStore:
             return None
         return psycopg.connect(self.url)
 
+    def available(self) -> bool:
+        if not self.url:
+            return False
+        self.ensure_schema()
+        return self._ready
+
+    def _core_connection(self):
+        if not self.available():
+            return None
+        return self._connect()
+
     def ensure_schema(self) -> None:
         if self._ready or not self.url:
             return
@@ -1011,6 +1022,373 @@ class PostgresMetadataStore:
                     ("default", encoded),
                 )
                 self._mirror_app_state_to_relational(cur, state)
+
+    def _user_from_row(self, row) -> Optional[dict]:
+        if not row:
+            return None
+        (
+            user_id, email, password_hash, email_verified, is_active, auth_provider, created_at,
+            username, full_name, avatar_data_url,
+            auto_sync_roms,
+            notify_slack, notify_discord, notify_email, slack_webhook, discord_webhook, email_address,
+        ) = row
+        return {
+            "id": user_id,
+            "email": email,
+            "password": password_hash,
+            "email_verified": bool(email_verified),
+            "is_active": bool(is_active),
+            "auth_provider": auth_provider or "password",
+            "username": username,
+            "full_name": full_name,
+            "avatar_data_url": avatar_data_url,
+            "fleet_settings": {"auto_sync_roms": True if auto_sync_roms is None else bool(auto_sync_roms)},
+            "notification_settings": {
+                "notify_slack": bool(notify_slack),
+                "notify_discord": bool(notify_discord),
+                "notify_email": True if notify_email is None else bool(notify_email),
+                "slack_webhook": slack_webhook or "",
+                "discord_webhook": discord_webhook or "",
+                "email_address": email_address or email,
+                "types": {},
+            },
+            "created_at": created_at,
+        }
+
+    def _load_notification_types(self, cur, user: dict) -> dict:
+        cur.execute("SELECT event_type, enabled FROM user_notification_type_settings WHERE user_id = %s", (user["id"],))
+        user["notification_settings"]["types"] = {event_type: bool(enabled) for event_type, enabled in cur.fetchall()}
+        return user
+
+    def _select_user_sql(self, where_clause: str) -> str:
+        return f"""
+            SELECT u.id, u.email, u.password_hash, u.email_verified, u.is_active, u.auth_provider, u.created_at,
+                   p.username, p.full_name, p.avatar_data_url,
+                   fs.auto_sync_roms,
+                   ns.notify_slack, ns.notify_discord, ns.notify_email, ns.slack_webhook, ns.discord_webhook, ns.email_address
+            FROM users u
+            LEFT JOIN user_profiles p ON p.user_id = u.id
+            LEFT JOIN user_fleet_settings fs ON fs.user_id = u.id
+            LEFT JOIN user_notification_settings ns ON ns.user_id = u.id
+            WHERE {where_clause}
+        """
+
+    def get_user_by_email(self, email: str) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(self._select_user_sql("lower(u.email) = lower(%s)"), (email,))
+                user = self._user_from_row(cur.fetchone())
+                return self._load_notification_types(cur, user) if user else None
+
+    def get_user(self, user_id: str) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(self._select_user_sql("u.id = %s"), (user_id,))
+                user = self._user_from_row(cur.fetchone())
+                return self._load_notification_types(cur, user) if user else None
+
+    def user_exists(self, email: str) -> bool:
+        return self.get_user_by_email(email) is not None
+
+    def username_exists(self, username: str, exclude_user_id: Optional[str] = None) -> bool:
+        conn = self._core_connection()
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                if exclude_user_id:
+                    cur.execute(
+                        "SELECT 1 FROM user_profiles WHERE lower(username) = lower(%s) AND user_id <> %s LIMIT 1",
+                        (username, exclude_user_id),
+                    )
+                else:
+                    cur.execute("SELECT 1 FROM user_profiles WHERE lower(username) = lower(%s) LIMIT 1", (username,))
+                return cur.fetchone() is not None
+
+    def create_user_record(
+        self,
+        *,
+        user_id: str,
+        email: str,
+        password_hash: str,
+        full_name: Optional[str],
+        verified: bool,
+        auth_provider: str,
+        username: Optional[str],
+        notification_types: dict,
+    ) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (id, email, password_hash, email_verified, is_active, auth_provider, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, now(), now())
+                    """,
+                    (user_id, email, password_hash, bool(verified), bool(verified), auth_provider or "password"),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO user_profiles (user_id, username, full_name, avatar_data_url, updated_at)
+                    VALUES (%s, %s, %s, NULL, now())
+                    """,
+                    (user_id, username, full_name),
+                )
+                cur.execute("INSERT INTO user_fleet_settings (user_id, auto_sync_roms) VALUES (%s, true)", (user_id,))
+                cur.execute(
+                    """
+                    INSERT INTO user_notification_settings
+                        (user_id, notify_slack, notify_discord, notify_email, slack_webhook, discord_webhook, email_address)
+                    VALUES (%s, false, false, true, NULL, NULL, %s)
+                    """,
+                    (user_id, email),
+                )
+                for event_type, enabled in notification_types.items():
+                    cur.execute(
+                        """
+                        INSERT INTO user_notification_type_settings (user_id, event_type, enabled)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (user_id, str(event_type), bool(enabled)),
+                    )
+        return self.get_user(user_id)
+
+    def upsert_social_identity(self, user_id: str, provider: str, provider_subject: Optional[str], provider_email: Optional[str]) -> None:
+        conn = self._core_connection()
+        if conn is None:
+            return
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_auth_identities (user_id, provider, provider_subject, provider_email, last_login_at)
+                    VALUES (%s, %s, %s, %s, now())
+                    ON CONFLICT (user_id, provider) DO UPDATE SET
+                        provider_subject = EXCLUDED.provider_subject,
+                        provider_email = EXCLUDED.provider_email,
+                        last_login_at = now()
+                    """,
+                    (user_id, provider, provider_subject, provider_email),
+                )
+
+    def set_user_verified(self, user_id: str) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET email_verified = true, is_active = true, updated_at = now() WHERE id = %s", (user_id,))
+        return self.get_user(user_id)
+
+    def update_user_profile(self, user_id: str, username: Optional[str], full_name: Optional[str], avatar_data_url: Optional[str]) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_profiles (user_id, username, full_name, avatar_data_url, updated_at)
+                    VALUES (%s, %s, %s, %s, now())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        username = COALESCE(EXCLUDED.username, user_profiles.username),
+                        full_name = COALESCE(EXCLUDED.full_name, user_profiles.full_name),
+                        avatar_data_url = COALESCE(EXCLUDED.avatar_data_url, user_profiles.avatar_data_url),
+                        updated_at = now()
+                    """,
+                    (user_id, username, full_name, avatar_data_url),
+                )
+        return self.get_user(user_id)
+
+    def update_user_fleet_settings(self, user_id: str, fleet_settings: dict) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                if "auto_sync_roms" in fleet_settings:
+                    cur.execute(
+                        """
+                        INSERT INTO user_fleet_settings (user_id, auto_sync_roms, updated_at)
+                        VALUES (%s, %s, now())
+                        ON CONFLICT (user_id) DO UPDATE SET auto_sync_roms = EXCLUDED.auto_sync_roms, updated_at = now()
+                        """,
+                        (user_id, bool(fleet_settings.get("auto_sync_roms"))),
+                    )
+        return self.get_user(user_id)
+
+    def update_user_notification_settings(self, user_id: str, notification_settings: dict) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_notification_settings
+                        (user_id, notify_slack, notify_discord, notify_email, slack_webhook, discord_webhook, email_address, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        notify_slack = COALESCE(EXCLUDED.notify_slack, user_notification_settings.notify_slack),
+                        notify_discord = COALESCE(EXCLUDED.notify_discord, user_notification_settings.notify_discord),
+                        notify_email = COALESCE(EXCLUDED.notify_email, user_notification_settings.notify_email),
+                        slack_webhook = COALESCE(EXCLUDED.slack_webhook, user_notification_settings.slack_webhook),
+                        discord_webhook = COALESCE(EXCLUDED.discord_webhook, user_notification_settings.discord_webhook),
+                        email_address = COALESCE(EXCLUDED.email_address, user_notification_settings.email_address),
+                        updated_at = now()
+                    """,
+                    (
+                        user_id,
+                        notification_settings.get("notify_slack"),
+                        notification_settings.get("notify_discord"),
+                        notification_settings.get("notify_email"),
+                        notification_settings.get("slack_webhook") or None,
+                        notification_settings.get("discord_webhook") or None,
+                        notification_settings.get("email_address") or None,
+                    ),
+                )
+                if isinstance(notification_settings.get("types"), dict):
+                    for event_type, enabled in notification_settings["types"].items():
+                        cur.execute(
+                            """
+                            INSERT INTO user_notification_type_settings (user_id, event_type, enabled)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (user_id, event_type) DO UPDATE SET enabled = EXCLUDED.enabled
+                            """,
+                            (user_id, str(event_type), bool(enabled)),
+                        )
+        return self.get_user(user_id)
+
+    def create_integration_token_record(self, user_id: str, entry: dict) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO integration_tokens (id, user_id, label, token_hash, created_at)
+                    VALUES (%s, %s, %s, %s, COALESCE(%s, now()))
+                    """,
+                    (entry.get("id"), user_id, entry.get("label"), entry.get("token_hash"), self._dt(entry.get("created_at"))),
+                )
+        return dict(entry)
+
+    def get_integration_tokens(self, user_id: str) -> Optional[list[dict]]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, label, token_hash, bound_device_id, bound_fingerprint, created_at, last_used_at, revoked_at
+                    FROM integration_tokens
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    """,
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+        return [
+            {
+                "id": row[0],
+                "label": row[1],
+                "token_hash": row[2],
+                "bound_device_id": row[3],
+                "bound_device_fingerprint": row[4],
+                "created_at": row[5],
+                "last_used_at": row[6],
+                "revoked_at": row[7],
+            }
+            for row in rows
+        ]
+
+    def claim_integration_token(self, email: Optional[str], token: Optional[str], device_id: Optional[str], device_fingerprint: Optional[str] = None) -> Optional[dict]:
+        if not token:
+            return None
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        from overmind.drone_security import verify_drone_token
+
+        fingerprint = str(device_fingerprint or "").strip()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, label, token_hash, bound_device_id, bound_fingerprint, created_at, last_used_at, revoked_at
+                    FROM integration_tokens
+                    WHERE revoked_at IS NULL
+                    ORDER BY CASE WHEN user_id = (SELECT id FROM users WHERE lower(email) = lower(%s) LIMIT 1) THEN 0 ELSE 1 END,
+                             created_at DESC
+                    """,
+                    (email or "",),
+                )
+                rows = cur.fetchall()
+                for row in rows:
+                    token_id, user_id, label, token_hash, bound_device, bound_fingerprint, created_at, last_used_at, revoked_at = row
+                    if not verify_drone_token(token, token_hash):
+                        continue
+                    if bound_device and device_id and bound_device != device_id:
+                        return None
+                    if bound_fingerprint and fingerprint and bound_fingerprint != fingerprint:
+                        return None
+                    updated_fingerprint = bound_fingerprint
+                    if fingerprint and not bound_fingerprint:
+                        updated_fingerprint = fingerprint
+                    cur.execute(
+                        """
+                        UPDATE integration_tokens
+                        SET bound_device_id = COALESCE(bound_device_id, %s),
+                            bound_fingerprint = COALESCE(bound_fingerprint, %s),
+                            last_used_at = now()
+                        WHERE id = %s
+                        """,
+                        (device_id, updated_fingerprint, token_id),
+                    )
+                    user = self.get_user(user_id)
+                    if not user:
+                        return None
+                    return {
+                        "user": user,
+                        "token": {
+                            "id": token_id,
+                            "label": label,
+                            "token_hash": token_hash,
+                            "bound_device_id": bound_device or device_id,
+                            "bound_device_fingerprint": updated_fingerprint,
+                            "created_at": created_at,
+                            "last_used_at": last_used_at,
+                            "revoked_at": revoked_at,
+                        },
+                    }
+        return None
+
+    def revoke_integration_token(self, user_id: str, token_id: str) -> Optional[bool]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE integration_tokens
+                    SET revoked_at = now()
+                    WHERE user_id = %s AND id = %s AND revoked_at IS NULL
+                    RETURNING id
+                    """,
+                    (user_id, token_id),
+                )
+                return cur.fetchone() is not None
 
     def _json(self, value) -> str:
         return json.dumps(_encode_state(value), default=str)

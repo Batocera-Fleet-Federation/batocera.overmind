@@ -494,7 +494,7 @@ class OvermindDatabase:
     def create_user(self, email: str, hashed_password: str, full_name: Optional[str] = None, verified: bool = False, auth_provider: str = "password", username: Optional[str] = None) -> str:
         """Create a new user."""
         user_id = str(uuid.uuid4())
-        self.users[user_id] = {
+        user = {
             "id": user_id,
             "email": email,
             "password": hashed_password,
@@ -517,6 +517,19 @@ class OvermindDatabase:
             },
             "created_at": datetime.utcnow(),
         }
+        relational_user = postgres_store.create_user_record(
+            user_id=user_id,
+            email=email,
+            password_hash=hashed_password,
+            full_name=full_name,
+            verified=verified,
+            auth_provider=auth_provider,
+            username=username,
+            notification_types=dict(DEFAULT_NOTIFICATION_TYPES),
+        )
+        if relational_user:
+            user = relational_user
+        self.users[user_id] = user
         self.user_by_email[email] = user_id
         self.user_devices[user_id] = []
         if verified:
@@ -535,6 +548,14 @@ class OvermindDatabase:
                 existing["username"] = self.available_username(full_name or email.split("@", 1)[0], exclude_user_id=existing["id"])
             existing["email_verified"] = True
             existing["is_active"] = True
+            postgres_store.set_user_verified(existing["id"])
+            postgres_store.update_user_profile(
+                existing["id"],
+                existing.get("username"),
+                existing.get("full_name"),
+                existing.get("avatar_data_url"),
+            )
+            postgres_store.upsert_social_identity(existing["id"], provider, email, email)
             self.ensure_personal_swarm(existing["id"])
             self.accept_invitations_for_email(email, existing["id"])
             return existing
@@ -545,11 +566,20 @@ class OvermindDatabase:
         user["auth_provider"] = provider
         user["email_verified"] = True
         user["is_active"] = True
+        postgres_store.set_user_verified(user_id)
+        postgres_store.upsert_social_identity(user_id, provider, email, email)
         self.ensure_personal_swarm(user_id)
         self.accept_invitations_for_email(email, user_id)
         return user
 
     def set_user_verified(self, user_id: str) -> Optional[dict]:
+        relational = postgres_store.set_user_verified(user_id)
+        if relational:
+            self.users[user_id] = relational
+            self.user_by_email[relational["email"]] = user_id
+            self.ensure_personal_swarm(user_id)
+            self.accept_invitations_for_email(relational["email"], user_id)
+            return relational
         user = self.get_user(user_id)
         if not user:
             return None
@@ -763,6 +793,11 @@ class OvermindDatabase:
     
     def get_user_by_email(self, email: str) -> Optional[dict]:
         """Get user by email."""
+        relational = postgres_store.get_user_by_email(email)
+        if relational:
+            self.users[relational["id"]] = relational
+            self.user_by_email[relational["email"]] = relational["id"]
+            return relational
         user_id = self.user_by_email.get(email)
         if user_id:
             return self.users.get(user_id)
@@ -770,13 +805,22 @@ class OvermindDatabase:
     
     def get_user(self, user_id: str) -> Optional[dict]:
         """Get user by ID."""
+        relational = postgres_store.get_user(user_id)
+        if relational:
+            self.users[user_id] = relational
+            self.user_by_email[relational["email"]] = user_id
+            return relational
         return self.users.get(user_id)
     
     def user_exists(self, email: str) -> bool:
         """Check if user exists by email."""
+        if postgres_store.user_exists(email):
+            return True
         return email in self.user_by_email
 
     def username_exists(self, username: str, exclude_user_id: Optional[str] = None) -> bool:
+        if postgres_store.username_exists(username, exclude_user_id=exclude_user_id):
+            return True
         normalized = str(username or "").strip().casefold()
         if not normalized:
             return False
@@ -802,6 +846,11 @@ class OvermindDatabase:
         avatar_data_url: Optional[str] = None,
     ) -> Optional[dict]:
         """Update profile fields for a user."""
+        relational = postgres_store.update_user_profile(user_id, username, full_name, avatar_data_url)
+        if relational:
+            self.users[user_id] = relational
+            self.user_by_email[relational["email"]] = user_id
+            return relational
         user = self.get_user(user_id)
         if not user:
             return None
@@ -822,6 +871,11 @@ class OvermindDatabase:
 
     def update_user_fleet_settings(self, user_id: str, fleet_settings: dict) -> Optional[dict]:
         """Update fleet settings for a user."""
+        relational = postgres_store.update_user_fleet_settings(user_id, fleet_settings)
+        if relational:
+            self.users[user_id] = relational
+            self.user_by_email[relational["email"]] = user_id
+            return relational
         user = self.get_user(user_id)
         if not user:
             return None
@@ -830,6 +884,11 @@ class OvermindDatabase:
 
     def update_user_notification_settings(self, user_id: str, notification_settings: dict) -> Optional[dict]:
         """Update notification settings for a user."""
+        relational = postgres_store.update_user_notification_settings(user_id, notification_settings)
+        if relational:
+            self.users[user_id] = relational
+            self.user_by_email[relational["email"]] = user_id
+            return relational
         user = self.get_user(user_id)
         if not user:
             return None
@@ -852,10 +911,18 @@ class OvermindDatabase:
             "revoked_at": None,
             "raw_token_once": raw_token,
         }
+        postgres_store.create_integration_token_record(user_id, entry)
         self.integration_tokens.setdefault(user_id, []).append(entry)
         return entry
 
     def get_integration_tokens(self, user_id: str) -> List[dict]:
+        relational = postgres_store.get_integration_tokens(user_id)
+        if relational is not None:
+            self.integration_tokens[user_id] = relational
+            return [
+                {k: v for k, v in token.items() if k not in {"token_hash", "raw_token_once"}}
+                for token in relational
+            ]
         return [
             {k: v for k, v in token.items() if k not in {"token_hash", "raw_token_once"}}
             for token in self.integration_tokens.get(user_id, [])
@@ -872,6 +939,19 @@ class OvermindDatabase:
         device_id: Optional[str],
         device_fingerprint: Optional[str] = None,
     ) -> Optional[dict]:
+        relational = postgres_store.claim_integration_token(email, token, device_id, device_fingerprint)
+        if relational:
+            user = relational["user"]
+            entry = relational["token"]
+            self.users[user["id"]] = user
+            self.user_by_email[user["email"]] = user["id"]
+            rows = self.integration_tokens.setdefault(user["id"], [])
+            existing = next((row for row in rows if row.get("id") == entry.get("id")), None)
+            if existing:
+                existing.update(entry)
+            else:
+                rows.append(entry)
+            return relational
         if not token:
             return None
         fingerprint = str(device_fingerprint or "").strip()
@@ -909,6 +989,13 @@ class OvermindDatabase:
         return None
 
     def revoke_integration_token(self, user_id: str, token_id: str) -> bool:
+        relational = postgres_store.revoke_integration_token(user_id, token_id)
+        if relational is not None:
+            if relational:
+                for entry in self.integration_tokens.get(user_id, []):
+                    if entry.get("id") == token_id:
+                        entry["revoked_at"] = datetime.utcnow()
+            return bool(relational)
         for entry in self.integration_tokens.get(user_id, []):
             if entry.get("id") == token_id and not entry.get("revoked_at"):
                 entry["revoked_at"] = datetime.utcnow()

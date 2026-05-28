@@ -3580,6 +3580,76 @@ def test_profile_username_change_cannot_take_existing_username(client):
     assert db.get_user_by_email("beta@example.com")["username"] == "ArcadeBeta"
 
 
+def test_core_user_reads_prefer_direct_relational_store(monkeypatch):
+    user = {
+        "id": "rel-user",
+        "email": "rel@example.com",
+        "password": "hash",
+        "email_verified": True,
+        "is_active": True,
+        "auth_provider": "google",
+        "username": "rel-user",
+        "full_name": "Rel User",
+        "avatar_data_url": "data:image/png;base64,REL",
+        "fleet_settings": {"auto_sync_roms": True},
+        "notification_settings": {"notify_email": True, "types": {}},
+        "created_at": datetime.utcnow(),
+    }
+    monkeypatch.setattr(db_module.postgres_store, "get_user_by_email", lambda email: user if email == "rel@example.com" else None)
+    monkeypatch.setattr(db_module.postgres_store, "get_user", lambda user_id: user if user_id == "rel-user" else None)
+
+    assert db.get_user_by_email("rel@example.com")["avatar_data_url"] == "data:image/png;base64,REL"
+    assert db.get_user("rel-user")["username"] == "rel-user"
+    assert db.users["rel-user"]["email"] == "rel@example.com"
+
+
+def test_profile_update_writes_through_direct_relational_store(monkeypatch):
+    updated = {
+        "id": "profile-user",
+        "email": "profile@example.com",
+        "username": "new-name",
+        "full_name": "Profile User",
+        "avatar_data_url": "data:image/png;base64,NEW",
+        "fleet_settings": {},
+        "notification_settings": {"types": {}},
+    }
+    calls = []
+
+    def update_user_profile(user_id, username, full_name, avatar_data_url):
+        calls.append((user_id, username, full_name, avatar_data_url))
+        return updated
+
+    monkeypatch.setattr(db_module.postgres_store, "update_user_profile", update_user_profile)
+
+    result = db.update_user_profile("profile-user", username="new-name", avatar_data_url="data:image/png;base64,NEW")
+
+    assert result == updated
+    assert calls == [("profile-user", "new-name", None, "data:image/png;base64,NEW")]
+    assert db.users["profile-user"]["username"] == "new-name"
+
+
+def test_integration_token_claim_prefers_direct_relational_store(monkeypatch):
+    user = {
+        "id": "token-user",
+        "email": "token@example.com",
+        "username": "token-user",
+        "full_name": "Token User",
+        "fleet_settings": {},
+        "notification_settings": {"types": {}},
+    }
+    token = {"id": "tok-1", "label": "Drone", "token_hash": "hash", "bound_device_id": "drone-a"}
+    monkeypatch.setattr(
+        db_module.postgres_store,
+        "claim_integration_token",
+        lambda email, raw, device_id, device_fingerprint=None: {"user": user, "token": token},
+    )
+
+    claimed = db.claim_integration_token("stale@example.com", "raw-token", "drone-a")
+
+    assert claimed["user"]["id"] == "token-user"
+    assert db.integration_tokens["token-user"][0]["id"] == "tok-1"
+
+
 def test_relational_schema_declares_domain_tables():
     source = Path(__file__).resolve().parents[1].joinpath("src/overmind/postgres_store.py").read_text(encoding="utf-8")
 
