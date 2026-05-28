@@ -1,4 +1,4 @@
-"""Fake in-memory database storage."""
+"""Overmind repository facade with optional PostgreSQL persistence."""
 
 import uuid
 from datetime import datetime, timedelta
@@ -18,8 +18,14 @@ from overmind.device_snapshots import (
     merge_rom_metadata_hash_patch,
 )
 
-class FakeDatabase:
-    """In-memory database using dictionaries."""
+class OvermindDatabase:
+    """Application repository backed by PostgreSQL when configured.
+
+    The dictionaries are the in-process working set used by API handlers and
+    unit tests. When a database URL is configured, mutations are persisted into
+    normalized relational tables; fake/demo data is loaded only by main.py when
+    USE_FAKE_DATA=true.
+    """
     _PERSISTED_FIELDS = (
         "users",
         "user_by_email",
@@ -3082,4 +3088,6 @@ class FakeDatabase:
 
 
 # Global database instance
-db = FakeDatabase()
+FakeDatabase = OvermindDatabase
+
+db = OvermindDatabase()

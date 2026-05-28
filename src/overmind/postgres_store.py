@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime
 from typing import Iterable, Optional
 
@@ -836,6 +837,771 @@ class PostgresMetadataStore:
                     """,
                     ("default", encoded),
                 )
+                self._mirror_app_state_to_relational(cur, state)
+
+    def _json(self, value) -> str:
+        return json.dumps(_encode_state(value), default=str)
+
+    def _dt(self, value):
+        if isinstance(value, datetime) or value is None:
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return None
+
+    def _mirror_app_state_to_relational(self, cur, state: dict) -> None:
+        """Materialize the in-process repository state into normalized tables."""
+        users = state.get("users") if isinstance(state.get("users"), dict) else {}
+        swarms = state.get("swarms") if isinstance(state.get("swarms"), dict) else {}
+        memberships = state.get("swarm_memberships") if isinstance(state.get("swarm_memberships"), dict) else {}
+        devices = state.get("devices") if isinstance(state.get("devices"), dict) else {}
+        user_devices = state.get("user_devices") if isinstance(state.get("user_devices"), dict) else {}
+        device_admin_claims = state.get("device_admin_claims") if isinstance(state.get("device_admin_claims"), dict) else {}
+
+        for user in users.values():
+            if not isinstance(user, dict) or not user.get("id") or not user.get("email"):
+                continue
+            cur.execute(
+                """
+                INSERT INTO users (id, email, password_hash, email_verified, is_active, auth_provider, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()), now())
+                ON CONFLICT (id) DO UPDATE SET
+                    email = EXCLUDED.email,
+                    password_hash = EXCLUDED.password_hash,
+                    email_verified = EXCLUDED.email_verified,
+                    is_active = EXCLUDED.is_active,
+                    auth_provider = EXCLUDED.auth_provider,
+                    updated_at = now()
+                """,
+                (
+                    user.get("id"),
+                    user.get("email"),
+                    user.get("password"),
+                    bool(user.get("email_verified")),
+                    bool(user.get("is_active")),
+                    user.get("auth_provider") or "password",
+                    self._dt(user.get("created_at")),
+                ),
+            )
+            cur.execute(
+                """
+                INSERT INTO user_profiles (user_id, username, full_name, avatar_data_url, updated_at)
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    username = EXCLUDED.username,
+                    full_name = EXCLUDED.full_name,
+                    avatar_data_url = EXCLUDED.avatar_data_url,
+                    updated_at = now()
+                """,
+                (user.get("id"), user.get("username"), user.get("full_name"), user.get("avatar_data_url")),
+            )
+            if (user.get("auth_provider") or "password") != "password":
+                cur.execute(
+                    """
+                    INSERT INTO user_auth_identities (user_id, provider, provider_subject, provider_email, last_login_at)
+                    VALUES (%s, %s, %s, %s, now())
+                    ON CONFLICT (user_id, provider) DO UPDATE SET
+                        provider_subject = EXCLUDED.provider_subject,
+                        provider_email = EXCLUDED.provider_email,
+                        last_login_at = EXCLUDED.last_login_at
+                    """,
+                    (user.get("id"), user.get("auth_provider"), user.get("provider_subject") or user.get("email"), user.get("email")),
+                )
+            fleet = user.get("fleet_settings") if isinstance(user.get("fleet_settings"), dict) else {}
+            cur.execute(
+                """
+                INSERT INTO user_fleet_settings (user_id, auto_sync_roms, updated_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (user_id) DO UPDATE SET auto_sync_roms = EXCLUDED.auto_sync_roms, updated_at = now()
+                """,
+                (user.get("id"), bool(fleet.get("auto_sync_roms", True))),
+            )
+            settings = user.get("notification_settings") if isinstance(user.get("notification_settings"), dict) else {}
+            cur.execute(
+                """
+                INSERT INTO user_notification_settings
+                    (user_id, notify_slack, notify_discord, notify_email, slack_webhook, discord_webhook, email_address, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    notify_slack = EXCLUDED.notify_slack,
+                    notify_discord = EXCLUDED.notify_discord,
+                    notify_email = EXCLUDED.notify_email,
+                    slack_webhook = EXCLUDED.slack_webhook,
+                    discord_webhook = EXCLUDED.discord_webhook,
+                    email_address = EXCLUDED.email_address,
+                    updated_at = now()
+                """,
+                (
+                    user.get("id"),
+                    bool(settings.get("notify_slack")),
+                    bool(settings.get("notify_discord")),
+                    bool(settings.get("notify_email", True)),
+                    settings.get("slack_webhook") or None,
+                    settings.get("discord_webhook") or None,
+                    settings.get("email_address") or user.get("email"),
+                ),
+            )
+            if isinstance(settings.get("types"), dict):
+                for event_type, enabled in settings["types"].items():
+                    cur.execute(
+                        """
+                        INSERT INTO user_notification_type_settings (user_id, event_type, enabled)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (user_id, event_type) DO UPDATE SET enabled = EXCLUDED.enabled
+                        """,
+                        (user.get("id"), str(event_type), bool(enabled)),
+                    )
+
+        for swarm in swarms.values():
+            if not isinstance(swarm, dict) or not swarm.get("id") or not swarm.get("owner_id"):
+                continue
+            cur.execute(
+                """
+                INSERT INTO swarms (id, owner_user_id, name, is_public, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, COALESCE(%s, now()), now())
+                ON CONFLICT (id) DO UPDATE SET
+                    owner_user_id = EXCLUDED.owner_user_id,
+                    name = EXCLUDED.name,
+                    is_public = EXCLUDED.is_public,
+                    updated_at = now()
+                """,
+                (swarm.get("id"), swarm.get("owner_id"), swarm.get("name") or "Swarm", bool(swarm.get("is_public")), self._dt(swarm.get("created_at"))),
+            )
+        for swarm_id, rows in memberships.items():
+            if not isinstance(rows, dict):
+                continue
+            for user_id, member in rows.items():
+                if not isinstance(member, dict):
+                    continue
+                role = member.get("role") if member.get("role") in {"overlord", "overseer"} else "overseer"
+                cur.execute(
+                    """
+                    INSERT INTO swarm_memberships (swarm_id, user_id, role, created_at)
+                    VALUES (%s, %s, %s, COALESCE(%s, now()))
+                    ON CONFLICT (swarm_id, user_id) DO UPDATE SET role = EXCLUDED.role
+                    """,
+                    (swarm_id, user_id, role, self._dt(member.get("created_at"))),
+                )
+
+        for device in devices.values():
+            if not isinstance(device, dict) or not device.get("id") or not device.get("device_id") or not device.get("user_id"):
+                continue
+            cur.execute(
+                """
+                INSERT INTO drones
+                    (id, device_id, device_name, user_id, swarm_id, approval_status, swarm_connected,
+                     authorization_token_id, drone_token_hash, registered_at, last_seen)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()), %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    device_id = EXCLUDED.device_id,
+                    device_name = EXCLUDED.device_name,
+                    user_id = EXCLUDED.user_id,
+                    swarm_id = EXCLUDED.swarm_id,
+                    approval_status = EXCLUDED.approval_status,
+                    swarm_connected = EXCLUDED.swarm_connected,
+                    authorization_token_id = EXCLUDED.authorization_token_id,
+                    drone_token_hash = EXCLUDED.drone_token_hash,
+                    last_seen = EXCLUDED.last_seen
+                """,
+                (
+                    device.get("id"),
+                    device.get("device_id"),
+                    device.get("device_name") or device.get("device_id"),
+                    device.get("user_id"),
+                    device.get("swarm_id"),
+                    device.get("approval_status") or "approved",
+                    bool(device.get("swarm_connected", True)),
+                    device.get("authorization_token_id"),
+                    device.get("drone_token_hash"),
+                    self._dt(device.get("registered_at")),
+                    self._dt(device.get("last_seen")),
+                ),
+            )
+            self._mirror_device_details(cur, device)
+
+        for drone_id, claims in device_admin_claims.items():
+            if not isinstance(claims, list):
+                continue
+            for user_id in claims:
+                cur.execute(
+                    """
+                    INSERT INTO device_admin_claims (drone_id, user_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (drone_id, str(user_id)),
+                )
+        for user_id, device_ids in user_devices.items():
+            for drone_id in device_ids if isinstance(device_ids, list) else []:
+                cur.execute(
+                    """
+                    INSERT INTO device_admin_claims (drone_id, user_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (str(drone_id), str(user_id)),
+                )
+
+        self._mirror_auth_and_notifications(cur, state)
+        self._mirror_operational_state(cur, state, devices)
+
+    def _mirror_device_details(self, cur, device: dict) -> None:
+        network = device.get("network") if isinstance(device.get("network"), dict) else {}
+        reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
+        cur.execute(
+            """
+            INSERT INTO drone_network_state
+                (drone_id, api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (drone_id) DO UPDATE SET
+                api_port = EXCLUDED.api_port,
+                scheme = EXCLUDED.scheme,
+                reachable_url = EXCLUDED.reachable_url,
+                public_resolvable = EXCLUDED.public_resolvable,
+                public_ip = EXCLUDED.public_ip,
+                checked_at = EXCLUDED.checked_at,
+                updated_at = now()
+            """,
+            (
+                device.get("id"),
+                device.get("api_port"),
+                device.get("scheme") or "https",
+                device.get("reachable_url"),
+                bool(reachability.get("resolvable")),
+                reachability.get("public_ip") or network.get("public_ip") or network.get("public"),
+                self._dt(reachability.get("checked_at")),
+            ),
+        )
+        cur.execute("DELETE FROM drone_network_addresses WHERE drone_id = %s", (device.get("id"),))
+        for address_type in ("ipv4", "ipv6"):
+            for address in network.get(address_type) if isinstance(network.get(address_type), list) else []:
+                cur.execute(
+                    "INSERT INTO drone_network_addresses (drone_id, address_type, address) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (device.get("id"), address_type, str(address)),
+                )
+        for address_type, key in (("hostname", "hostname"), ("mac", "mac_address")):
+            if network.get(key):
+                cur.execute(
+                    "INSERT INTO drone_network_addresses (drone_id, address_type, address) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (device.get("id"), address_type, str(network.get(key))),
+                )
+        info = device.get("system_info") if isinstance(device.get("system_info"), dict) else {}
+        cur.execute(
+            """
+            INSERT INTO drone_system_info
+                (drone_id, hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
+                 cpu_max_frequency, memory_available, memory_total, batocera_version, container, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (drone_id) DO UPDATE SET
+                hostname = EXCLUDED.hostname,
+                model = EXCLUDED.model,
+                system_name = EXCLUDED.system_name,
+                architecture = EXCLUDED.architecture,
+                cpu_model = EXCLUDED.cpu_model,
+                cpu_cores = EXCLUDED.cpu_cores,
+                cpu_threads = EXCLUDED.cpu_threads,
+                cpu_max_frequency = EXCLUDED.cpu_max_frequency,
+                memory_available = EXCLUDED.memory_available,
+                memory_total = EXCLUDED.memory_total,
+                batocera_version = EXCLUDED.batocera_version,
+                container = EXCLUDED.container,
+                updated_at = now()
+            """,
+            (
+                device.get("id"),
+                info.get("hostname"),
+                info.get("model"),
+                info.get("system") or info.get("system_name"),
+                info.get("architecture"),
+                info.get("cpu_model"),
+                info.get("cpu_cores"),
+                info.get("cpu_threads"),
+                info.get("cpu_max_frequency"),
+                info.get("memory_available"),
+                info.get("memory_total"),
+                info.get("batocera_version"),
+                info.get("container"),
+            ),
+        )
+        if isinstance(info.get("performance"), dict):
+            cur.execute("DELETE FROM drone_performance_metrics WHERE drone_id = %s", (device.get("id"),))
+            for group, values in info["performance"].items():
+                if not isinstance(values, dict):
+                    continue
+                for name, value in values.items():
+                    number = value if isinstance(value, (int, float)) else None
+                    text = None if number is not None else str(value)
+                    cur.execute(
+                        """
+                        INSERT INTO drone_performance_metrics (drone_id, metric_group, metric_name, metric_value, metric_text)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (drone_id, metric_group, metric_name)
+                        DO UPDATE SET metric_value = EXCLUDED.metric_value, metric_text = EXCLUDED.metric_text, observed_at = now()
+                        """,
+                        (device.get("id"), str(group), str(name), number, text),
+                    )
+        cert = device.get("certificate") if isinstance(device.get("certificate"), dict) else {}
+        if cert:
+            cur.execute(
+                """
+                INSERT INTO drone_certificates
+                    (drone_id, status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer,
+                     valid_from, valid_until, serial_number, overmind_signed_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (drone_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    fingerprint = EXCLUDED.fingerprint,
+                    sha256_fingerprint = EXCLUDED.sha256_fingerprint,
+                    public_certificate = EXCLUDED.public_certificate,
+                    subject = EXCLUDED.subject,
+                    issuer = EXCLUDED.issuer,
+                    valid_from = EXCLUDED.valid_from,
+                    valid_until = EXCLUDED.valid_until,
+                    serial_number = EXCLUDED.serial_number,
+                    overmind_signed_at = EXCLUDED.overmind_signed_at,
+                    updated_at = now()
+                """,
+                (
+                    device.get("id"),
+                    cert.get("status"),
+                    cert.get("fingerprint"),
+                    cert.get("sha256_fingerprint"),
+                    cert.get("public_certificate") or cert.get("certificate_pem"),
+                    cert.get("subject"),
+                    cert.get("issuer"),
+                    self._dt(cert.get("valid_from")),
+                    self._dt(cert.get("valid_until")),
+                    cert.get("serial_number"),
+                    self._dt(cert.get("overmind_signed_at")),
+                ),
+            )
+            cur.execute("DELETE FROM drone_certificate_sans WHERE drone_id = %s", (device.get("id"),))
+            for san in cert.get("san") if isinstance(cert.get("san"), list) else []:
+                cur.execute(
+                    "INSERT INTO drone_certificate_sans (drone_id, san) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (device.get("id"), str(san)),
+                )
+        policy = device.get("auto_sync_policy") if isinstance(device.get("auto_sync_policy"), dict) else {}
+        cur.execute(
+            """
+            INSERT INTO drone_auto_sync_policies (drone_id, enabled, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (drone_id) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()
+            """,
+            (device.get("id"), bool(policy.get("enabled"))),
+        )
+        cur.execute("DELETE FROM drone_auto_sync_policy_systems WHERE drone_id = %s", (device.get("id"),))
+        for system in policy.get("systems") if isinstance(policy.get("systems"), list) else []:
+            cur.execute(
+                "INSERT INTO drone_auto_sync_policy_systems (drone_id, system_name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (device.get("id"), str(system)),
+            )
+
+    def _mirror_auth_and_notifications(self, cur, state: dict) -> None:
+        tokens = state.get("integration_tokens") if isinstance(state.get("integration_tokens"), dict) else {}
+        for user_id, rows in tokens.items():
+            for token in rows if isinstance(rows, list) else []:
+                if not isinstance(token, dict) or not token.get("id"):
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO integration_tokens
+                        (id, user_id, label, token_hash, bound_device_id, bound_fingerprint, created_at, last_used_at, revoked_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()), %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        label = EXCLUDED.label,
+                        token_hash = EXCLUDED.token_hash,
+                        bound_device_id = EXCLUDED.bound_device_id,
+                        bound_fingerprint = EXCLUDED.bound_fingerprint,
+                        last_used_at = EXCLUDED.last_used_at,
+                        revoked_at = EXCLUDED.revoked_at
+                    """,
+                    (
+                        token.get("id"),
+                        user_id,
+                        token.get("label") or "Drone onboarding",
+                        token.get("token_hash"),
+                        token.get("bound_device_id"),
+                        token.get("bound_device_fingerprint") or token.get("bound_fingerprint"),
+                        self._dt(token.get("created_at")),
+                        self._dt(token.get("last_used_at")),
+                        self._dt(token.get("revoked_at")),
+                    ),
+                )
+        approved = state.get("approved_drone_tokens") if isinstance(state.get("approved_drone_tokens"), dict) else {}
+        for device_id, token in approved.items():
+            cur.execute(
+                """
+                INSERT INTO approved_drone_tokens (device_id, token_hash)
+                VALUES (%s, %s)
+                ON CONFLICT (device_id) DO UPDATE SET token_hash = EXCLUDED.token_hash
+                """,
+                (str(device_id), str(token)),
+            )
+        pending = state.get("pending_drone_connections") if isinstance(state.get("pending_drone_connections"), dict) else {}
+        for conn in pending.values():
+            if not isinstance(conn, dict) or not conn.get("device_id") or not conn.get("user_id"):
+                continue
+            cur.execute(
+                """
+                INSERT INTO pending_drone_connections
+                    (device_id, user_id, swarm_id, device_name, authorization_token_id, requested_at, status)
+                VALUES (%s, %s, %s, %s, %s, COALESCE(%s, now()), %s)
+                ON CONFLICT (device_id) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    swarm_id = EXCLUDED.swarm_id,
+                    device_name = EXCLUDED.device_name,
+                    authorization_token_id = EXCLUDED.authorization_token_id,
+                    status = EXCLUDED.status
+                """,
+                (
+                    conn.get("device_id"),
+                    conn.get("user_id"),
+                    conn.get("swarm_id"),
+                    conn.get("device_name") or conn.get("device_id"),
+                    conn.get("authorization_token_id"),
+                    self._dt(conn.get("detected_at") or conn.get("last_seen")),
+                    conn.get("status") or "pending",
+                ),
+            )
+        verifications = state.get("email_verifications") if isinstance(state.get("email_verifications"), dict) else {}
+        for entry in verifications.values():
+            if not isinstance(entry, dict) or not entry.get("user_id"):
+                continue
+            cur.execute(
+                """
+                INSERT INTO email_verifications (user_id, code, token_hash, expires_at, created_at, used_at)
+                VALUES (%s, %s, %s, %s, COALESCE(%s, now()), %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    code = EXCLUDED.code,
+                    token_hash = EXCLUDED.token_hash,
+                    expires_at = EXCLUDED.expires_at,
+                    used_at = EXCLUDED.used_at
+                """,
+                (entry.get("user_id"), entry.get("code"), entry.get("token_hash"), self._dt(entry.get("expires_at")), self._dt(entry.get("created_at")), self._dt(entry.get("used_at"))),
+            )
+        resets = state.get("password_resets") if isinstance(state.get("password_resets"), dict) else {}
+        for entry in resets.values():
+            if not isinstance(entry, dict) or not entry.get("id"):
+                continue
+            cur.execute(
+                """
+                INSERT INTO password_resets (id, user_id, token_hash, expires_at, created_at, used_at)
+                VALUES (%s, %s, %s, %s, COALESCE(%s, now()), %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    token_hash = EXCLUDED.token_hash,
+                    expires_at = EXCLUDED.expires_at,
+                    used_at = EXCLUDED.used_at
+                """,
+                (entry.get("id"), entry.get("user_id"), entry.get("token_hash"), self._dt(entry.get("expires_at")), self._dt(entry.get("created_at")), self._dt(entry.get("used_at"))),
+            )
+        invitations = state.get("invitations") if isinstance(state.get("invitations"), dict) else {}
+        for invite in invitations.values():
+            if not isinstance(invite, dict) or not invite.get("id"):
+                continue
+            role = invite.get("role") if invite.get("role") in {"overlord", "overseer"} else "overseer"
+            cur.execute(
+                """
+                INSERT INTO swarm_invitations
+                    (id, swarm_id, email, role, token_hash, status, invited_by, created_at, resent_at, expires_at, accepted_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()), %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    role = EXCLUDED.role,
+                    token_hash = EXCLUDED.token_hash,
+                    status = EXCLUDED.status,
+                    resent_at = EXCLUDED.resent_at,
+                    expires_at = EXCLUDED.expires_at,
+                    accepted_at = EXCLUDED.accepted_at
+                """,
+                (
+                    invite.get("id"),
+                    invite.get("swarm_id"),
+                    invite.get("email"),
+                    role,
+                    invite.get("token_hash"),
+                    invite.get("status") or "pending",
+                    invite.get("invited_by"),
+                    self._dt(invite.get("created_at")),
+                    self._dt(invite.get("resent_at")),
+                    self._dt(invite.get("expires_at")),
+                    self._dt(invite.get("accepted_at")),
+                ),
+            )
+        notifications = state.get("notifications") if isinstance(state.get("notifications"), dict) else {}
+        for swarm_id, rows in notifications.items():
+            for note in rows if isinstance(rows, list) else []:
+                if not isinstance(note, dict) or not note.get("id"):
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO notifications (id, swarm_id, event_type, title, message, actor_user_id, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    ON CONFLICT (id) DO UPDATE SET
+                        event_type = EXCLUDED.event_type,
+                        title = EXCLUDED.title,
+                        message = EXCLUDED.message,
+                        actor_user_id = EXCLUDED.actor_user_id
+                    """,
+                    (
+                        note.get("id"),
+                        note.get("swarm_id") or swarm_id,
+                        note.get("event_type"),
+                        note.get("title") or "",
+                        note.get("message") or "",
+                        note.get("actor_user_id"),
+                        self._dt(note.get("created_at")),
+                    ),
+                )
+                cur.execute("DELETE FROM notification_fields WHERE notification_id = %s", (note.get("id"),))
+                details = note.get("details") if isinstance(note.get("details"), dict) else {}
+                for key, value in details.items():
+                    cur.execute(
+                        "INSERT INTO notification_fields (notification_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT DO UPDATE SET field_value = EXCLUDED.field_value",
+                        (note.get("id"), str(key), self._json(value)),
+                    )
+                recipient_ids = set()
+                read_by = note.get("read_by") if isinstance(note.get("read_by"), dict) else {}
+                dismissed_by = note.get("dismissed_by") if isinstance(note.get("dismissed_by"), dict) else {}
+                recipient_ids.update(read_by.keys())
+                recipient_ids.update(dismissed_by.keys())
+                for user_id in recipient_ids:
+                    cur.execute(
+                        """
+                        INSERT INTO notification_recipients
+                            (notification_id, user_id, read_at, dismissed_at, delivery_pending)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (notification_id, user_id) DO UPDATE SET
+                            read_at = EXCLUDED.read_at,
+                            dismissed_at = EXCLUDED.dismissed_at,
+                            delivery_pending = EXCLUDED.delivery_pending
+                        """,
+                        (note.get("id"), user_id, self._dt(read_by.get(user_id)), self._dt(dismissed_by.get(user_id)), bool(note.get("delivery_pending"))),
+                    )
+
+    def _mirror_operational_state(self, cur, state: dict, devices: dict) -> None:
+        for internal_id, rows in (state.get("device_actions") if isinstance(state.get("device_actions"), dict) else {}).items():
+            for action in rows if isinstance(rows, list) else []:
+                if not isinstance(action, dict) or not action.get("id"):
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO drone_actions (id, drone_id, action, status, created_at, claimed_at, completed_at, message)
+                    VALUES (%s, %s, %s, %s, COALESCE(%s, now()), %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        claimed_at = EXCLUDED.claimed_at,
+                        completed_at = EXCLUDED.completed_at,
+                        message = EXCLUDED.message
+                    """,
+                    (
+                        action.get("id"),
+                        internal_id,
+                        action.get("action"),
+                        action.get("status") or "pending",
+                        self._dt(action.get("created_at")),
+                        self._dt(action.get("claimed_at")),
+                        self._dt(action.get("completed_at")),
+                        action.get("message"),
+                    ),
+                )
+                cur.execute("DELETE FROM drone_action_parameters WHERE action_id = %s", (action.get("id"),))
+                for key, value in (action.get("payload") if isinstance(action.get("payload"), dict) else {}).items():
+                    cur.execute(
+                        "INSERT INTO drone_action_parameters (action_id, parameter_name, parameter_value) VALUES (%s, %s, %s) ON CONFLICT DO UPDATE SET parameter_value = EXCLUDED.parameter_value",
+                        (action.get("id"), str(key), self._json(value)),
+                    )
+                if isinstance(action.get("result"), dict):
+                    self._insert_action_result(cur, internal_id, action.get("device_id"), action.get("id"), action.get("result"), action.get("status"), action.get("message"), self._dt(action.get("result_received_at")))
+
+        for internal_id, rows in (state.get("gamelogs") if isinstance(state.get("gamelogs"), dict) else {}).items():
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO gameplay_sessions
+                        (id, drone_id, system_name, game_name, rom_path, rom_md5, played_at, duration_seconds, received_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (id) DO UPDATE SET
+                        system_name = EXCLUDED.system_name,
+                        game_name = EXCLUDED.game_name,
+                        rom_path = EXCLUDED.rom_path,
+                        rom_md5 = EXCLUDED.rom_md5,
+                        played_at = EXCLUDED.played_at,
+                        duration_seconds = EXCLUDED.duration_seconds
+                    """,
+                    (
+                        row.get("id") or f"{internal_id}:{row.get('played_at')}:{row.get('game_name')}",
+                        internal_id,
+                        row.get("system_name"),
+                        row.get("game_name") or row.get("name") or "Unknown game",
+                        row.get("rom_path"),
+                        row.get("rom_md5"),
+                        self._dt(row.get("played_at")),
+                        row.get("duration_seconds"),
+                    ),
+                )
+        for internal_id, rows in (state.get("speed_samples") if isinstance(state.get("speed_samples"), dict) else {}).items():
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO drone_speed_samples
+                        (drone_id, upload_mbps, download_mbps, latency_ms, measured_at, received_at)
+                    VALUES (%s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    """,
+                    (internal_id, row.get("upload_mbps"), row.get("download_mbps"), row.get("latency_ms"), self._dt(row.get("measured_at") or row.get("sampled_at")), self._dt(row.get("sampled_at"))),
+                )
+        for internal_id, rows in (state.get("device_events") if isinstance(state.get("device_events"), dict) else {}).items():
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO drone_events (drone_id, event_type, severity, message, occurred_at, received_at)
+                    VALUES (%s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    RETURNING id
+                    """,
+                    (internal_id, row.get("event_type"), row.get("severity"), row.get("message") or row.get("rom") or row.get("path"), self._dt(row.get("timestamp") or row.get("occurred_at")), self._dt(row.get("received_at"))),
+                )
+                event_id = (cur.fetchone() or [None])[0]
+                for key, value in (row.get("metadata") if isinstance(row.get("metadata"), dict) else {}).items():
+                    cur.execute(
+                        "INSERT INTO drone_event_fields (event_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT DO UPDATE SET field_value = EXCLUDED.field_value",
+                        (event_id, str(key), self._json(value)),
+                    )
+        for internal_id, rows in (state.get("peer_checks") if isinstance(state.get("peer_checks"), dict) else {}).items():
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict) or not row.get("target_drone_id"):
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO drone_peer_checks
+                        (source_drone_id, target_drone_id, target_address, status, latency_ms, checked_at, error, received_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    """,
+                    (
+                        internal_id,
+                        row.get("target_drone_id"),
+                        row.get("target_address"),
+                        row.get("status") or "fail",
+                        row.get("latency_ms"),
+                        self._dt(row.get("checked_at")),
+                        row.get("failure_reason") or row.get("error"),
+                        self._dt(row.get("received_at")),
+                    ),
+                )
+        for internal_id, state_row in (state.get("download_states") if isinstance(state.get("download_states"), dict) else {}).items():
+            if isinstance(state_row, dict):
+                self._insert_download_snapshot(cur, internal_id, state_row)
+        for internal_id, rows in (state.get("rom_sync_activity") if isinstance(state.get("rom_sync_activity"), dict) else {}).items():
+            for row in rows if isinstance(rows, list) else []:
+                if isinstance(row, dict):
+                    self._insert_sync_activity(cur, internal_id, row)
+
+    def _insert_action_result(self, cur, internal_id: Optional[str], device_id: Optional[str], action_id: Optional[str], result: dict, status: Optional[str], message: Optional[str], received_at) -> None:
+        cur.execute(
+            """
+            INSERT INTO drone_action_result_records
+                (drone_id, device_id, action_id, result_type, status, message, received_at)
+            VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+            RETURNING id
+            """,
+            (internal_id, device_id, action_id, result.get("type"), status, message, received_at),
+        )
+        result_id = (cur.fetchone() or [None])[0]
+        for key, value in result.items():
+            if result_id is None:
+                continue
+            cur.execute(
+                "INSERT INTO drone_action_result_fields (result_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT DO UPDATE SET field_value = EXCLUDED.field_value",
+                (result_id, str(key), self._json(value)),
+            )
+
+    def _insert_download_snapshot(self, cur, internal_id: str, state: dict) -> None:
+        concurrency = state.get("concurrency") if isinstance(state.get("concurrency"), dict) else {}
+        cur.execute(
+            """
+            INSERT INTO download_snapshots (target_drone_id, reported_at, concurrency_scope, active_limit)
+            VALUES (%s, COALESCE(%s, now()), %s, %s)
+            RETURNING id
+            """,
+            (internal_id, self._dt(state.get("received_at")), concurrency.get("scope"), concurrency.get("active_limit")),
+        )
+        snapshot_id = (cur.fetchone() or [None])[0]
+        for bucket in ("active", "queued", "recent"):
+            for item in state.get(bucket) if isinstance(state.get(bucket), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO download_items
+                        (snapshot_id, job_id, state_bucket, asset_type, status, source_drone_id, system_name,
+                         file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes,
+                         percentage, transfer_speed_bps, queue_position, failure_reason)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        snapshot_id,
+                        item.get("job_id") or item.get("id"),
+                        bucket,
+                        item.get("asset_type"),
+                        item.get("status"),
+                        item.get("source_drone_id"),
+                        item.get("system") or item.get("system_name"),
+                        item.get("file_path") or item.get("relative_path"),
+                        item.get("rom_path"),
+                        item.get("bios_name"),
+                        item.get("artwork_type"),
+                        item.get("file_size") or item.get("total_bytes"),
+                        item.get("downloaded_bytes") or item.get("bytes_transferred"),
+                        item.get("percentage"),
+                        item.get("transfer_speed_bps"),
+                        item.get("queue_position"),
+                        item.get("failure_reason") or item.get("error_message"),
+                    ),
+                )
+
+    def _insert_sync_activity(self, cur, internal_id: str, row: dict) -> None:
+        cur.execute(
+            """
+            INSERT INTO sync_activity
+                (id, target_drone_id, source_drone_id, asset_type, action, status, system_name, file_path,
+                 rom_md5, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at,
+                 failure_reason, received_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+            ON CONFLICT (id) DO UPDATE SET
+                status = EXCLUDED.status,
+                bytes_transferred = EXCLUDED.bytes_transferred,
+                file_size = EXCLUDED.file_size,
+                completed_at = EXCLUDED.completed_at,
+                failure_reason = EXCLUDED.failure_reason,
+                received_at = EXCLUDED.received_at
+            """,
+            (
+                row.get("id") or row.get("sync_id") or str(uuid.uuid4()),
+                internal_id,
+                row.get("source_drone_id"),
+                row.get("asset_type") or "rom",
+                row.get("action") or "download",
+                row.get("status") or "pending",
+                row.get("system") or row.get("system_name"),
+                row.get("relative_path") or row.get("rom_path") or row.get("bios_name") or row.get("file_path"),
+                row.get("rom_md5") or row.get("md5"),
+                row.get("bios_md5"),
+                row.get("artwork_type"),
+                row.get("bytes_transferred"),
+                row.get("file_size"),
+                self._dt(row.get("started_at") or row.get("download_started_at")),
+                self._dt(row.get("completed_at") or row.get("download_completed_at")),
+                row.get("failure_reason"),
+                self._dt(row.get("received_at")),
+            ),
+        )
 
     def clear_device_assets(self, device_internal_id: str, asset_type: Optional[str] = None) -> None:
         if not self.assets_enabled():
@@ -851,11 +1617,14 @@ class PostgresMetadataStore:
                         "DELETE FROM overmind_device_assets WHERE device_internal_id = %s AND asset_type = %s",
                         (device_internal_id, asset_type),
                     )
+                    self._clear_domain_assets(cur, device_internal_id, asset_type)
                 else:
                     cur.execute(
                         "DELETE FROM overmind_device_assets WHERE device_internal_id = %s",
                         (device_internal_id,),
                     )
+                    for kind in ("rom", "bios", "artwork"):
+                        self._clear_domain_assets(cur, device_internal_id, kind)
 
     def begin_device_asset_inventory(self, device_internal_id: str, inventory_id: str) -> None:
         if not self.assets_enabled():
@@ -938,6 +1707,21 @@ class PostgresMetadataStore:
                     (device_internal_id, inventory_id),
                 )
                 cur.execute(
+                    """
+                    SELECT asset_type, payload
+                    FROM overmind_device_asset_staging
+                    WHERE device_internal_id = %s AND inventory_id = %s
+                    """,
+                    (device_internal_id, inventory_id),
+                )
+                rows_by_type: dict[str, list[dict]] = {"rom": [], "bios": [], "artwork": []}
+                for asset_type, payload in cur.fetchall():
+                    decoded = _decode_state(payload)
+                    if isinstance(decoded, dict) and asset_type in rows_by_type:
+                        rows_by_type[asset_type].append(decoded)
+                for asset_type, rows in rows_by_type.items():
+                    self._replace_domain_assets(cur, device_internal_id, asset_type, rows)
+                cur.execute(
                     "DELETE FROM overmind_device_asset_staging WHERE device_internal_id = %s",
                     (device_internal_id,),
                 )
@@ -965,6 +1749,10 @@ class PostgresMetadataStore:
                         "DELETE FROM overmind_device_assets WHERE device_internal_id = %s AND asset_type = %s AND item_key = ANY(%s)",
                         (device_internal_id, asset_type, keys),
                     )
+                    cur.execute(
+                        "DELETE FROM drone_roms WHERE drone_id = %s AND normalized_path = ANY(%s)",
+                        (device_internal_id, [_domain_path(row, "rom") for row in source_rows]),
+                    )
                 elif asset_type == "bios":
                     cur.execute(
                         """
@@ -976,6 +1764,10 @@ class PostgresMetadataStore:
                           )
                         """,
                         (device_internal_id, asset_type, keys, paths),
+                    )
+                    cur.execute(
+                        "DELETE FROM drone_bios WHERE drone_id = %s AND normalized_path = ANY(%s)",
+                        (device_internal_id, [_domain_path(row, "bios") for row in source_rows]),
                     )
                 else:
                     for row in source_rows:
@@ -994,6 +1786,17 @@ class PostgresMetadataStore:
                             """,
                             (device_internal_id, asset_type, key, system, path),
                         )
+                        for artwork_type in _artwork_types(row):
+                            cur.execute(
+                                """
+                                DELETE FROM drone_artwork
+                                WHERE drone_id = %s
+                                  AND lower(system_name) = %s
+                                  AND normalized_rom_path = %s
+                                  AND lower(artwork_type) = %s
+                                """,
+                                (device_internal_id, system, path, artwork_type.lower()),
+                            )
 
     def upsert_device_assets(
         self,
@@ -1034,11 +1837,13 @@ class PostgresMetadataStore:
                         """,
                         (device_internal_id, asset_type, replace_system),
                     )
+                    self._clear_domain_assets(cur, device_internal_id, asset_type, replace_system=replace_system)
                 elif replace:
                     cur.execute(
                         "DELETE FROM overmind_device_assets WHERE device_internal_id = %s AND asset_type = %s",
                         (device_internal_id, asset_type),
                     )
+                    self._clear_domain_assets(cur, device_internal_id, asset_type)
                 if prepared:
                     cur.executemany(
                         """
@@ -1052,7 +1857,135 @@ class PostgresMetadataStore:
                         """,
                         prepared,
                     )
+                    self._upsert_domain_assets(cur, device_internal_id, asset_type, [row for row in rows if isinstance(row, dict)])
         return row_ids
+
+    def _ensure_system(self, cur, system_name: Optional[str]) -> Optional[int]:
+        clean = str(system_name or "").strip()
+        if not clean:
+            return None
+        cur.execute(
+            """
+            INSERT INTO systems (name, display_name)
+            VALUES (%s, %s)
+            ON CONFLICT (name) DO UPDATE SET display_name = COALESCE(systems.display_name, EXCLUDED.display_name)
+            RETURNING id
+            """,
+            (clean, clean),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else None
+
+    def _clear_domain_assets(self, cur, device_internal_id: str, asset_type: str, replace_system: Optional[str] = None) -> None:
+        table = {"rom": "drone_roms", "bios": "drone_bios", "artwork": "drone_artwork"}.get(asset_type)
+        if not table:
+            return
+        if replace_system and asset_type in {"rom", "artwork"}:
+            cur.execute(f"DELETE FROM {table} WHERE drone_id = %s AND lower(system_name) = lower(%s)", (device_internal_id, replace_system))
+        else:
+            cur.execute(f"DELETE FROM {table} WHERE drone_id = %s", (device_internal_id,))
+
+    def _replace_domain_assets(self, cur, device_internal_id: str, asset_type: str, rows: list[dict]) -> None:
+        self._clear_domain_assets(cur, device_internal_id, asset_type)
+        self._upsert_domain_assets(cur, device_internal_id, asset_type, rows)
+
+    def _upsert_domain_assets(self, cur, device_internal_id: str, asset_type: str, rows: Iterable[dict]) -> None:
+        if asset_type == "rom":
+            for row in rows:
+                system_name = str(row.get("system_name") or row.get("system") or "").strip()
+                path = _domain_path(row, "rom")
+                if not system_name or not path:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO drone_roms
+                        (drone_id, system_id, system_name, file_path, normalized_path, rom_name, rom_md5,
+                         file_size, entry_type, metadata_source, last_seen)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    ON CONFLICT (drone_id, system_name, normalized_path) DO UPDATE SET
+                        system_id = EXCLUDED.system_id,
+                        file_path = EXCLUDED.file_path,
+                        rom_name = EXCLUDED.rom_name,
+                        rom_md5 = EXCLUDED.rom_md5,
+                        file_size = EXCLUDED.file_size,
+                        entry_type = EXCLUDED.entry_type,
+                        metadata_source = EXCLUDED.metadata_source,
+                        last_seen = EXCLUDED.last_seen
+                    """,
+                    (
+                        device_internal_id,
+                        self._ensure_system(cur, system_name),
+                        system_name,
+                        row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_name"),
+                        path,
+                        row.get("rom_name") or row.get("name"),
+                        row.get("rom_md5") or row.get("md5"),
+                        row.get("file_size") or row.get("byte_count"),
+                        row.get("entry_type") or "file",
+                        row.get("metadata_source") or row.get("source"),
+                        self._dt(row.get("last_seen") or row.get("added_at")),
+                    ),
+                )
+        elif asset_type == "bios":
+            for row in rows:
+                path = _domain_path(row, "bios")
+                if not path:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO drone_bios
+                        (drone_id, file_path, normalized_path, bios_name, bios_md5, file_size, last_seen)
+                    VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    ON CONFLICT (drone_id, normalized_path) DO UPDATE SET
+                        file_path = EXCLUDED.file_path,
+                        bios_name = EXCLUDED.bios_name,
+                        bios_md5 = EXCLUDED.bios_md5,
+                        file_size = EXCLUDED.file_size,
+                        last_seen = EXCLUDED.last_seen
+                    """,
+                    (
+                        device_internal_id,
+                        row.get("file_path") or row.get("relative_path") or row.get("path") or row.get("bios_name"),
+                        path,
+                        row.get("bios_name") or row.get("name"),
+                        row.get("bios_md5") or row.get("md5"),
+                        row.get("file_size") or row.get("byte_count"),
+                        self._dt(row.get("last_seen") or row.get("added_at")),
+                    ),
+                )
+        elif asset_type == "artwork":
+            for row in rows:
+                system_name = str(row.get("system_name") or row.get("system") or "").strip()
+                path = _domain_path(row, "artwork")
+                if not system_name or not path:
+                    continue
+                system_id = self._ensure_system(cur, system_name)
+                for artwork_type in _artwork_types(row):
+                    cur.execute(
+                        """
+                        INSERT INTO drone_artwork
+                            (drone_id, system_id, system_name, rom_path, normalized_rom_path, rom_name,
+                             title, artwork_type, last_seen)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                        ON CONFLICT (drone_id, system_name, normalized_rom_path, artwork_type) DO UPDATE SET
+                            system_id = EXCLUDED.system_id,
+                            rom_path = EXCLUDED.rom_path,
+                            rom_name = EXCLUDED.rom_name,
+                            title = EXCLUDED.title,
+                            last_seen = EXCLUDED.last_seen
+                        """,
+                        (
+                            device_internal_id,
+                            system_id,
+                            system_name,
+                            row.get("rom_path") or row.get("file_path") or row.get("rom_name"),
+                            path,
+                            row.get("rom_name"),
+                            row.get("title"),
+                            artwork_type,
+                            self._dt(row.get("last_seen") or row.get("added_at")),
+                        ),
+                    )
 
     def list_device_assets(self, device_internal_id: str, asset_type: str, system_name: Optional[str] = None) -> list[dict]:
         if not self.assets_enabled():
@@ -1341,6 +2274,26 @@ def _asset_key(asset_type: str, row: dict) -> str:
         type_key = ",".join(sorted(str(value).strip().lower() for value in types if str(value).strip()))
         return f"{system}:{path}:{type_key}" if system and path and type_key else ""
     return ""
+
+
+def _domain_path(row: dict, asset_type: str) -> str:
+    if asset_type == "rom":
+        value = row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_file") or row.get("rom_name")
+    elif asset_type == "bios":
+        value = row.get("file_path") or row.get("relative_path") or row.get("path") or row.get("bios_name") or row.get("name")
+    else:
+        value = row.get("rom_path") or row.get("file_path") or row.get("rom_name")
+    return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
+
+
+def _artwork_types(row: dict) -> list[str]:
+    if isinstance(row.get("artwork_types"), list):
+        values = row["artwork_types"]
+    elif row.get("artwork_type"):
+        values = [row.get("artwork_type")]
+    else:
+        values = []
+    return sorted({str(value).strip() for value in values if str(value).strip()})
 
 
 postgres_store = PostgresMetadataStore()

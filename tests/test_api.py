@@ -3557,6 +3557,73 @@ def test_relational_schema_declares_domain_tables():
     ]:
         assert f"CREATE TABLE IF NOT EXISTS {table_name}" in source
     assert "OVERMIND_RESET_RELATIONAL_SCHEMA" in source
+    assert "REFERENCES users(id) ON DELETE CASCADE" in source
+    assert "REFERENCES drones(id) ON DELETE CASCADE" in source
+    assert "CREATE INDEX IF NOT EXISTS idx_roms_drone_system" in source
+    assert "CREATE INDEX IF NOT EXISTS idx_actions_drone_status" in source
+
+
+def test_postgres_store_materializes_state_and_assets_into_relational_tables():
+    from overmind.postgres_store import PostgresMetadataStore
+
+    class RecordingCursor:
+        def __init__(self):
+            self.statements = []
+            self._next_id = 1
+
+        def execute(self, sql, params=None):
+            self.statements.append((sql, params))
+
+        def executemany(self, sql, params):
+            self.statements.append((sql, list(params)))
+
+        def fetchone(self):
+            value = self._next_id
+            self._next_id += 1
+            return [value]
+
+        def fetchall(self):
+            return []
+
+    store = PostgresMetadataStore()
+    cur = RecordingCursor()
+    store._mirror_app_state_to_relational(cur, {
+        "users": {"u1": {"id": "u1", "email": "u@example.com", "password": "hash", "email_verified": True, "is_active": True}},
+        "swarms": {"s1": {"id": "s1", "owner_id": "u1", "name": "Main"}},
+        "swarm_memberships": {"s1": {"u1": {"user_id": "u1", "role": "overlord"}}},
+        "devices": {"d1": {"id": "d1", "device_id": "drone-a", "device_name": "Drone A", "user_id": "u1", "swarm_id": "s1"}},
+        "device_actions": {"d1": [{"id": "a1", "device_id": "drone-a", "action": "restart", "status": "pending", "payload": {"reason": "test"}}]},
+        "gamelogs": {"d1": [{"id": "g1", "game_name": "Game", "system_name": "snes"}]},
+        "download_states": {"d1": {"active": [{"job_id": "j1", "status": "downloading"}], "queued": [], "recent": []}},
+    })
+    store._upsert_domain_assets(cur, "d1", "rom", [{"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc"}])
+    store._upsert_domain_assets(cur, "d1", "bios", [{"file_path": "bios.bin", "bios_md5": "def"}])
+    store._upsert_domain_assets(cur, "d1", "artwork", [{"system_name": "snes", "rom_path": "Game.zip", "artwork_types": ["image"]}])
+
+    sql = "\n".join(statement for statement, _ in cur.statements)
+    for table_name in [
+        "INSERT INTO users",
+        "INSERT INTO swarms",
+        "INSERT INTO swarm_memberships",
+        "INSERT INTO drones",
+        "INSERT INTO drone_actions",
+        "INSERT INTO gameplay_sessions",
+        "INSERT INTO download_snapshots",
+        "INSERT INTO download_items",
+        "INSERT INTO drone_roms",
+        "INSERT INTO drone_bios",
+        "INSERT INTO drone_artwork",
+    ]:
+        assert table_name in sql
+
+
+def test_overmind_database_is_not_fake_data_gate():
+    source = Path(__file__).resolve().parents[1].joinpath("src/overmind/db.py").read_text(encoding="utf-8")
+    main_source = Path(__file__).resolve().parents[1].joinpath("src/overmind/main.py").read_text(encoding="utf-8")
+
+    assert "class OvermindDatabase" in source
+    assert "db = OvermindDatabase()" in source
+    assert 'os.getenv("USE_FAKE_DATA", "").lower() == "true"' in main_source
 
 
 def test_drone_api_uses_explicit_contract_models():
