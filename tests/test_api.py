@@ -1308,6 +1308,37 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
     assert upload_probe.json()["bytes_received"] == 4096
 
 
+def test_register_device_token_lookup_ignores_stale_drone_email_hint(client):
+    """A copied onboarding token remains valid even if Drone has an old email saved."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"},
+    )
+    user_token = client.post(
+        "/api/auth/login",
+        json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    auth_token = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"label": "Cabinet token"},
+    ).json()["token"]["authorization_token"]
+
+    register_response = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(
+            email="stale-drone-config@example.com",
+            authorization_token=auth_token,
+            device_id="stale-email-drone",
+            device_name="Stale Email Drone",
+        ),
+    )
+
+    assert register_response.status_code == 200
+    assert register_response.json()["status"] == "pending"
+    assert db.pending_drone_connections["stale-email-drone"]["user_id"] == db.get_user_by_email("owner@example.com")["id"]
+
+
 def test_reapproving_same_drone_updates_existing_device_instead_of_duplicating(client):
     """Repeated approval with a new authorization token keeps one visible Drone record."""
     client.post("/api/auth/register", json={"email": "dedupe@example.com", "username": "dedupe-at-example.com", "password": "testpass123"})

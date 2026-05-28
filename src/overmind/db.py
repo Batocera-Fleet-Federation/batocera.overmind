@@ -876,12 +876,15 @@ class OvermindDatabase:
             return None
         fingerprint = str(device_fingerprint or "").strip()
         candidates = []
+        seen_user_ids = set()
         if email:
             user = self.get_user_by_email(email)
             if user:
                 candidates.append((user["id"], user))
-        else:
-            candidates = [(user_id, self.get_user(user_id)) for user_id in self.integration_tokens.keys()]
+                seen_user_ids.add(user["id"])
+        for user_id in self.integration_tokens.keys():
+            if user_id not in seen_user_ids:
+                candidates.append((user_id, self.get_user(user_id)))
         for user_id, user in candidates:
             if not user:
                 continue
