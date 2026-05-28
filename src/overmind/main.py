@@ -1188,6 +1188,7 @@ async def update_swarm(swarm_id: str, payload: dict, authorization: Optional[str
 @app.post("/api/devices/register")
 async def register_device(device_data: DeviceRegister, authorization: Optional[str] = Header(default=None)):
     """Register an authorized Drone and return its bearer token."""
+    db.refresh_persistent_state()
     raw_auth_token = device_data.authorization_token or (get_bearer_token(authorization) if authorization else None)
     batocera_info = device_data.batocera_info.model_dump()
     certificate = batocera_info.get("certificate") if isinstance(batocera_info.get("certificate"), dict) else {}

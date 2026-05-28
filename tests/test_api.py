@@ -1339,6 +1339,22 @@ def test_register_device_token_lookup_ignores_stale_drone_email_hint(client):
     assert db.pending_drone_connections["stale-email-drone"]["user_id"] == db.get_user_by_email("owner@example.com")["id"]
 
 
+def test_register_device_refreshes_persistent_state_before_token_lookup(client, monkeypatch):
+    calls = {"count": 0}
+
+    def count_refresh():
+        calls["count"] += 1
+
+    monkeypatch.setattr(db, "refresh_persistent_state", count_refresh)
+    response = client.post(
+        "/api/devices/register",
+        json=_device_registration_payload(authorization_token="not-valid", device_id="refresh-before-register"),
+    )
+
+    assert response.status_code == 401
+    assert calls["count"] == 1
+
+
 def test_reapproving_same_drone_updates_existing_device_instead_of_duplicating(client):
     """Repeated approval with a new authorization token keeps one visible Drone record."""
     client.post("/api/auth/register", json={"email": "dedupe@example.com", "username": "dedupe-at-example.com", "password": "testpass123"})

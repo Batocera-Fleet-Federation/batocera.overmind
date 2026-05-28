@@ -810,13 +810,186 @@ class PostgresMetadataStore:
         conn = self._connect()
         if conn is None:
             return None
+        state = None
         with conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT state FROM overmind_app_state WHERE id = %s", ("default",))
                 row = cur.fetchone()
-        if not row:
-            return None
-        return _decode_state(row[0])
+                if row:
+                    state = _decode_state(row[0])
+                relational = self._load_relational_state(cur)
+        if not isinstance(state, dict):
+            state = {}
+        _merge_state_dicts(state, relational)
+        return state if state else None
+
+    def _load_relational_state(self, cur) -> dict:
+        """Rehydrate core app state from normalized tables for fresh workers."""
+        state = {
+            "users": {},
+            "user_by_email": {},
+            "user_devices": {},
+            "integration_tokens": {},
+            "swarms": {},
+            "swarm_memberships": {},
+            "devices": {},
+            "device_admin_claims": {},
+            "pending_drone_connections": {},
+        }
+        try:
+            cur.execute(
+                """
+                SELECT u.id, u.email, u.password_hash, u.email_verified, u.is_active, u.auth_provider, u.created_at,
+                       p.username, p.full_name, p.avatar_data_url,
+                       fs.auto_sync_roms,
+                       ns.notify_slack, ns.notify_discord, ns.notify_email, ns.slack_webhook, ns.discord_webhook, ns.email_address
+                FROM users u
+                LEFT JOIN user_profiles p ON p.user_id = u.id
+                LEFT JOIN user_fleet_settings fs ON fs.user_id = u.id
+                LEFT JOIN user_notification_settings ns ON ns.user_id = u.id
+                """
+            )
+        except Exception:
+            return {}
+        for row in cur.fetchall():
+            (
+                user_id, email, password_hash, email_verified, is_active, auth_provider, created_at,
+                username, full_name, avatar_data_url,
+                auto_sync_roms,
+                notify_slack, notify_discord, notify_email, slack_webhook, discord_webhook, email_address,
+            ) = row
+            if not user_id or not email:
+                continue
+            user = {
+                "id": user_id,
+                "email": email,
+                "password": password_hash,
+                "email_verified": bool(email_verified),
+                "is_active": bool(is_active),
+                "auth_provider": auth_provider or "password",
+                "username": username,
+                "full_name": full_name,
+                "avatar_data_url": avatar_data_url,
+                "fleet_settings": {"auto_sync_roms": True if auto_sync_roms is None else bool(auto_sync_roms)},
+                "notification_settings": {
+                    "notify_slack": bool(notify_slack),
+                    "notify_discord": bool(notify_discord),
+                    "notify_email": True if notify_email is None else bool(notify_email),
+                    "slack_webhook": slack_webhook or "",
+                    "discord_webhook": discord_webhook or "",
+                    "email_address": email_address or email,
+                    "types": {},
+                },
+                "created_at": created_at,
+            }
+            state["users"][user_id] = user
+            state["user_by_email"][email] = user_id
+
+        cur.execute("SELECT user_id, event_type, enabled FROM user_notification_type_settings")
+        for user_id, event_type, enabled in cur.fetchall():
+            user = state["users"].get(user_id)
+            if user:
+                user["notification_settings"].setdefault("types", {})[event_type] = bool(enabled)
+
+        cur.execute("SELECT id, owner_user_id, name, created_at FROM swarms")
+        for swarm_id, owner_id, name, created_at in cur.fetchall():
+            state["swarms"][swarm_id] = {"id": swarm_id, "owner_id": owner_id, "name": name, "created_at": created_at}
+        cur.execute("SELECT swarm_id, user_id, role, created_at FROM swarm_memberships")
+        for swarm_id, user_id, role, created_at in cur.fetchall():
+            state["swarm_memberships"].setdefault(swarm_id, {})[user_id] = {"user_id": user_id, "role": role, "created_at": created_at}
+
+        cur.execute(
+            """
+            SELECT id, user_id, label, token_hash, bound_device_id, bound_fingerprint, created_at, last_used_at, revoked_at
+            FROM integration_tokens
+            """
+        )
+        for token_id, user_id, label, token_hash, bound_device_id, bound_fingerprint, created_at, last_used_at, revoked_at in cur.fetchall():
+            state["integration_tokens"].setdefault(user_id, []).append({
+                "id": token_id,
+                "label": label,
+                "token_hash": token_hash,
+                "bound_device_id": bound_device_id,
+                "bound_device_fingerprint": bound_fingerprint,
+                "created_at": created_at,
+                "last_used_at": last_used_at,
+                "revoked_at": revoked_at,
+            })
+
+        cur.execute(
+            """
+            SELECT d.id, d.device_id, d.device_name, d.user_id, d.swarm_id, d.approval_status, d.swarm_connected,
+                   d.authorization_token_id, d.drone_token_hash, d.registered_at, d.last_seen,
+                   n.api_port, n.scheme, n.reachable_url, n.public_resolvable, n.public_ip, n.checked_at,
+                   s.hostname, s.model, s.system_name, s.architecture, s.cpu_model, s.cpu_cores, s.cpu_threads,
+                   s.cpu_max_frequency, s.memory_available, s.memory_total, s.batocera_version, s.container
+            FROM drones d
+            LEFT JOIN drone_network_state n ON n.drone_id = d.id
+            LEFT JOIN drone_system_info s ON s.drone_id = d.id
+            WHERE d.removed_at IS NULL
+            """
+        )
+        for row in cur.fetchall():
+            (
+                internal_id, device_id, device_name, user_id, swarm_id, approval_status, swarm_connected,
+                authorization_token_id, drone_token_hash, registered_at, last_seen,
+                api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
+                hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
+                cpu_max_frequency, memory_available, memory_total, batocera_version, container,
+            ) = row
+            device = {
+                "id": internal_id,
+                "device_id": device_id,
+                "device_name": device_name,
+                "user_id": user_id,
+                "swarm_id": swarm_id,
+                "approval_status": approval_status or "approved",
+                "swarm_connected": bool(swarm_connected),
+                "authorization_token_id": authorization_token_id,
+                "drone_token_hash": drone_token_hash,
+                "registered_at": registered_at,
+                "last_seen": last_seen,
+                "api_port": api_port,
+                "scheme": scheme or "https",
+                "reachable_url": reachable_url,
+                "network": {"public_ip": public_ip} if public_ip else {},
+                "public_reachability": {"resolvable": bool(public_resolvable), "public_ip": public_ip, "checked_at": checked_at},
+                "system_info": {
+                    "hostname": hostname,
+                    "model": model,
+                    "system": system_name,
+                    "architecture": architecture,
+                    "cpu_model": cpu_model,
+                    "cpu_cores": cpu_cores,
+                    "cpu_threads": cpu_threads,
+                    "cpu_max_frequency": cpu_max_frequency,
+                    "memory_available": memory_available,
+                    "memory_total": memory_total,
+                    "batocera_version": batocera_version,
+                    "container": container,
+                },
+            }
+            state["devices"][internal_id] = device
+            state["user_devices"].setdefault(user_id, []).append(internal_id)
+
+        cur.execute("SELECT drone_id, user_id FROM device_admin_claims")
+        for drone_id, user_id in cur.fetchall():
+            state["device_admin_claims"].setdefault(drone_id, []).append(user_id)
+
+        cur.execute("SELECT device_id, user_id, swarm_id, device_name, authorization_token_id, requested_at, status FROM pending_drone_connections")
+        for device_id, user_id, swarm_id, device_name, authorization_token_id, requested_at, status in cur.fetchall():
+            state["pending_drone_connections"][device_id] = {
+                "id": device_id,
+                "user_id": user_id,
+                "swarm_id": swarm_id,
+                "device_id": device_id,
+                "device_name": device_name,
+                "authorization_token_id": authorization_token_id,
+                "detected_at": requested_at,
+                "last_seen": requested_at,
+                "status": status,
+            }
+        return state
 
     def store_app_state(self, state: dict) -> None:
         if not self.url:
@@ -2256,6 +2429,30 @@ def _decode_state(value):
     if isinstance(value, list):
         return [_decode_state(item) for item in value]
     return value
+
+
+def _merge_state_dicts(base: dict, overlay: dict) -> None:
+    if not isinstance(overlay, dict):
+        return
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            if key in {"users", "devices"}:
+                for row_id, row_value in value.items():
+                    if isinstance(row_value, dict) and isinstance(base[key].get(row_id), dict):
+                        base[key][row_id].update({field: item for field, item in row_value.items() if item is not None})
+                    else:
+                        base[key][row_id] = row_value
+            elif key in {"swarm_memberships"}:
+                for row_id, row_value in value.items():
+                    base[key].setdefault(row_id, {})
+                    if isinstance(row_value, dict):
+                        base[key][row_id].update(row_value)
+                    else:
+                        base[key][row_id] = row_value
+            else:
+                base[key].update(value)
+        elif value:
+            base[key] = value
 
 
 def _asset_key(asset_type: str, row: dict) -> str:
