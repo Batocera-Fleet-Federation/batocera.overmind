@@ -1405,7 +1405,14 @@ class OvermindDatabase:
         for device in self.devices.values():
             if device.get("approval_status", "approved") != "approved":
                 continue
-            is_online = bool(device.get("last_seen") and device.get("last_seen") >= cutoff)
+            last_seen = device.get("last_seen")
+            if isinstance(last_seen, datetime) and isinstance(cutoff, datetime):
+                if last_seen.tzinfo is None and cutoff.tzinfo is not None:
+                    last_seen = last_seen.replace(tzinfo=cutoff.tzinfo)
+                elif last_seen.tzinfo is not None and cutoff.tzinfo is None:
+                    cutoff = cutoff.replace(tzinfo=last_seen.tzinfo)
+
+            is_online = bool(last_seen and last_seen >= cutoff)
             current = "online" if is_online else "offline"
             previous = device.get("last_known_status") or current
             if previous == current:
