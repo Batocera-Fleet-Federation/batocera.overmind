@@ -1915,7 +1915,7 @@ class PostgresMetadataStore:
                 details = note.get("details") if isinstance(note.get("details"), dict) else {}
                 for key, value in details.items():
                     cur.execute(
-                        "INSERT INTO notification_fields (notification_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT (notification_id, field_name) DO UPDATE SET field_value = EXCLUDED.field_value",
+                        "INSERT INTO notification_fields (notification_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT DO UPDATE SET field_value = EXCLUDED.field_value",
                         (note.get("id"), str(key), self._json(value)),
                     )
                 recipient_ids = set()
@@ -1966,7 +1966,7 @@ class PostgresMetadataStore:
                 cur.execute("DELETE FROM drone_action_parameters WHERE action_id = %s", (action.get("id"),))
                 for key, value in (action.get("payload") if isinstance(action.get("payload"), dict) else {}).items():
                     cur.execute(
-                        "INSERT INTO drone_action_parameters (action_id, parameter_name, parameter_value) VALUES (%s, %s, %s) ON CONFLICT (action_id, parameter_name) DO UPDATE SET parameter_value = EXCLUDED.parameter_value",
+                        "INSERT INTO drone_action_parameters (action_id, parameter_name, parameter_value) VALUES (%s, %s, %s) ON CONFLICT DO UPDATE SET parameter_value = EXCLUDED.parameter_value",
                         (action.get("id"), str(key), self._json(value)),
                     )
                 if isinstance(action.get("result"), dict):
@@ -2027,7 +2027,7 @@ class PostgresMetadataStore:
                 event_id = (cur.fetchone() or [None])[0]
                 for key, value in (row.get("metadata") if isinstance(row.get("metadata"), dict) else {}).items():
                     cur.execute(
-                        "INSERT INTO drone_event_fields (event_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT (event_id, field_name) DO UPDATE SET field_value = EXCLUDED.field_value",
+                        "INSERT INTO drone_event_fields (event_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT DO UPDATE SET field_value = EXCLUDED.field_value",
                         (event_id, str(key), self._json(value)),
                     )
         for internal_id, rows in (state.get("peer_checks") if isinstance(state.get("peer_checks"), dict) else {}).items():
@@ -2074,7 +2074,7 @@ class PostgresMetadataStore:
             if result_id is None:
                 continue
             cur.execute(
-                "INSERT INTO drone_action_result_fields (result_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT (result_id, field_name) DO UPDATE SET field_value = EXCLUDED.field_value",
+                "INSERT INTO drone_action_result_fields (result_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT DO UPDATE SET field_value = EXCLUDED.field_value",
                 (result_id, str(key), self._json(value)),
             )
 
