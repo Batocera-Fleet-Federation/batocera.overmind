@@ -1486,7 +1486,13 @@ class OvermindDatabase:
             public_resolvable = bool(reachability.get("resolvable")) and str(reachability.get("public_ip") or "") == str(public_ip or "")
             public_reachable_url = f"{scheme}://{public_host}:{api_port}" if public_host and public_resolvable else None
             last_seen = peer.get("last_seen")
-            online = bool(last_seen and last_seen >= cutoff)
+            peer_cutoff = cutoff
+            if isinstance(last_seen, datetime) and isinstance(peer_cutoff, datetime):
+                if last_seen.tzinfo is None and peer_cutoff.tzinfo is not None:
+                    last_seen = last_seen.replace(tzinfo=peer_cutoff.tzinfo)
+                elif last_seen.tzinfo is not None and peer_cutoff.tzinfo is None:
+                    peer_cutoff = peer_cutoff.replace(tzinfo=last_seen.tzinfo)
+            online = bool(last_seen and last_seen >= peer_cutoff)
             output.append({
                 "drone_id": peer.get("device_id"),
                 "name": peer.get("device_name"),

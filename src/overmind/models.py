@@ -323,13 +323,18 @@ class DroneAssetMetadataUpload(StrictContractModel):
     chunk_total: Optional[int] = None
     inventory_complete: Optional[bool] = None
     inventory_counts: dict[str, int] = Field(default_factory=dict)
+    collected_at: Optional[str] = None
     roms_root: Optional[str] = None
+    bios_root: Optional[str] = None
     systems: list[DroneAssetSystem] = Field(default_factory=list)
     roms: list[DroneRomAsset] = Field(default_factory=list)
     bios: list[DroneBiosAsset] = Field(default_factory=list)
     artwork: list[DroneArtworkAsset] = Field(default_factory=list)
     gamelists: list[dict[str, Any]] = Field(default_factory=list)
     deleted: Optional[DroneAssetDeleteSet] = None
+    cache: dict[str, Any] = Field(default_factory=dict)
+    delta_index: Optional[int] = None
+    delta_total: Optional[int] = None
     hash_progress: dict[str, Any] = Field(default_factory=dict)
 
 

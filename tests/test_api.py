@@ -4,7 +4,7 @@ import io
 import json
 import sys
 import urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -2329,6 +2329,84 @@ def test_asset_metadata_inventory_chunks_append_without_replacing_previous_chunk
     assert db.get_device_by_device_id("drone-a")["rom_metadata"]["inventory_complete"] is True
 
 
+def test_asset_metadata_upload_accepts_drone_sync_payload_fields(client):
+    client.post("/api/auth/register", json={"email": "sync-payload@example.com", "username": "sync-payload-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("sync-payload@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+
+    response = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_chunk",
+            "collected_at": "2026-05-30T23:43:00+00:00",
+            "roms_root": "/userdata/roms",
+            "bios_root": "/userdata/bios",
+            "cache": {"schema_version": 3},
+            "replace_all": True,
+            "inventory_id": "drone-a:2026-05-30T23:43:00+00:00:1:1:1",
+            "chunk_index": 0,
+            "chunk_total": 1,
+            "inventory_complete": True,
+            "inventory_counts": {"roms": 1, "bios": 1, "artwork": 1},
+            "systems": [{"name": "snes", "system_name": "snes", "rom_count": 1, "bios_count": 0, "artwork_count": 1}],
+            "gamelists": [{"system": "snes", "path": "/userdata/roms/snes/gamelist.xml"}],
+            "roms": [
+                {
+                    "entry_type": "file",
+                    "system": "snes",
+                    "system_name": "snes",
+                    "name": "Game One.zip",
+                    "rom_name": "Game One",
+                    "file_path": "Game One.zip",
+                    "relative_path": "Game One.zip",
+                    "unique_id": "stable-rom-id",
+                    "file_size": 3,
+                    "byte_count": 3,
+                    "size": 3,
+                    "modified_time": 1770000000,
+                    "mtime": 1770000000,
+                }
+            ],
+            "bios": [
+                {
+                    "entry_type": "file",
+                    "name": "bios.bin",
+                    "path": "snes/bios.bin",
+                    "file_path": "snes/bios.bin",
+                    "relative_path": "snes/bios.bin",
+                    "unique_id": "stable-bios-id",
+                    "file_size": 4,
+                    "byte_count": 4,
+                    "size": 4,
+                    "modified_time": 1770000001,
+                    "mtime": 1770000001,
+                }
+            ],
+            "artwork": [
+                {
+                    "asset_type": "artwork",
+                    "system": "snes",
+                    "rom_name": "Game One",
+                    "rom_path": "Game One.zip",
+                    "file_path": "media/images/Game One.png",
+                    "artwork_type": "image",
+                    "artwork_types": ["image"],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"rom_count": 1, "bios_count": 1, "artwork_count": 1}
+    stored = db.get_device_by_device_id("drone-a")["rom_metadata"]
+    assert stored["collected_at"] == "2026-05-30T23:43:00+00:00"
+    assert stored["bios_root"] == "/userdata/bios"
+    assert stored["cache"] == {"schema_version": 3}
+
+
 def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_last_chunk(client):
     client.post("/api/auth/register", json={"email": "refresh@example.com", "username": "refresh-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("refresh@example.com")
@@ -3344,6 +3422,18 @@ def test_alive_stores_system_info_and_peer_detail_is_latest(client):
     assert detail["peer_checks"][0]["status"] == "pass"
     assert detail["peer_checks"][0]["target_address"] == "https://new.example"
     assert detail["peer_checks"][0]["target_name"]
+
+
+def test_swarm_response_handles_postgres_timezone_aware_last_seen(client):
+    client.post("/api/auth/register", json={"email": "aware@example.com", "username": "aware-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("aware@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    db.get_device_by_device_id("drone-a")["last_seen"] = datetime.now(timezone.utc)
+
+    swarm = db.get_swarm_for_device("drone-a")
+
+    assert swarm[0]["drone_id"] == "drone-a"
+    assert swarm[0]["online"] is True
 
 
 def test_public_peer_poll_marks_public_endpoint_resolvable_for_swarm_transfer(client, monkeypatch):
