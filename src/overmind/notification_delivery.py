@@ -66,8 +66,15 @@ _TEMPLATE_BY_EVENT_TYPE = {
 }
 
 
+def _refresh(data_store: Any) -> None:
+    refresh = getattr(data_store, "refresh_persistent_state", None)
+    if callable(refresh):
+        refresh()
+
+
 def deliver_notification(data_store: Any, notification: dict, *, email_client: Any = emailer) -> None:
     """Deliver a stored swarm notification to configured member channels."""
+    _refresh(data_store)
     swarm_id = notification.get("swarm_id")
     swarm = data_store.swarms.get(swarm_id) or {}
     actor = data_store.get_user(str(notification.get("actor_user_id") or "")) if notification.get("actor_user_id") else None
@@ -97,6 +104,7 @@ def deliver_notification(data_store: Any, notification: dict, *, email_client: A
 
 def deliver_pending_notifications(data_store: Any, *, email_client: Any = emailer) -> int:
     """Deliver one digest per enabled user/channel for all queued events."""
+    _refresh(data_store)
     pending = [
         (notification, data_store.swarms.get(swarm_id) or {})
         for swarm_id, notifications in list(data_store.notifications.items())

@@ -142,7 +142,6 @@ _RUNTIME_SECRET_REFRESHER = None
 _PUBLIC_PEER_PROBE_THREAD = None
 _NOTIFICATION_DELIVERY_THREAD = None
 _RUNTIME_INITIALIZED = False
-_FAKE_DATA_LOADED = False
 
 
 def is_lambda_runtime() -> bool:
@@ -216,6 +215,7 @@ def probe_device_public_endpoint(device: dict) -> dict:
 
 def poll_public_drone_reachability_once() -> None:
     """Probe public peer endpoints for all approved Drones."""
+    db.refresh_persistent_state()
     for device in list(db.devices.values()):
         if device.get("approval_status", "approved") != "approved":
             continue
@@ -287,7 +287,7 @@ def start_notification_delivery_poller() -> None:
 
 def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Optional[bool] = None) -> None:
     """Initialize runtime services once for local, container, or Lambda execution."""
-    global _RUNTIME_SECRET_REFRESHER, _RUNTIME_INITIALIZED, _FAKE_DATA_LOADED
+    global _RUNTIME_SECRET_REFRESHER, _RUNTIME_INITIALIZED
     if _RUNTIME_INITIALIZED:
         return
 
@@ -302,8 +302,8 @@ def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Opt
         _RUNTIME_SECRET_REFRESHER.start()
 
     environment = (os.getenv("OVERMIND_ENVIRONMENT") or os.getenv("ENVIRONMENT") or "").lower()
-    if environment in {"prod", "production"} and not database_url():
-        raise RuntimeError("OVERMIND_DATABASE_URL or PostgreSQL environment variables are required in production mode")
+    if not database_url():
+        raise RuntimeError("OVERMIND_DATABASE_URL or PostgreSQL environment variables are required")
 
     if environment in {"prod", "production"}:
         selected_provider = emailer.provider()
@@ -335,26 +335,9 @@ def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Opt
         print(f"📧 Email provider: {emailer.provider()}")
 
     postgres_store.ensure_schema()
+    if not postgres_store.available():
+        raise RuntimeError("PostgreSQL is required and must be reachable before Overmind can start")
     db.refresh_persistent_state()
-
-    if os.getenv("USE_FAKE_DATA", "").lower() == "true" and not _FAKE_DATA_LOADED:
-        print("\n📚 Loading sample data...")
-        db.populate_fake_data()
-        db.populate_fake_notifications()
-        _FAKE_DATA_LOADED = True
-        print("✓ Sample data loaded successfully!")
-        print("  • 2 demo users")
-        print("  • 3 sample devices")
-        print("  • 2 pending drone psionic connections")
-        print("  • 10+ sample ROMs")
-        print("  • 8 sample game plays")
-        print("  • sample notifications")
-        print("\n  Demo Credentials:")
-        print("  Email: demo@example.com")
-        print("  Password: DemoPass123")
-        print("\n  Or:")
-        print("  Email: arcade@example.com")
-        print("  Password: ArcadePass123\n")
 
     if start_pollers:
         start_public_drone_reachability_poller()
@@ -959,6 +942,7 @@ async def dismiss_notifications(payload: dict = None, authorization: Optional[st
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
+    db.refresh_persistent_state()
     db._dedupe_all_device_records()
     users = sorted((admin_user_row(user) for user in db.users.values()), key=lambda row: str(row.get("email") or "").lower())
     swarms = sorted((admin_swarm_row(swarm) for swarm in db.swarms.values()), key=lambda row: str(row.get("name") or "").lower())
@@ -1033,6 +1017,7 @@ async def invite_swarm_member(swarm_id: str, payload: SwarmInviteRequest, author
     if invited and invited.get("is_active"):
         db.accept_invitations_for_email(str(payload.email), invited["id"])
         print(f"Invitation accepted for existing user {payload.email}: swarm_id={swarm_id}")
+    db.refresh_persistent_state()
     swarm = db.swarms.get(swarm_id) or {}
     send_invitation_email(str(payload.email), swarm, role, raw_token)
     print(f"Invitation created for {payload.email}: swarm_id={swarm_id} role={role}")
@@ -1044,6 +1029,7 @@ async def resend_swarm_invitation(swarm_id: str, invitation_id: str, authorizati
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
     require_swarm_role(user, swarm_id, {OWNER_ROLE})
+    db.refresh_persistent_state()
     invite = db.invitations.get(invitation_id)
     if not invite or invite.get("swarm_id") != swarm_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
@@ -1058,6 +1044,7 @@ async def resend_swarm_invitation(swarm_id: str, invitation_id: str, authorizati
     )
     if not invite:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
+    db.refresh_persistent_state()
     swarm = db.swarms.get(swarm_id) or {}
     send_invitation_email(str(invite.get("email") or ""), swarm, READONLY_ROLE, raw_token)
     print(f"Invitation resent for {invite.get('email')}: swarm_id={swarm_id}")
@@ -1295,14 +1282,9 @@ async def claim_drone_ownership(payload: dict):
             "certificate": payload.get("certificate") if isinstance(payload.get("certificate"), dict) else None,
         }
 
-    existing = db.get_device_by_device_id(device_id)
-    if existing:
-        existing["device_name"] = device_name or existing.get("device_name") or device_id
-        existing["approval_status"] = "approved"
-    else:
-        db.create_device(user["id"], device_id, device_name, batocera_info, raw_token=generate_drone_token())
+    db.create_device(user["id"], device_id, device_name, batocera_info, raw_token=generate_drone_token())
     db.add_device_admin_claim(user["id"], device_id)
-    db.pending_drone_connections.pop(device_id, None)
+    db.deny_pending_drone_connection(user["id"], device_id)
     print(f"Drone ownership claim succeeded: device_id={device_id} user_id={user['id']}")
     return {"status": "claimed", "device_id": device_id, "drone_token": None}
 
@@ -2310,7 +2292,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
     system_set = {system.lower() for system in systems}
     selected_roms_by_device = {
         device_id: [
-            rom for rom in db.roms.get(device["id"], [])
+            rom for rom in db.get_device_roms(device_id)
             if str(rom.get("system_name") or "").strip().lower() in system_set
         ]
         for device_id, device in devices.items()
@@ -2583,7 +2565,7 @@ async def serve_ui_route(ui_path: str):
 
 @app.on_event("startup")
 async def startup_event():
-    """Print startup message and load fake data if requested."""
+    """Initialize runtime services."""
     initialize_runtime()
 
 

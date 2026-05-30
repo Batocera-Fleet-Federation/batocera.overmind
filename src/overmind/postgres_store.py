@@ -24,7 +24,7 @@ def database_url() -> Optional[str]:
 
 
 class PostgresMetadataStore:
-    """Tiny optional store; the app still works when PostgreSQL is absent."""
+    """PostgreSQL storage for Overmind application state and Drone metadata."""
 
     def __init__(self) -> None:
         self.url = database_url()
@@ -1796,6 +1796,15 @@ class PostgresMetadataStore:
                 (str(device_id), str(token)),
             )
         pending = state.get("pending_drone_connections") if isinstance(state.get("pending_drone_connections"), dict) else {}
+        pending_device_ids = [
+            str(conn.get("device_id"))
+            for conn in pending.values()
+            if isinstance(conn, dict) and conn.get("device_id")
+        ]
+        if pending_device_ids:
+            cur.execute("DELETE FROM pending_drone_connections WHERE NOT (device_id = ANY(%s))", (pending_device_ids,))
+        else:
+            cur.execute("DELETE FROM pending_drone_connections")
         for conn in pending.values():
             if not isinstance(conn, dict) or not conn.get("device_id") or not conn.get("user_id"):
                 continue

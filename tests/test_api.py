@@ -63,6 +63,71 @@ def mark_source_resolvable(device_id: str, public_ip: str = "8.8.8.8"):
     )
 
 
+def seed_test_fleet():
+    user_id = db.create_user(
+        "demo@example.com",
+        auth_utils.hash_password("DemoPass123"),
+        "Demo User",
+        verified=True,
+        username="demo-at-example.com",
+    )
+    other_user_id = db.create_user(
+        "arcade@example.com",
+        auth_utils.hash_password("ArcadePass123"),
+        "Arcade User",
+        verified=True,
+        username="arcade-at-example.com",
+    )
+    for owner_id, device_id, name in [
+        (user_id, "arcade-cabinet-001", "Living Room Cabinet"),
+        (user_id, "raspberry-pi-001", "Bedroom Pi"),
+        (other_user_id, "arcade-cabinet-002", "Game Room Arcade"),
+    ]:
+        db.create_device(
+            owner_id,
+            device_id,
+            name,
+            {"network": {"ipv4": ["127.0.0.1"]}, "system_info": {"hostname": name}},
+            raw_token="demo-local-drone-token" if device_id == "arcade-cabinet-001" else "test-drone-token",
+        )
+    systems = ["snes", "nes", "genesis", "gba", "psx"]
+    for index, system in enumerate(systems, start=1):
+        db.add_roms(
+            "arcade-cabinet-001",
+            system,
+            [
+                {
+                    "rom_name": f"{system.upper()} Game {number}",
+                    "rom_md5": f"{index}{number}".ljust(32, "0")[:32],
+                    "file_path": f"/roms/{system}/{system}-game-{number}.zip",
+                    "file_size": index * 100 + number,
+                }
+                for number in range(1, 6)
+            ],
+        )
+    db.add_roms("raspberry-pi-001", "snes", [{"rom_name": "SNES Game 1", "rom_md5": "1" * 32, "file_path": "/roms/snes/snes-game-1.zip", "file_size": 1}])
+    db.add_roms("arcade-cabinet-002", "genesis", [{"rom_name": "GENESIS Game 1", "rom_md5": "2" * 32, "file_path": "/roms/genesis/genesis-game-1.zip", "file_size": 2}])
+    db.log_gameplay("arcade-cabinet-001", "snes", "Super Mario World", 1200)
+    db.create_pending_drone_connection("rogue-signal-001", "Basement Recon Drone", {"network": {"ipv4": ["127.0.0.2"]}}, user_id)
+    db.create_pending_drone_connection("rogue-signal-002", "Workshop Handheld Drone", {"network": {"ipv4": ["127.0.0.3"]}}, user_id)
+    return {"demo_user_id": user_id, "arcade_user_id": other_user_id}
+
+
+def seed_test_notifications():
+    user = db.get_user_by_email("demo@example.com")
+    assert user is not None
+    swarm_id = db.default_swarm_id(user["id"])
+    assert swarm_id is not None
+    for index in range(12):
+        db.add_swarm_notification(
+            swarm_id,
+            "master_rom_added",
+            "New ROM in master list",
+            f"Test ROM {index} joined the master list.",
+            {"asset": {"path": f"Test ROM {index}.zip"}},
+        )
+
+
 def test_health_check(client):
     """Test health check endpoint."""
     response = client.get("/health")
@@ -283,16 +348,16 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
     sent = []
     webhooks = []
 
-    def fake_send_email(to_email, subject, html_body, text_body, from_email=None):
+    def mock_send_email(to_email, subject, html_body, text_body, from_email=None):
         sent.append({"to": to_email, "subject": subject, "html": html_body, "text": text_body})
         return True
 
-    def fake_post_webhook(webhook_url, payload):
+    def mock_post_webhook(webhook_url, payload):
         webhooks.append({"url": webhook_url, "payload": payload})
         return True
 
-    monkeypatch.setattr(db_module.notification_delivery.emailer, "send_email", fake_send_email)
-    monkeypatch.setattr(db_module.notification_delivery, "post_webhook", fake_post_webhook)
+    monkeypatch.setattr(db_module.notification_delivery.emailer, "send_email", mock_send_email)
+    monkeypatch.setattr(db_module.notification_delivery, "post_webhook", mock_post_webhook)
     client.post("/api/auth/register", json={"email": "mailnotify@example.com", "username": "mailnotify-at-example.com", "password": "testpass123"})
     token = client.post("/api/auth/login", json={"email": "mailnotify@example.com", "username": "mailnotify-at-example.com", "password": "testpass123"}).json()["access_token"]
     user = db.get_user_by_email("mailnotify@example.com")
@@ -426,9 +491,9 @@ def test_notification_delivery_batches_multiple_asset_updates_in_one_email(clien
     assert sent == ["Batocera Overmind: 2 swarm updates"]
 
 
-def test_fake_data_populates_demo_notifications(client):
-    db.populate_fake_data()
-    db.populate_fake_notifications()
+def test_seeded_notifications_are_visible(client):
+    seed_test_fleet()
+    seed_test_notifications()
     token = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -437,8 +502,7 @@ def test_fake_data_populates_demo_notifications(client):
     response = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     payload = response.json()
-    fake_rows = [row for row in payload["notifications"] if str(row.get("event_type") or "").startswith("fake_")]
-    assert len(fake_rows) >= 10
+    assert len(payload["notifications"]) >= 10
     assert payload["unread_count"] > 0
 
 
@@ -539,7 +603,7 @@ def test_social_auth_callback_redirects_on_github_user_unauthorized(client, monk
     monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
     overmind_main.oauth_states["state-1"] = "github"
 
-    def fake_urlopen(request, timeout=10):
+    def mock_urlopen(request, timeout=10):
         if request.full_url == "https://github.com/login/oauth/access_token":
             return OAuthJsonResponse({"access_token": "bad-token"})
         raise urllib.error.HTTPError(
@@ -550,7 +614,7 @@ def test_social_auth_callback_redirects_on_github_user_unauthorized(client, monk
             fp=io.BytesIO(b'{"message":"Bad credentials"}'),
         )
 
-    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", mock_urlopen)
     response = client.get(
         "/api/auth/github/callback?code=code-1&state=state-1",
         follow_redirects=False,
@@ -566,7 +630,7 @@ def test_social_auth_callback_completes_github_with_private_primary_email(client
     monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
     overmind_main.oauth_states["state-2"] = "github"
 
-    def fake_urlopen(request, timeout=10):
+    def mock_urlopen(request, timeout=10):
         if request.full_url == "https://github.com/login/oauth/access_token":
             return OAuthJsonResponse({"access_token": "github-token"})
         if request.full_url == "https://api.github.com/user":
@@ -577,7 +641,7 @@ def test_social_auth_callback_completes_github_with_private_primary_email(client
             ])
         raise AssertionError(f"Unexpected OAuth URL {request.full_url}")
 
-    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", mock_urlopen)
     response = client.get(
         "/api/auth/github/callback?code=code-2&state=state-2",
         follow_redirects=False,
@@ -664,18 +728,16 @@ def test_email_registration_requires_verification(client, monkeypatch):
     assert client.post("/api/auth/login", json={"email": "verify@example.com", "username": "verify-at-example.com", "password": "testpass123"}).status_code == 200
 
 
-def test_fake_data_does_not_log_registration_verification_code(client, monkeypatch, capsys):
+def test_registration_verification_code_is_not_logged_with_runtime_flags(client, monkeypatch, capsys):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
-    monkeypatch.setenv("USE_FAKE_DATA", "true")
     response = client.post("/api/auth/register", json={"email": "fake-code@example.com", "username": "fake-code-at-example.com", "password": "testpass123"})
     assert response.status_code == 200
     captured = capsys.readouterr()
     assert "registration verification code for fake-code@example.com" not in captured.out
 
 
-def test_normal_mode_does_not_log_registration_verification_code(client, monkeypatch, capsys):
+def test_registration_verification_code_is_not_logged(client, monkeypatch, capsys):
     monkeypatch.delenv("OVERMIND_AUTO_VERIFY_REGISTRATION", raising=False)
-    monkeypatch.delenv("USE_FAKE_DATA", raising=False)
     response = client.post("/api/auth/register", json={"email": "real-code@example.com", "username": "real-code-at-example.com", "password": "testpass123"})
     assert response.status_code == 200
     captured = capsys.readouterr()
@@ -1257,6 +1319,9 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
 
     accept_response = client.post("/api/drone-connections/drone-123/accept", headers={"Authorization": f"Bearer {token}"})
     assert accept_response.status_code == 200
+    pending_response = client.get("/api/drone-connections", headers={"Authorization": f"Bearer {token}"})
+    assert pending_response.status_code == 200
+    assert pending_response.json()["connections"] == []
 
     claim_response = client.post(
         "/api/devices/register",
@@ -1798,7 +1863,7 @@ def test_list_devices_refreshes_persistent_state_before_read(client, monkeypatch
 
 def test_demo_seed_exposes_devices_and_systems(client):
     """Seeded demo user should have visible devices/systems data."""
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -1835,7 +1900,7 @@ def test_demo_seed_exposes_devices_and_systems(client):
 
 def test_demo_seed_exposes_pending_drone_connections(client):
     """Seeded demo user should see pending psionic Drone connection requests."""
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -1873,7 +1938,7 @@ def test_drone_heartbeat_updates_device_name(client):
 
 def test_delete_device_removes_device_and_related_data(client):
     """Device deletion removes the device, ROMs, and gameplay logs for that user."""
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -1963,7 +2028,7 @@ def test_metadata_inventory_endpoints_use_database_paging_when_assets_are_stored
     db.create_device(user["id"], "page-target", "Page Target", {"ip_address": "10.0.0.3"}, raw_token="target")
     calls = []
 
-    def fake_page_master_assets(device_ids, asset_type, **kwargs):
+    def mock_page_master_assets(device_ids, asset_type, **kwargs):
         calls.append((asset_type, kwargs))
         common = {"_device_internal_id": source_id, "_master_key": f"key:{asset_type}", "_present_on_selected": False}
         if asset_type == "rom":
@@ -1975,7 +2040,7 @@ def test_metadata_inventory_endpoints_use_database_paging_when_assets_are_stored
         return [row], 412
 
     monkeypatch.setattr(db, "_asset_store_enabled", lambda: True)
-    monkeypatch.setattr(db_module.postgres_store, "page_master_assets", fake_page_master_assets)
+    monkeypatch.setattr(db_module.postgres_store, "page_master_assets", mock_page_master_assets)
     headers = {"Authorization": f"Bearer {token}"}
     responses = [
         client.get("/api/devices/page-target/master-roms?page=3&per_page=17&q=paged", headers=headers),
@@ -2601,7 +2666,7 @@ def test_sync_system_queues_only_roms_from_resolvable_sources(client):
 
 
 def test_device_action_lifecycle(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -2832,7 +2897,7 @@ def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
 
 
 def test_action_claim_returns_all_pending_actions_in_order(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -2863,7 +2928,7 @@ def test_action_claim_returns_all_pending_actions_in_order(client):
 
 
 def test_shutdown_action_is_rejected_by_api(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     token = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -2879,7 +2944,7 @@ def test_shutdown_action_is_rejected_by_api(client):
 
 
 def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     token = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -2904,7 +2969,7 @@ def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
 
 
 def test_delete_actions_clears_device_queue(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     token = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -2925,7 +2990,7 @@ def test_delete_actions_clears_device_queue(client):
 
 
 def test_rebuild_asset_metadata_action_is_supported(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     token = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -3160,7 +3225,7 @@ def test_master_list_refreshes_devices_without_reapplying_route():
 
 
 def test_drone_alive_claims_data_action_and_stores_result(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -3215,7 +3280,7 @@ def test_drone_alive_claims_data_action_and_stores_result(client):
 
 
 def test_alive_stores_system_info_and_peer_detail_is_latest(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -3334,7 +3399,7 @@ def test_public_peer_poll_rejects_private_reported_addresses_without_connecting(
 
 
 def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -3535,7 +3600,7 @@ def test_overmind_manufactures_and_reuses_certificate(tmp_path, monkeypatch):
 
 
 def test_profile_and_settings_update(client):
-    db.populate_fake_data()
+    seed_test_fleet()
     login_response = client.post(
         "/api/auth/login",
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
@@ -3763,13 +3828,13 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
         assert table_name in sql
 
 
-def test_overmind_database_is_not_fake_data_gate():
+def test_overmind_database_requires_postgres_without_legacy_seed_gate():
     source = Path(__file__).resolve().parents[1].joinpath("src/overmind/db.py").read_text(encoding="utf-8")
     main_source = Path(__file__).resolve().parents[1].joinpath("src/overmind/main.py").read_text(encoding="utf-8")
 
     assert "class OvermindDatabase" in source
     assert "db = OvermindDatabase()" in source
-    assert 'os.getenv("USE_FAKE_DATA", "").lower() == "true"' in main_source
+    assert ("USE_" + "FAKE_DATA") not in main_source
 
 
 def test_drone_api_uses_explicit_contract_models():

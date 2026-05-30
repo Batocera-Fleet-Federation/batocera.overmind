@@ -19,12 +19,11 @@ from overmind.device_snapshots import (
 )
 
 class OvermindDatabase:
-    """Application repository backed by PostgreSQL when configured.
+    """Application repository backed by PostgreSQL as the source of truth.
 
-    The dictionaries are the in-process working set used by API handlers and
-    unit tests. When a database URL is configured, mutations are persisted into
-    normalized relational tables; fake/demo data is loaded only by main.py when
-    USE_FAKE_DATA=true.
+    The process may materialize rows briefly while serving a request, but public
+    repository operations refresh from PostgreSQL before they read or mutate
+    state so workers do not rely on process-local cached data.
     """
     _PERSISTED_FIELDS = (
         "users",
@@ -90,8 +89,6 @@ class OvermindDatabase:
         "add_rom_sync_activity",
         "store_download_state",
         "log_gameplay",
-        "populate_fake_data",
-        "populate_fake_notifications",
         "create_email_verification",
         "verify_email_code",
         "create_password_reset",
@@ -115,11 +112,28 @@ class OvermindDatabase:
 
     def __getattribute__(self, name):
         attr = object.__getattribute__(self, name)
-        if name in object.__getattribute__(self, "_PERSIST_AFTER_METHODS") and callable(attr):
+        if (
+            callable(attr)
+            and not name.startswith("_")
+            and name not in {"refresh_persistent_state"}
+        ):
             def persisted_method(*args, **kwargs):
-                result = attr(*args, **kwargs)
-                object.__getattribute__(self, "_persist_state")()
-                return result
+                depth = object.__getattribute__(self, "_operation_depth")
+                is_outermost = depth == 0
+                if is_outermost:
+                    object.__getattribute__(self, "_refresh_from_source_of_truth")()
+                    object.__setattr__(self, "_operation_dirty", False)
+                object.__setattr__(self, "_operation_depth", depth + 1)
+                try:
+                    result = attr(*args, **kwargs)
+                    if name in object.__getattribute__(self, "_PERSIST_AFTER_METHODS"):
+                        object.__setattr__(self, "_operation_dirty", True)
+                    return result
+                finally:
+                    object.__setattr__(self, "_operation_depth", depth)
+                    if is_outermost and object.__getattribute__(self, "_operation_dirty"):
+                        object.__getattribute__(self, "_persist_state")()
+                        object.__setattr__(self, "_operation_dirty", False)
             return persisted_method
         return attr
     
@@ -150,6 +164,8 @@ class OvermindDatabase:
         self.swarm_memberships: Dict[str, Dict[str, dict]] = {}
         self.invitations: Dict[str, dict] = {}
         self.notifications: Dict[str, list] = {}
+        self._operation_depth = 0
+        self._operation_dirty = False
         self._load_persistent_state()
 
     def _state_snapshot(self) -> dict:
@@ -170,6 +186,10 @@ class OvermindDatabase:
     def refresh_persistent_state(self) -> None:
         """Reload shared persisted state after runtime database config is available."""
         self._load_persistent_state()
+
+    def _refresh_from_source_of_truth(self) -> None:
+        if postgres_store.available():
+            self._load_persistent_state()
 
     def _persist_state(self) -> None:
         try:
@@ -2857,334 +2877,7 @@ class OvermindDatabase:
         all_logs = self.get_device_gamelogs(device_id)
         return [log for log in all_logs if log.get("system_name") == system_name]
     
-    def populate_fake_data(self):
-        """Populate database with sample data for testing."""
-        from overmind.auth import hash_password
-        
-        # Create sample users
-        user1_id = self.create_user(
-            "demo@example.com",
-            hash_password("DemoPass123"),
-            "Demo User",
-            verified=True,
-        )
-        user2_id = self.create_user(
-            "arcade@example.com",
-            hash_password("ArcadePass123"),
-            "Arcade Enthusiast",
-            verified=True,
-        )
-        
-        # Create sample devices for user1. A local demo Drone also uses this
-        # machine's MAC so a local batocera.drone instance lines up with it.
-        local_demo_device_id = ":".join(f"{(uuid.getnode() >> shift) & 0xff:02x}" for shift in range(40, -1, -8))
-        demo_drone_token = "demo-local-drone-token"
-        device1_id = self.create_device(
-            user1_id,
-            "arcade-cabinet-001",
-            "Living Room Cabinet",
-            {
-                "model": "Batocera DevBox",
-                "system": "Linux 6.6.0",
-                "architecture": "x86_64",
-                "cpu_model": "AMD Ryzen 7 7800X3D",
-                "cpu_cores": 8,
-                "cpu_threads": 16,
-                "cpu_max_frequency": "5.00 GHz",
-                "temperature": "42 C",
-                "memory_available": "28.5 GiB",
-                "memory_total": "32 GiB",
-                "display_resolution": "1920x1080",
-                "display_refresh_rate": "60 Hz",
-                "data_partition_available": "850 GiB",
-                "ip_address": "192.168.1.100",
-                "battery": "N/A",
-                "network": {"ipv4": ["127.0.0.1", "192.168.1.100"], "ipv6": ["::1"]},
-            },
-            raw_token=demo_drone_token,
-        )
-        if local_demo_device_id != "arcade-cabinet-001":
-            self.create_device(
-                user1_id,
-                local_demo_device_id,
-                "Local Demo Drone",
-                {
-                    "model": "Batocera DevBox",
-                    "system": "Linux 6.6.0",
-                    "architecture": "x86_64",
-                    "cpu_model": "AMD Ryzen 7 7800X3D",
-                    "cpu_cores": 8,
-                    "cpu_threads": 16,
-                    "cpu_max_frequency": "5.00 GHz",
-                    "temperature": "42 C",
-                    "memory_available": "28.5 GiB",
-                    "memory_total": "32 GiB",
-                    "display_resolution": "1920x1080",
-                    "display_refresh_rate": "60 Hz",
-                    "data_partition_available": "850 GiB",
-                    "ip_address": "192.168.1.100",
-                    "battery": "N/A",
-                    "network": {"ipv4": ["127.0.0.1", "192.168.1.100"], "ipv6": ["::1"]},
-                },
-                raw_token=demo_drone_token,
-            )
-        
-        device2_id = self.create_device(
-            user1_id,
-            "raspberry-pi-001",
-            "Bedroom Pi",
-            {
-                "model": "Raspberry Pi 4",
-                "system": "Linux 5.15.0",
-                "architecture": "armv7l",
-                "cpu_model": "ARM Cortex-A72",
-                "cpu_cores": 4,
-                "cpu_threads": 4,
-                "cpu_max_frequency": "1.5 GHz",
-                "temperature": "38 C",
-                "memory_available": "3.8 GiB",
-                "memory_total": "4 GiB",
-                "display_resolution": "1280x720",
-                "display_refresh_rate": "60 Hz",
-                "data_partition_available": "60 GiB",
-                "ip_address": "192.168.1.101",
-                "battery": "N/A"
-            },
-            raw_token=demo_drone_token,
-        )
-
-        for index, suffix in enumerate(("a", "b", "c", "d"), start=1):
-            self.create_device(
-                user1_id,
-                f"local-drone-{suffix}",
-                f"Local Drone {suffix.upper()}",
-                {
-                    "model": "Containerized Batocera-like Drone",
-                    "system": "Linux container",
-                    "architecture": "x86_64",
-                    "cpu_model": "Container CPU",
-                    "cpu_cores": 1,
-                    "cpu_threads": 1,
-                    "cpu_max_frequency": "shared",
-                    "memory_available": "384 MiB",
-                    "memory_total": "384 MiB",
-                    "display_resolution": "N/A",
-                    "display_refresh_rate": "N/A",
-                    "data_partition_available": "container volume",
-                    "ip_address": f"172.20.0.{10 + index}",
-                    "battery": "N/A",
-                    "network": {"ipv4": [f"172.20.0.{10 + index}"]},
-                },
-                raw_token=demo_drone_token,
-            )
-        
-        # Create sample device for user2
-        device3_id = self.create_device(
-            user2_id,
-            "arcade-cabinet-002",
-            "Game Room Arcade",
-            {
-                "model": "Custom PC Build",
-                "system": "Linux 6.1.0",
-                "architecture": "x86_64",
-                "cpu_model": "Intel Core i7-12700K",
-                "cpu_cores": 12,
-                "cpu_threads": 20,
-                "cpu_max_frequency": "4.90 GHz",
-                "temperature": "45 C",
-                "memory_available": "29.2 GiB",
-                "memory_total": "32 GiB",
-                "display_resolution": "3440x1440",
-                "display_refresh_rate": "144 Hz",
-                "data_partition_available": "2.0 TiB",
-                "ip_address": "192.168.1.102",
-                "battery": "N/A"
-            }
-        )
-        
-        def make_rom(system: str, name: str, n: int) -> dict:
-            return {
-                "rom_name": name,
-                "rom_md5": f"{n:032x}"[:32],
-                "file_path": f"/roms/{system}/{name}.zip",
-                "file_size": 262144 + (n % 8) * 65536,
-            }
-
-        catalog = {
-            "snes": [
-                "Super Mario World", "Chrono Trigger", "Final Fantasy VI", "Super Metroid",
-                "A Link to the Past", "Donkey Kong Country", "Mega Man X", "F-Zero",
-            ],
-            "nes": [
-                "Super Mario Bros", "Metroid", "Mega Man 2", "Castlevania",
-                "Contra", "Ninja Gaiden", "Punch-Out", "Kirbys Adventure",
-            ],
-            "genesis": [
-                "Sonic the Hedgehog", "Sonic 2", "Streets of Rage 2", "Gunstar Heroes",
-                "Shining Force", "Comix Zone", "Golden Axe", "Phantasy Star IV",
-            ],
-            "gba": [
-                "Metroid Fusion", "Pokemon Emerald", "Advance Wars", "Castlevania Aria of Sorrow",
-                "Golden Sun", "Mario Kart Super Circuit", "WarioWare Inc",
-            ],
-            "psx": [
-                "Final Fantasy VII", "Metal Gear Solid", "Tekken 3", "Crash Bandicoot 2",
-                "Castlevania Symphony", "Gran Turismo 2", "Resident Evil 2",
-            ],
-        }
-
-        n = 1000
-        for system, names in catalog.items():
-            rom_batch = [make_rom(system, name, n + i) for i, name in enumerate(names)]
-            self.add_roms("arcade-cabinet-001", system, rom_batch)
-            if local_demo_device_id != "arcade-cabinet-001":
-                self.add_roms(local_demo_device_id, system, rom_batch)
-            n += 50
-
-        for system, names in catalog.items():
-            trimmed = names[:5]
-            self.add_roms("raspberry-pi-001", system, [make_rom(system, name, n + i) for i, name in enumerate(trimmed)])
-            n += 50
-
-        for system, names in catalog.items():
-            rotated = names[2:8]
-            self.add_roms("arcade-cabinet-002", system, [make_rom(system, name, n + i) for i, name in enumerate(rotated)])
-            n += 50
-        
-        # Add sample game logs for device1
-        for demo_device_id in {"arcade-cabinet-001", local_demo_device_id}:
-            self.log_gameplay(demo_device_id, "snes", "Super Mario Bros", 1800)
-            self.log_gameplay(demo_device_id, "snes", "The Legend of Zelda", 3600)
-            self.log_gameplay(demo_device_id, "genesis", "Sonic the Hedgehog", 900)
-            self.log_gameplay(demo_device_id, "snes", "Super Metroid", 2700)
-        
-        # Add sample game logs for device2
-        self.log_gameplay("raspberry-pi-001", "nes", "Super Mario Bros", 1200)
-        self.log_gameplay("raspberry-pi-001", "nes", "Donkey Kong", 600)
-        
-        # Add sample game logs for device3
-        self.log_gameplay("arcade-cabinet-002", "snes", "Final Fantasy VI", 5400)
-        self.log_gameplay("arcade-cabinet-002", "snes", "Chrono Trigger", 4200)
-
-        # Add sample pending drone connection attempts for the demo Overlord.
-        self.create_pending_drone_connection(
-            "rogue-signal-001",
-            "Basement Recon Drone",
-            {
-                "model": "Mini PC N100",
-                "system": "Linux 6.8.0",
-                "architecture": "x86_64",
-                "cpu_model": "Intel N100",
-                "cpu_cores": 4,
-                "cpu_threads": 4,
-                "cpu_max_frequency": "3.40 GHz",
-                "temperature": "39 C",
-                "memory_available": "7.2 GiB",
-                "memory_total": "8 GiB",
-                "display_resolution": "1920x1080",
-                "display_refresh_rate": "60 Hz",
-                "data_partition_available": "420 GiB",
-                "ip_address": "192.168.1.118",
-                "battery": "N/A",
-            },
-            user1_id,
-        )
-        self.create_pending_drone_connection(
-            "rogue-signal-002",
-            "Workshop Handheld Drone",
-            {
-                "model": "Steam Deck OLED",
-                "system": "Linux 6.1.52",
-                "architecture": "x86_64",
-                "cpu_model": "AMD Custom APU 0405",
-                "cpu_cores": 4,
-                "cpu_threads": 8,
-                "cpu_max_frequency": "3.50 GHz",
-                "temperature": "44 C",
-                "memory_available": "11.8 GiB",
-                "memory_total": "16 GiB",
-                "display_resolution": "1280x800",
-                "display_refresh_rate": "90 Hz",
-                "data_partition_available": "730 GiB",
-                "ip_address": "192.168.1.119",
-                "battery": "82%",
-            },
-            user1_id,
-        )
-
-    def populate_fake_notifications(self) -> None:
-        """Add varied sample notifications for demo/fake-data sessions."""
-        import random
-
-        demo_user = self.get_user_by_email("demo@example.com")
-        if not demo_user:
-            return
-        swarm_id = self.default_swarm_id(demo_user["id"])
-        if not swarm_id:
-            return
-        existing = self.notifications.setdefault(swarm_id, [])
-        existing[:] = [row for row in existing if not str(row.get("event_type") or "").startswith("fake_")]
-
-        rng = random.Random()
-        devices = [
-            {"device_id": "arcade-cabinet-001", "device_name": "Living Room Cabinet"},
-            {"device_id": "raspberry-pi-001", "device_name": "Bedroom Pi"},
-            {"device_id": "local-drone-a", "device_name": "Local Drone A"},
-            {"device_id": "local-drone-b", "device_name": "Local Drone B"},
-        ]
-        roms = [
-            ("snes", "Chrono Trigger.zip"),
-            ("snes", "Super Metroid.zip"),
-            ("genesis", "Streets of Rage 2.zip"),
-            ("psx", "Metal Gear Solid.zip"),
-            ("gba", "Metroid Fusion.zip"),
-        ]
-        templates = [
-            ("fake_master_rom_added", "New ROM in master list", "{asset} joined the master list from {source}.", "rom"),
-            ("fake_master_bios_added", "New BIOS in master list", "{asset} joined the master list from {source}.", "bios"),
-            ("fake_master_artwork_added", "New artwork in master list", "{asset} artwork is available from {source}.", "artwork"),
-            ("fake_master_rom_removed", "ROM removed from master list", "{asset} disappeared from the master list after leaving {source}.", "rom"),
-            ("fake_drone_offline", "Drone offline", "{source} went offline.", "drone"),
-            ("fake_drone_online", "Drone online", "{source} came back online.", "drone"),
-            ("fake_drone_added", "Drone added to swarm", "{source} joined the swarm.", "drone"),
-            ("fake_sync_triggered", "System sync triggered", "Demo User triggered a {asset} sync from {source} to {target}.", "sync"),
-        ]
-        for index in range(16):
-            event_type, title, message_template, kind = rng.choice(templates)
-            source = rng.choice(devices)
-            target = rng.choice([device for device in devices if device["device_id"] != source["device_id"]] or devices)
-            system, rom = rng.choice(roms)
-            if kind == "bios":
-                asset = rng.choice(["dc/flash.bin", "ps3/firmware.pup", "saturn/mpr-17933.bin"])
-            elif kind == "artwork":
-                asset = f"{system}/{rom} ({rng.choice(['image', 'boxart', 'wheel'])})"
-            elif kind == "sync":
-                asset = rng.choice([system, "artwork", "BIOS", "ROM"])
-            elif kind == "drone":
-                asset = source["device_name"]
-            else:
-                asset = f"{system}/{rom}"
-            message = message_template.format(asset=asset, source=source["device_name"], target=target["device_name"])
-            created_at = datetime.utcnow() - timedelta(minutes=rng.randint(3, 2880))
-            notification = self.add_swarm_notification(
-                swarm_id,
-                event_type,
-                title,
-                message,
-                {
-                    "asset": {"system": system, "path": rom, "kind": kind},
-                    "devices": [source],
-                    "target": target,
-                    "fake_data": True,
-                },
-                actor_user_id=demo_user["id"] if event_type == "fake_sync_triggered" else None,
-            )
-            notification["created_at"] = created_at
-            if index > 9:
-                notification.setdefault("read_by", {})[demo_user["id"]] = created_at + timedelta(minutes=1)
 
 
 # Global database instance
-FakeDatabase = OvermindDatabase
-
 db = OvermindDatabase()

@@ -6,7 +6,14 @@ from datetime import datetime, timedelta
 from typing import Any
 
 
+def _refresh(data_store: Any) -> None:
+    refresh = getattr(data_store, "refresh_persistent_state", None)
+    if callable(refresh):
+        refresh()
+
+
 def admin_user_row(user: dict, *, data_store: Any, super_admin_email: str) -> dict:
+    _refresh(data_store)
     user_id = user.get("id")
     return {
         "id": user_id,
@@ -25,6 +32,7 @@ def admin_user_row(user: dict, *, data_store: Any, super_admin_email: str) -> di
 
 
 def admin_swarm_row(swarm: dict, *, data_store: Any) -> dict:
+    _refresh(data_store)
     owner = data_store.get_user(swarm.get("owner_id")) or {}
     swarm_id = swarm.get("id")
     return {
@@ -39,6 +47,7 @@ def admin_swarm_row(swarm: dict, *, data_store: Any) -> dict:
 
 
 def admin_drone_row(device: dict, *, data_store: Any) -> dict:
+    _refresh(data_store)
     owner = data_store.get_user(device.get("user_id")) or {}
     swarm = data_store.swarms.get(device.get("swarm_id")) or {}
     return {
@@ -77,6 +86,7 @@ def profile_response(user: dict) -> dict:
 
 def hive_response(user: dict, *, data_store: Any) -> dict:
     """Return a privacy-safe swarm directory for the Hive view."""
+    _refresh(data_store)
     user_swarms = {row["id"]: row for row in data_store.get_user_swarms(user["id"])}
     current_swarm_id = data_store.default_swarm_id(user["id"])
     rows = []
