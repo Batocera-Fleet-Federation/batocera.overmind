@@ -1452,6 +1452,18 @@ class OvermindDatabase:
         if not device:
             return False
         device["public_reachability"] = dict(result) if isinstance(result, dict) else {}
+        if device["public_reachability"].get("resolvable") and device["public_reachability"].get("api_port"):
+            try:
+                device["api_port"] = int(device["public_reachability"]["api_port"])
+                scheme = device.get("scheme") or "https"
+                public_ip = (device.get("network") or {}).get("public_ip") or device["public_reachability"].get("public_ip")
+                if public_ip:
+                    host = str(public_ip)
+                    if ":" in host and not host.startswith("["):
+                        host = f"[{host}]"
+                    device["reachable_url"] = f"{scheme}://{host}:{device['api_port']}"
+            except (TypeError, ValueError):
+                pass
         return True
 
     def get_swarm_for_device(self, device_id: str, offline_seconds: int = 90) -> List[dict]:

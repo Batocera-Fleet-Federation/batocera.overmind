@@ -974,6 +974,7 @@
                 align-items: center;
                 flex: 1 1 auto;
                 justify-content: flex-end;
+                min-width: 0;
             }
 
             .nav-actions .shared-swarm-nav {
@@ -1491,8 +1492,48 @@
             @media (max-width: 991.98px) {
                 .sidebar { min-height: auto; }
                 .sidebar .btn { width: 100%; }
+                .sidebar .menu-label { display: none !important; }
+                .sidebar .resource-links {
+                    display: inline-flex;
+                    gap: .45rem;
+                    flex: 0 0 auto;
+                    margin-right: .25rem;
+                }
+                .sidebar .resource-icon-link,
+                .sidebar .notification-button,
+                .sidebar .profile-chip {
+                    width: 2.35rem !important;
+                    min-width: 2.35rem;
+                    height: 2.35rem;
+                    justify-content: center;
+                }
+                .sidebar .notification-menu,
+                .sidebar .account-menu {
+                    flex: 0 0 auto;
+                }
+                .nav-actions {
+                    width: 100%;
+                    justify-content: flex-start;
+                    align-items: center;
+                    overflow: visible;
+                }
                 .device-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             }
             @media (max-width: 575.98px) {
                 .device-grid { grid-template-columns: 1fr; }
+                .sidebar {
+                    padding-left: .75rem !important;
+                    padding-right: .75rem !important;
+                }
+                .brand-block {
+                    width: 100%;
+                    min-width: 0;
+                }
+                .brand-title {
+                    white-space: normal;
+                    overflow-wrap: anywhere;
+                }
+                .nav-actions .nav-btn:not(.notification-button) {
+                    flex: 1 1 10rem;
+                }
             }

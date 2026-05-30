@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -89,6 +90,13 @@ SUPPORTED_DEVICE_ACTIONS = {
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
 PUBLIC_PEER_PROBE_INTERVAL_SECONDS = int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "60"))
 PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "3"))
+PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS", "0.2"))
+PUBLIC_PEER_PROBE_SCAN_ALL_PORTS = os.getenv("PUBLIC_PEER_PROBE_SCAN_ALL_PORTS", "true").strip().lower() not in {"0", "false", "no", "off"}
+PUBLIC_PEER_PROBE_SCAN_WORKERS = int(os.getenv("PUBLIC_PEER_PROBE_SCAN_WORKERS", "256"))
+PUBLIC_PEER_PROBE_FALLBACK_PORTS = os.getenv(
+    "PUBLIC_PEER_PROBE_FALLBACK_PORTS",
+    "443,8443,8444,9443,10443,18443,28443,38443,48443,58443",
+)
 NOTIFICATION_DELIVERY_INTERVAL_SECONDS = int(os.getenv("NOTIFICATION_DELIVERY_INTERVAL_SECONDS", "60"))
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
@@ -201,15 +209,75 @@ def probe_device_public_endpoint(device: dict) -> dict:
     if port < 1 or port > 65535:
         result["failure_reason"] = "Reported API port is invalid"
         return result
+    def candidate_ports() -> list[int]:
+        ports = []
+        seen = set()
+        for raw in [port] + [item.strip() for item in PUBLIC_PEER_PROBE_FALLBACK_PORTS.split(",") if item.strip()]:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= value <= 65535 and value not in seen:
+                seen.add(value)
+                ports.append(value)
+        if PUBLIC_PEER_PROBE_SCAN_ALL_PORTS:
+            ports.extend(candidate for candidate in range(1, 65536) if candidate not in seen)
+        return ports
+
+    failures = []
     started = time.monotonic()
-    try:
-        connection = socket.create_connection((str(address), port), timeout=max(0.1, PUBLIC_PEER_PROBE_TIMEOUT_SECONDS))
-        connection.close()
-    except OSError as error:
-        result["failure_reason"] = str(error) or error.__class__.__name__
+    timeout = max(0.05, min(PUBLIC_PEER_PROBE_TIMEOUT_SECONDS, PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS))
+
+    def try_port(candidate_port: int):
+        attempt_started = time.monotonic()
+        try:
+            connection = socket.create_connection((str(address), candidate_port), timeout=timeout)
+            connection.close()
+        except OSError as error:
+            return None, f"{candidate_port}: {str(error) or error.__class__.__name__}"
+        return {
+            "port": candidate_port,
+            "latency_ms": int((time.monotonic() - attempt_started) * 1000),
+        }, None
+
+    ports = candidate_ports()
+    priority_ports = ports[: len(set([port] + [int(item) for item in PUBLIC_PEER_PROBE_FALLBACK_PORTS.split(",") if item.strip().isdigit()]))]
+    for candidate_port in priority_ports:
+        found, failure = try_port(candidate_port)
+        if failure and len(failures) < 3:
+            failures.append(failure)
+        if not found:
+            continue
+        candidate_port = found["port"]
+        result["resolvable"] = True
+        result["api_port"] = candidate_port
+        result["discovered_port"] = candidate_port
+        result["latency_ms"] = found["latency_ms"]
+        result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
         return result
-    result["resolvable"] = True
-    result["latency_ms"] = int((time.monotonic() - started) * 1000)
+
+    scan_ports = ports[len(priority_ports):]
+    if scan_ports:
+        executor = ThreadPoolExecutor(max_workers=max(1, PUBLIC_PEER_PROBE_SCAN_WORKERS))
+        try:
+            futures = {executor.submit(try_port, candidate_port): candidate_port for candidate_port in scan_ports}
+            for future in as_completed(futures):
+                found, failure = future.result()
+                if failure and len(failures) < 3:
+                    failures.append(failure)
+                if not found:
+                    continue
+                result["resolvable"] = True
+                result["api_port"] = found["port"]
+                result["discovered_port"] = found["port"]
+                result["latency_ms"] = found["latency_ms"]
+                result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
+                executor.shutdown(wait=False, cancel_futures=True)
+                return result
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+    result["failure_reason"] = "; ".join(failures) if failures else "No reachable public Drone API port found"
+    result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
     return result
 
 

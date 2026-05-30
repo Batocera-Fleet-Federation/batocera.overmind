@@ -162,14 +162,14 @@
                                 <a href="/#/home" class="h5 mb-0 brand-title text-decoration-none">Batocera Overmind</a>
                                 __OVERMIND_VERSION_BADGE__
                             </div>
+                        </div>
+                        <div class="menu-label mb-2 d-lg-none">Navigation</div>
+                        <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
                             <span class="resource-links" aria-label="Project resources">
                                 <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind" target="_blank" rel="noopener noreferrer" class="resource-icon-link" title="GitHub" aria-label="GitHub"><i class="bi bi-github"></i></a>
                                 <a href="/docs" target="_blank" rel="noopener noreferrer" class="resource-icon-link" title="API Docs" aria-label="API Docs"><i class="bi bi-braces"></i></a>
                                 <a href="#/help" class="resource-icon-link requires-auth" title="Help" aria-label="Help" onclick="event.preventDefault(); setRoute('help')"><i class="bi bi-question-circle"></i></a>
                             </span>
-                        </div>
-                        <div class="menu-label mb-2 d-lg-none">Navigation</div>
-                        <div class="d-flex flex-wrap gap-1 nav-actions ms-lg-auto">
                             <a href="#" role="button" class="btn nav-btn shared-swarm-nav requires-auth" id="shared-swarm-nav-btn" data-tab="shared-swarm" style="display:none" onclick="event.preventDefault(); openSelectedSharedSwarm()"><i class="bi bi-share me-2"></i><span id="shared-swarm-nav-label">Shared Swarm</span></a>
                             <a href="#/devices" role="button" class="btn nav-btn active requires-auth" data-tab="devices" onclick="event.preventDefault(); goToMySwarm()"><i class="bi bi-hdd-network me-2"></i>My Swarm</a>
                             <div class="notification-menu requires-auth" id="notification-menu">

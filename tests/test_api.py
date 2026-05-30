@@ -3380,6 +3380,38 @@ def test_public_peer_poll_marks_public_endpoint_resolvable_for_swarm_transfer(cl
     assert calls and calls[0][0] == ("8.8.8.8", 8443)
 
 
+def test_public_peer_poll_discovers_forwarded_public_port(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(
+        owner["id"],
+        "forwarded-drone",
+        "Forwarded Drone",
+        {"network": {"public_ip": "8.8.4.4"}, "api_port": 8443, "scheme": "https"},
+        raw_token="drone-token",
+    )
+
+    class FakeConnection:
+        def close(self):
+            return None
+
+    def connect(address, timeout):
+        if address == ("8.8.4.4", 9443):
+            return FakeConnection()
+        raise OSError("closed")
+
+    monkeypatch.setattr(overmind_main, "PUBLIC_PEER_PROBE_FALLBACK_PORTS", "9443")
+    monkeypatch.setattr(overmind_main, "PUBLIC_PEER_PROBE_SCAN_ALL_PORTS", False)
+    monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
+    overmind_main.poll_public_drone_reachability_once()
+
+    device = db.get_device_by_device_id("forwarded-drone")
+    assert device["api_port"] == 9443
+    assert device["reachable_url"] == "https://8.8.4.4:9443"
+    swarm_peer = db.get_swarm_for_device("forwarded-drone")[0]
+    assert swarm_peer["public_reachable_url"] == "https://8.8.4.4:9443"
+
+
 def test_public_peer_poll_rejects_private_reported_addresses_without_connecting(client, monkeypatch):
     client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
     owner = db.get_user_by_email("owner@example.com")
