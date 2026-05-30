@@ -1137,6 +1137,7 @@ def test_download_state_and_cancel_rbac(client):
             "device_name": "Target A",
             "downloads": {
                 "target_drone_id": "target-a",
+                "downloads": [],
                 "active": [{
                     "job_id": "job-1",
                     "target_drone_id": "target-a",

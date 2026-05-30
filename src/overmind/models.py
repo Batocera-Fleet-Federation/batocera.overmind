@@ -242,6 +242,7 @@ class DroneDownloadsReport(StrictContractModel):
     active: list[DroneDownloadItem] = Field(default_factory=list)
     queued: list[DroneDownloadItem] = Field(default_factory=list)
     recent: list[DroneDownloadItem] = Field(default_factory=list)
+    downloads: list[DroneDownloadItem] = Field(default_factory=list)
 
 
 class DroneHeartbeatRequest(StrictContractModel):
