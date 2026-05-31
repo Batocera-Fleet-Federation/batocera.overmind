@@ -50,7 +50,7 @@ class PostgresMetadataStore:
         except Exception:
             return None
         try:
-            timeout = max(1, int(os.getenv("OVERMIND_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5")))
+            timeout = max(1, int(os.getenv("OVERMIND_POSTGRES_CONNECT_TIMEOUT_SECONDS", "3")))
             return psycopg.connect(self.url, connect_timeout=timeout)
         except Exception as error:
             self._ready = False

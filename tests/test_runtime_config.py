@@ -236,7 +236,7 @@ def test_lambda_handler_reports_startup_failure(monkeypatch):
     module = importlib.reload(module)
     monkeypatch.setattr(module, "initialize_runtime", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database missing")))
 
-    response = module.handler({"version": "2.0"}, object())
+    response = module.handler({"version": "2.0", "rawPath": "/api/devices"}, object())
 
     assert response["statusCode"] == 503
     assert json.loads(response["body"]) == {

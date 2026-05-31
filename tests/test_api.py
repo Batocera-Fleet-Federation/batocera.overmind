@@ -491,6 +491,67 @@ def test_notification_delivery_batches_multiple_asset_updates_in_one_email(clien
     assert sent == ["Batocera Overmind: 2 swarm updates"]
 
 
+def test_notification_delivery_limits_pending_notifications_per_run(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        db_module.notification_delivery.emailer,
+        "send_email",
+        lambda to_email, subject, html_body, text_body, from_email=None: sent.append(subject) or True,
+    )
+    client.post("/api/auth/register", json={"email": "digest-limit@example.com", "username": "digest-limit-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("digest-limit@example.com")
+    swarm_id = db.default_swarm_id(user["id"])
+    db.update_user_notification_settings(user["id"], {"notify_email": True, "types": {"sync_triggered": True}})
+
+    for index in range(3):
+        db.add_swarm_notification(
+            swarm_id,
+            "sync_triggered",
+            f"Sync {index}",
+            f"Sync event {index}",
+            {"sync_type": "ROM"},
+            actor_user_id=user["id"],
+        )
+
+    assert db_module.notification_delivery.deliver_pending_notifications(db, limit=2) == 1
+    pending = [row for row in db.notifications[swarm_id] if row.get("delivery_pending") is True]
+    completed = [row for row in db.notifications[swarm_id] if row.get("delivery_pending") is not True]
+
+    assert len(sent) == 1
+    assert len(completed) == 2
+    assert len(pending) == 1
+
+
+def test_device_status_notifications_limits_devices_per_run(client):
+    client.post("/api/auth/register", json={"email": "status-limit@example.com", "username": "status-limit-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("status-limit@example.com")
+    for index in range(3):
+        db.create_device(
+            owner["id"],
+            f"status-limit-{index}",
+            f"Status Limit {index}",
+            {"network": {"public_ip": f"8.8.8.{index + 1}"}, "api_port": 8443, "scheme": "https"},
+            raw_token=f"status-limit-token-{index}",
+        )
+        device = db.get_device_by_device_id(f"status-limit-{index}")
+        device["last_seen"] = datetime.utcnow() - timedelta(seconds=999)
+        device["last_known_status"] = "online"
+
+    db.update_device_status_notifications(offline_seconds=180, limit=1)
+
+    checked = [
+        device for device in db.devices.values()
+        if str(device.get("device_id", "")).startswith("status-limit-") and device.get("last_status_checked_at")
+    ]
+    offline = [
+        device for device in db.devices.values()
+        if str(device.get("device_id", "")).startswith("status-limit-") and device.get("last_known_status") == "offline"
+    ]
+
+    assert len(checked) == 1
+    assert len(offline) == 1
+
+
 def test_seeded_notifications_are_visible(client):
     seed_test_fleet()
     seed_test_notifications()

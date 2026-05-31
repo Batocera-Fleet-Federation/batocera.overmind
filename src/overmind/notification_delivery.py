@@ -102,15 +102,19 @@ def deliver_notification(data_store: Any, notification: dict, *, email_client: A
                 )
 
 
-def deliver_pending_notifications(data_store: Any, *, email_client: Any = emailer) -> int:
+def deliver_pending_notifications(data_store: Any, *, email_client: Any = emailer, limit: int = 0) -> int:
     """Deliver one digest per enabled user/channel for all queued events."""
     _refresh(data_store)
+    limit = max(0, int(limit or 0))
     pending = [
         (notification, data_store.swarms.get(swarm_id) or {})
         for swarm_id, notifications in list(data_store.notifications.items())
         for notification in notifications
         if notification.get("delivery_pending") is True
     ]
+    pending.sort(key=lambda item: str(item[0].get("created_at") or ""))
+    if limit:
+        pending = pending[:limit]
     if not pending:
         return 0
 

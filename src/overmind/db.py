@@ -1420,11 +1420,21 @@ class OvermindDatabase:
                 clean_info["last_system_info_update"] = datetime.utcnow()
                 device["system_info"] = clean_info
 
-    def update_device_status_notifications(self, offline_seconds: int) -> None:
+    def update_device_status_notifications(self, offline_seconds: int, limit: int = 0) -> None:
         cutoff = datetime.utcnow() - timedelta(seconds=max(1, int(offline_seconds)))
-        for device in self.devices.values():
+        devices = [
+            device for device in self.devices.values()
+            if device.get("approval_status", "approved") == "approved"
+        ]
+        devices.sort(key=lambda item: str(item.get("last_status_checked_at") or item.get("last_seen") or ""))
+        limit = max(0, int(limit or 0))
+        if limit:
+            devices = devices[:limit]
+        checked_at = datetime.utcnow()
+        for device in devices:
             if device.get("approval_status", "approved") != "approved":
                 continue
+            device["last_status_checked_at"] = checked_at
             last_seen = device.get("last_seen")
             if isinstance(last_seen, datetime) and isinstance(cutoff, datetime):
                 if last_seen.tzinfo is None and cutoff.tzinfo is not None:

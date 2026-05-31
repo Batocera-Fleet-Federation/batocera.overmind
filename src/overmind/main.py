@@ -95,10 +95,18 @@ PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_S
 PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS", "0.2"))
 PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN = max(0, int(os.getenv(
     "PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN",
-    "20" if _LAMBDA_RUNTIME_ENV else "0",
+    "3" if _LAMBDA_RUNTIME_ENV else "0",
 )))
 PUBLIC_PEER_PROBE_PORTS = (8443, 443, 8080, 5000)
 NOTIFICATION_DELIVERY_INTERVAL_SECONDS = int(os.getenv("NOTIFICATION_DELIVERY_INTERVAL_SECONDS", "180"))
+NOTIFICATION_DELIVERY_MAX_NOTIFICATIONS_PER_RUN = max(0, int(os.getenv(
+    "NOTIFICATION_DELIVERY_MAX_NOTIFICATIONS_PER_RUN",
+    "25" if _LAMBDA_RUNTIME_ENV else "0",
+)))
+DEVICE_STATUS_MAX_DEVICES_PER_RUN = max(0, int(os.getenv(
+    "DEVICE_STATUS_MAX_DEVICES_PER_RUN",
+    "50" if _LAMBDA_RUNTIME_ENV else "0",
+)))
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
@@ -410,12 +418,18 @@ def start_public_drone_reachability_poller() -> None:
 
 def poll_notification_delivery_once() -> int:
     """Deliver queued notification events in per-channel digests."""
-    return notification_delivery.deliver_pending_notifications(db)
+    return notification_delivery.deliver_pending_notifications(
+        db,
+        limit=NOTIFICATION_DELIVERY_MAX_NOTIFICATIONS_PER_RUN,
+    )
 
 
 def poll_device_status_notifications_once() -> None:
     """Detect offline/online Drone status transitions once."""
-    db.update_device_status_notifications(SWARM_OFFLINE_THRESHOLD_SECONDS)
+    db.update_device_status_notifications(
+        SWARM_OFFLINE_THRESHOLD_SECONDS,
+        limit=DEVICE_STATUS_MAX_DEVICES_PER_RUN,
+    )
 
 
 def run_scheduled_job(job_name: str) -> dict:
@@ -502,9 +516,9 @@ def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Opt
     if env_provider or environment in {"prod", "production"}:
         print(f"📧 Email provider: {emailer.provider()}")
 
-    postgres_store.ensure_schema()
     if not postgres_store.available():
-        raise RuntimeError("PostgreSQL is required and must be reachable before Overmind can start")
+        detail = f": {postgres_store.last_error}" if getattr(postgres_store, "last_error", None) else ""
+        raise RuntimeError(f"PostgreSQL is required and must be reachable before Overmind can start{detail}")
     db.refresh_persistent_state()
 
     if start_pollers:
