@@ -889,6 +889,7 @@ class PostgresMetadataStore:
             "swarm_memberships": {},
             "devices": {},
             "device_admin_claims": {},
+            "device_actions": {},
             "pending_drone_connections": {},
         }
         try:
@@ -1030,6 +1031,57 @@ class PostgresMetadataStore:
         cur.execute("SELECT drone_id, user_id FROM device_admin_claims")
         for drone_id, user_id in cur.fetchall():
             state["device_admin_claims"].setdefault(drone_id, []).append(user_id)
+
+        cur.execute(
+            """
+            SELECT a.id, a.drone_id, d.device_id, a.action, a.status, a.created_at, a.claimed_at, a.completed_at, a.message
+            FROM drone_actions a
+            JOIN drones d ON d.id = a.drone_id
+            WHERE d.removed_at IS NULL
+            ORDER BY a.created_at ASC
+            """
+        )
+        for action_id, drone_id, device_id, action_type, action_status, created_at, claimed_at, completed_at, message in cur.fetchall():
+            if not action_id or not drone_id:
+                continue
+            state["device_actions"].setdefault(drone_id, []).append({
+                "id": action_id,
+                "device_id": device_id,
+                "action": action_type,
+                "status": action_status or "pending",
+                "payload": {},
+                "created_at": created_at,
+                "claimed_at": claimed_at,
+                "completed_at": completed_at,
+                "message": message,
+                "result": None,
+                "result_received_at": None,
+            })
+
+        cur.execute(
+            """
+            SELECT p.action_id, p.parameter_name, p.parameter_value
+            FROM drone_action_parameters p
+            JOIN drone_actions a ON a.id = p.action_id
+            JOIN drones d ON d.id = a.drone_id
+            WHERE d.removed_at IS NULL
+            """
+        )
+        actions_by_id = {
+            action.get("id"): action
+            for rows in state["device_actions"].values()
+            for action in rows
+            if isinstance(action, dict)
+        }
+        for action_id, parameter_name, parameter_value in cur.fetchall():
+            action = actions_by_id.get(action_id)
+            if not action or not parameter_name:
+                continue
+            try:
+                value = _decode_state(json.loads(parameter_value)) if parameter_value is not None else None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                value = parameter_value
+            action.setdefault("payload", {})[str(parameter_name)] = value
 
         cur.execute("SELECT device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status FROM pending_drone_connections")
         for device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status in cur.fetchall():

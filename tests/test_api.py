@@ -4056,6 +4056,61 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
         assert table_name in sql
 
 
+def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
+    from overmind.postgres_store import PostgresMetadataStore
+
+    created_at = datetime(2026, 5, 31, 4, 30, tzinfo=timezone.utc)
+
+    class RecordingCursor:
+        def __init__(self):
+            self.sql = ""
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            if "FROM users u" in self.sql:
+                return [(
+                    "u1", "owner@example.com", "hash", True, True, "password", created_at,
+                    "owner", None, None,
+                    True,
+                    False, False, True, "", "", "owner@example.com",
+                )]
+            if "FROM user_notification_type_settings" in self.sql:
+                return []
+            if "FROM swarms" in self.sql:
+                return [("s1", "u1", "Main", created_at)]
+            if "FROM swarm_memberships" in self.sql:
+                return [("s1", "u1", "overlord", created_at)]
+            if "FROM integration_tokens" in self.sql:
+                return []
+            if "FROM drones d" in self.sql and "LEFT JOIN drone_network_state" in self.sql:
+                return [(
+                    "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
+                    None, "token-hash", created_at, created_at,
+                    8443, "https", "https://drone-a:8443", False, None, None,
+                    None, None, None, None, None, None, None,
+                    None, None, None, None, None,
+                )]
+            if "FROM device_admin_claims" in self.sql:
+                return []
+            if "FROM drone_action_parameters" in self.sql:
+                return [("action-1", "options", json.dumps(_encode_state({"force": True})))]
+            if "FROM drone_actions a" in self.sql:
+                return [("action-1", "d1", "drone-a", "restart", "pending", created_at, None, None, None)]
+            if "FROM pending_drone_connections" in self.sql:
+                return []
+            return []
+
+    state = PostgresMetadataStore()._load_relational_state(RecordingCursor())
+
+    action = state["device_actions"]["d1"][0]
+    assert action["device_id"] == "drone-a"
+    assert action["action"] == "restart"
+    assert action["status"] == "pending"
+    assert action["payload"] == {"options": {"force": True}}
+
+
 def test_overmind_database_requires_postgres_without_legacy_seed_gate():
     source = Path(__file__).resolve().parents[1].joinpath("src/overmind/db.py").read_text(encoding="utf-8")
     main_source = Path(__file__).resolve().parents[1].joinpath("src/overmind/main.py").read_text(encoding="utf-8")
