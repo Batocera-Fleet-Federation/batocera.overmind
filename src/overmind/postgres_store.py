@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from datetime import datetime
 from typing import Iterable, Optional
+
+logger = logging.getLogger("overmind.postgres_store")
 
 
 def database_url() -> Optional[str]:
@@ -29,6 +32,7 @@ class PostgresMetadataStore:
     def __init__(self) -> None:
         self.url = database_url()
         self._ready = False
+        self.last_error: Optional[str] = None
 
     def refresh_from_environment(self) -> None:
         """Refresh the connection URL after runtime secrets are applied."""
@@ -36,6 +40,7 @@ class PostgresMetadataStore:
         if updated != self.url:
             self.url = updated
             self._ready = False
+            self.last_error = None
 
     def _connect(self):
         if not self.url:
@@ -44,7 +49,14 @@ class PostgresMetadataStore:
             import psycopg
         except Exception:
             return None
-        return psycopg.connect(self.url)
+        try:
+            timeout = max(1, int(os.getenv("OVERMIND_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5")))
+            return psycopg.connect(self.url, connect_timeout=timeout)
+        except Exception as error:
+            self._ready = False
+            self.last_error = f"{error.__class__.__name__}: {error}"
+            logger.warning("PostgreSQL connection failed: %s", self.last_error)
+            return None
 
     def available(self) -> bool:
         if not self.url:
@@ -155,6 +167,7 @@ class PostgresMetadataStore:
                 )
                 self._ensure_relational_schema(cur)
         self._ready = True
+        self.last_error = None
 
     def _drop_existing_schema(self, cur) -> None:
         """Drop all known Overmind tables for an intentional no-migration rebuild."""

@@ -1,8 +1,10 @@
 """Focused tests for runtime config, email sender formatting, and UI session hooks."""
 
 import json
+import importlib
 import os
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -184,6 +186,64 @@ def test_runtime_config_can_override_postgres_host_for_lambda(monkeypatch):
     overmind_main.apply_runtime_config_side_effects({})
 
     assert os.environ["OVERMIND_POSTGRES_HOST"] == "rds-proxy.example.internal"
+
+
+def test_postgres_connect_uses_bounded_timeout(monkeypatch):
+    calls = {}
+
+    def connect(url, **kwargs):
+        calls["url"] = url
+        calls["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=connect))
+    monkeypatch.setenv("OVERMIND_DATABASE_URL", "postgresql://overmind:secret@db.internal:5432/overmind")
+    monkeypatch.setenv("OVERMIND_POSTGRES_CONNECT_TIMEOUT_SECONDS", "2")
+
+    store = PostgresMetadataStore()
+
+    assert store._connect() is not None
+    assert calls == {
+        "url": "postgresql://overmind:secret@db.internal:5432/overmind",
+        "kwargs": {"connect_timeout": 2},
+    }
+
+
+def test_postgres_connect_failure_marks_store_unavailable(monkeypatch):
+    def connect(url, **kwargs):
+        raise TimeoutError("network path unavailable")
+
+    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=connect))
+    monkeypatch.setenv("OVERMIND_DATABASE_URL", "postgresql://overmind:secret@db.internal:5432/overmind")
+
+    store = PostgresMetadataStore()
+
+    assert store._connect() is None
+    assert store.available() is False
+    assert "TimeoutError" in str(store.last_error)
+
+
+def test_lambda_handler_reports_startup_failure(monkeypatch):
+    class FakeMangum:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+        def __call__(self, event, context):
+            return {"statusCode": 200, "body": "ok"}
+
+    monkeypatch.setitem(sys.modules, "mangum", types.SimpleNamespace(Mangum=FakeMangum))
+    module = importlib.import_module("overmind.lambda_handler")
+    module = importlib.reload(module)
+    monkeypatch.setattr(module, "initialize_runtime", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database missing")))
+
+    response = module.handler({"version": "2.0"}, object())
+
+    assert response["statusCode"] == 503
+    assert json.loads(response["body"]) == {
+        "message": "Overmind startup failed",
+        "error_type": "RuntimeError",
+        "detail": "database missing",
+    }
 
 
 def test_empty_secret_fallback_keeps_existing_env(monkeypatch):
