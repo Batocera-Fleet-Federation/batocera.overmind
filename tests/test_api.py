@@ -3716,6 +3716,24 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
     assert roms_response.json()["systems"].get("snes", []) == []
 
 
+def test_heartbeat_survives_noncritical_state_update_failure(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "heartbeat-resilient@example.com", "username": "heartbeat-resilient-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("heartbeat-resilient@example.com")
+    db.create_device(user["id"], "resilient-drone", "Resilient Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+
+    def fail_update(*args, **kwargs):
+        raise RuntimeError("simulated heartbeat side-effect failure")
+
+    monkeypatch.setattr(db, "update_device_last_seen", fail_update)
+    response = client.post(
+        "/api/devices/resilient-drone/heartbeat",
+        headers={"Authorization": "Bearer drone-token"},
+        json={"device_name": "Resilient Drone"},
+    )
+    assert response.status_code == 200
+    assert set(response.json()) == {"actions", "swarm", "log_sources_initialized"}
+
+
 def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):
     client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
     owner_token = client.post("/api/auth/login", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"}).json()["access_token"]

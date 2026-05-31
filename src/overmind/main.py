@@ -182,12 +182,27 @@ class StreamLogCapture:
         }
 
 
+class CapturedLoggingHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        if _STREAM_LOG_CAPTURE is None:
+            return
+        try:
+            message = self.format(record)
+            _STREAM_LOG_CAPTURE.stderr.write(message + "\n")
+        except Exception:
+            pass
+
+
 def install_stream_log_capture() -> None:
     global _STREAM_LOG_CAPTURE
     if _STREAM_LOG_CAPTURE is not None:
         return
     _STREAM_LOG_CAPTURE = StreamLogCapture(OVERMIND_LOG_CAPTURE_LINES)
     _STREAM_LOG_CAPTURE.install()
+    handler = CapturedLoggingHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logging.getLogger().addHandler(handler)
 
 
 def stream_log_snapshot() -> dict:
@@ -198,6 +213,19 @@ def stream_log_snapshot() -> dict:
         "captured_at": datetime.utcnow().isoformat() + "Z",
         "capture_active": False,
     }
+
+
+def mark_device_seen_fast(device: dict) -> None:
+    """Record liveness before heavier heartbeat work runs."""
+    if not isinstance(device, dict):
+        return
+    device["last_seen"] = datetime.utcnow()
+    if device.get("last_known_status") in {None, "", "offline"}:
+        device["last_known_status"] = "online"
+    try:
+        postgres_store.touch_device_last_seen(str(device.get("id") or ""))
+    except Exception:
+        logger.exception("Fast last_seen update failed device_id=%s", device.get("device_id"))
 
 
 send_verification_email = partial(
@@ -509,6 +537,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled request error method=%s path=%s", request.method, request.url.path)
+    return Response(content='{"message":"Internal Server Error"}', media_type="application/json", status_code=500)
 
 # Mount the content directory for static assets like main.jpeg
 if CONTENT_DIR.exists():
@@ -1739,29 +1773,51 @@ async def claim_device_action(device_id: str, payload: dict, authorization: Opti
 async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, authorization: Optional[str] = Header(default=None)):
     """Update drone last-seen and return the next pending action, if any."""
     device = get_current_drone(device_id, authorization)
+    mark_device_seen_fast(device)
     heartbeat = payload.model_dump(exclude_none=True)
-    db.update_device_last_seen(
-        device["id"],
-        network=heartbeat.get("network") if isinstance(heartbeat.get("network"), dict) else None,
-        rom_systems=None,
-        api_port=heartbeat.get("api_port") if heartbeat.get("api_port") is not None else None,
-        scheme=str(heartbeat.get("scheme") or heartbeat.get("protocol") or "").strip() or None,
-        reachable_url=str(heartbeat.get("reachable_url") or "").strip() or None,
-        certificate=heartbeat.get("certificate") if isinstance(heartbeat.get("certificate"), dict) else None,
-        system_info=heartbeat.get("system_info") if isinstance(heartbeat.get("system_info"), dict) else None,
-    )
+    try:
+        db.update_device_last_seen(
+            device["id"],
+            network=heartbeat.get("network") if isinstance(heartbeat.get("network"), dict) else None,
+            rom_systems=None,
+            api_port=heartbeat.get("api_port") if heartbeat.get("api_port") is not None else None,
+            scheme=str(heartbeat.get("scheme") or heartbeat.get("protocol") or "").strip() or None,
+            reachable_url=str(heartbeat.get("reachable_url") or "").strip() or None,
+            certificate=heartbeat.get("certificate") if isinstance(heartbeat.get("certificate"), dict) else None,
+            system_info=heartbeat.get("system_info") if isinstance(heartbeat.get("system_info"), dict) else None,
+        )
+    except Exception:
+        logger.exception("Heartbeat state update failed device_id=%s", device_id)
     drone_name = str(heartbeat.get("device_name") or "").strip()
     if drone_name:
-        db.update_device_name(device_id, drone_name)
+        try:
+            db.update_device_name(device_id, drone_name)
+        except Exception:
+            logger.exception("Heartbeat device name update failed device_id=%s", device_id)
     if isinstance(heartbeat.get("rom_metadata"), dict):
         print(f"Heartbeat ROM metadata ignored for {device_id}: use /api/devices/{device_id}/rom-metadata")
     if isinstance(heartbeat.get("rom_systems"), list) and heartbeat.get("rom_systems"):
         print(f"Heartbeat ROM systems ignored for {device_id}: use /api/devices/{device_id}/rom-metadata")
     if isinstance(heartbeat.get("downloads"), dict):
-        db.store_download_state(device_id, heartbeat["downloads"])
-    actions = db.claim_pending_device_actions(device_id)
-    updated = db.get_device(device["id"])
-    swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
+        try:
+            db.store_download_state(device_id, heartbeat["downloads"])
+        except Exception:
+            logger.exception("Heartbeat download state update failed device_id=%s", device_id)
+    try:
+        actions = db.claim_pending_device_actions(device_id)
+    except Exception:
+        logger.exception("Heartbeat action claim failed device_id=%s", device_id)
+        actions = []
+    try:
+        updated = db.get_device(device["id"]) or device
+    except Exception:
+        logger.exception("Heartbeat device reload failed device_id=%s", device_id)
+        updated = device
+    try:
+        swarm = db.get_swarm_for_device(device_id, offline_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
+    except Exception:
+        logger.exception("Heartbeat swarm response failed device_id=%s", device_id)
+        swarm = []
     log_sources = updated.get("log_sources") if isinstance(updated.get("log_sources"), dict) else {}
     return {
         "actions": actions,

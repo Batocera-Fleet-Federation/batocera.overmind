@@ -57,6 +57,16 @@ class PostgresMetadataStore:
             return None
         return self._connect()
 
+    def touch_device_last_seen(self, internal_id: str) -> bool:
+        """Update a Drone's liveness timestamp with a minimal write path."""
+        conn = self._core_connection()
+        if conn is None or not internal_id:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE drones SET last_seen = now() WHERE id = %s", (internal_id,))
+                return cur.rowcount > 0
+
     def ensure_schema(self) -> None:
         if self._ready or not self.url:
             return
