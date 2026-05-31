@@ -2233,6 +2233,45 @@ def test_rom_metadata_upload_persists_bios_and_master_bios(client):
     assert row["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
 
 
+def test_rom_metadata_upload_marks_offline_drone_online(client):
+    client.post("/api/auth/register", json={"email": "assetseen@example.com", "username": "assetseen-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "assetseen@example.com", "username": "assetseen-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("assetseen@example.com")
+    device_id = db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    device = db.devices[device_id]
+    db.devices[device["id"]]["last_seen"] = datetime.utcnow() - timedelta(seconds=999)
+    db.devices[device["id"]]["last_known_status"] = "offline"
+
+    before = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+    assert before.status_code == 200
+    assert before.json()["devices"][0]["status"] == "offline"
+
+    response = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_chunk",
+            "chunk_index": 0,
+            "chunk_total": 1,
+            "inventory_complete": True,
+            "systems": [{"name": "snes", "rom_count": 1}],
+            "roms": [{"system": "snes", "rom_name": "Game", "file_path": "Game.zip", "file_size": 3}],
+            "bios": [],
+            "artwork": [],
+        },
+    )
+    assert response.status_code == 200
+
+    after = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+    assert after.status_code == 200
+    assert after.json()["devices"][0]["status"] == "online"
+
+
 def test_rom_metadata_hash_patch_enriches_existing_inventory_without_replacing_roms(client):
     client.post("/api/auth/register", json={"email": "hashes@example.com", "username": "hashes-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("hashes@example.com")

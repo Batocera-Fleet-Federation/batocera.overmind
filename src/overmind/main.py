@@ -1679,7 +1679,8 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
 @app.post("/api/devices/{device_id}/rom-metadata")
 async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataUpload, authorization: Optional[str] = Header(default=None)):
     """Receive full asset metadata snapshots from a Drone outside heartbeat."""
-    get_current_drone(device_id, authorization)
+    device = get_current_drone(device_id, authorization)
+    db.update_device_last_seen(device["id"])
     metadata = payload.model_dump(exclude_none=True)
     payload_device_id = str(metadata.get("device_id") or device_id)
     if payload_device_id != device_id:
@@ -1689,6 +1690,7 @@ async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataU
     bios = metadata.get("bios") if isinstance(metadata.get("bios"), list) else []
     artwork = metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else []
     db.store_rom_metadata(device_id, metadata)
+    db.update_device_last_seen(device["id"])
     print(f"Asset metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)} artwork_count={len(artwork)}")
     return {"rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork)}
 
