@@ -63,6 +63,7 @@
             let currentDeviceView = 'systems';
             let routeSwarmId = null;
             let currentDeviceSystems = {};
+            let currentSystemRomPages = {};
             let deviceRomSearchQuery = '';
             let masterRomPage = 1;
             let biosSearchQuery = '';
@@ -1992,6 +1993,7 @@
                 selectedDeviceId = deviceId;
                 currentDeviceView = 'systems';
                 currentDeviceSystems = {};
+                currentSystemRomPages = {};
                 systemPageState = {};
                 deviceRomSearchQuery = '';
                 displayDevices();
@@ -2309,10 +2311,15 @@
                     return;
                 }
                 try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/roms`);
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/systems`);
                     if (!response.ok) throw new Error('Failed to load device systems');
                     const data = await response.json();
-                    currentDeviceSystems = data.systems || {};
+                    currentSystemRomPages = {};
+                    currentDeviceSystems = (data.systems || []).reduce((systems, row) => {
+                        const name = row.system_name || row.name || '';
+                        if (name) systems[name] = row;
+                        return systems;
+                    }, {});
                     displaySystemsTree();
                 } catch (error) {
                     console.error('Error loading systems:', error);
@@ -2339,7 +2346,7 @@
 
             function setSystemPage(systemName, page) {
                 systemPageState[systemName] = Math.max(1, page);
-                displaySystemsTree();
+                loadSystemRomPage(systemName);
             }
 
             function handleDeviceRomFilterChange() {
@@ -2397,14 +2404,78 @@
 
             function filteredSystemEntries() {
                 const query = deviceRomSearchQuery;
-                return Object.entries(currentDeviceSystems).reduce((entries, [systemName, roms]) => {
+                return Object.entries(currentDeviceSystems).reduce((entries, [systemName, summary]) => {
                     const systemMatches = systemName.toLowerCase().includes(query);
-                    const filteredRoms = !query || systemMatches
-                        ? roms
-                        : roms.filter(rom => String(rom.rom_name || '').toLowerCase().includes(query));
-                    if (!query || systemMatches || filteredRoms.length) entries.push([systemName, filteredRoms]);
+                    if (!query || systemMatches) entries.push([systemName, summary]);
                     return entries;
                 }, []);
+            }
+
+            async function loadSystemRomPage(systemName) {
+                if (!selectedDeviceId || !systemName) return;
+                const page = Math.max(1, systemPageState[systemName] || 1);
+                const key = `${systemName}::${page}`;
+                currentSystemRomPages[key] = { loading: true };
+                renderSystemRomPage(systemName);
+                try {
+                    const params = new URLSearchParams();
+                    params.set('system_name', systemName);
+                    params.set('page', String(page));
+                    params.set('per_page', String(ROMS_PER_PAGE));
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/roms?${params.toString()}`);
+                    if (!response.ok) throw new Error('Failed to load system ROMs');
+                    currentSystemRomPages[key] = await response.json();
+                } catch (error) {
+                    console.error('Error loading system ROMs:', error);
+                    currentSystemRomPages[key] = { error: true, roms: [], total: 0, page, per_page: ROMS_PER_PAGE };
+                }
+                renderSystemRomPage(systemName);
+            }
+
+            function renderSystemRomPage(systemName) {
+                const target = document.getElementById(`system-rom-page-${cssSafeId(systemName)}`);
+                if (!target) return;
+                const page = Math.max(1, systemPageState[systemName] || 1);
+                const key = `${systemName}::${page}`;
+                const payload = currentSystemRomPages[key];
+                const summary = currentDeviceSystems[systemName] || {};
+                if (!payload || payload.loading) {
+                    target.innerHTML = '<div class="small text-muted ms-3 mt-2">Loading ROMs...</div>';
+                    return;
+                }
+                if (payload.error) {
+                    target.innerHTML = '<div class="small text-danger ms-3 mt-2">Unable to load ROMs.</div>';
+                    return;
+                }
+                const roms = payload.roms || [];
+                const total = Number(payload.total || summary.rom_count || roms.length);
+                const perPage = Number(payload.per_page || ROMS_PER_PAGE);
+                const pageCount = Math.max(1, Math.ceil(total / perPage));
+                const start = (page - 1) * perPage;
+                target.innerHTML = `
+                    <ul class="list-unstyled ms-3 mt-2">
+                        ${roms.map(rom => {
+                            const path = rom.file_path || rom.relative_path || rom.rom_name || '';
+                            const size = rom.file_size ? ` ${(rom.file_size / 1024 / 1024).toFixed(2)} MB` : '';
+                            return `<li class="py-1 border-bottom small">
+                                <div>${escapeHtml(rom.rom_name || path)}</div>
+                                <div class="text-muted">${escapeHtml(path)}${size ? ` <span>(${size.trim()})</span>` : ''}${rom.rom_md5 ? ` <span class="mono">md5: ${escapeHtml(rom.rom_md5)}</span>` : ''}</div>
+                            </li>`;
+                        }).join('') || '<li class="small text-muted py-1">No ROMs reported for this system.</li>'}
+                    </ul>
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 ms-3 mt-2 small text-muted">
+                        <span>Showing ${total ? start + 1 : 0}-${Math.min(start + perPage, total)} of ${total}</span>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="${escapeHtml(systemName)} pages">
+                            <button class="btn btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setSystemPage(${JSON.stringify(systemName)}, ${page - 1})">Previous</button>
+                            <button class="btn btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
+                            <button class="btn btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setSystemPage(${JSON.stringify(systemName)}, ${page + 1})">Next</button>
+                        </div>
+                    </div>
+                `;
+            }
+
+            function cssSafeId(value) {
+                return btoa(unescape(encodeURIComponent(String(value)))).replace(/=+$/g, '').replace(/[^a-zA-Z0-9_-]/g, '_');
             }
 
             function displaySystemsTree() {
@@ -2419,33 +2490,13 @@
                 entries.sort((a, b) => a[0].localeCompare(b[0]));
                 container.innerHTML = `
                     <div class="tree-view">
-                        ${entries.map(([systemName, roms]) => {
-                            const totalBytes = roms.reduce((sum, rom) => sum + Number(rom.file_size || 0), 0);
-                            const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
-                            const totalPages = Math.max(1, Math.ceil(roms.length / ROMS_PER_PAGE));
-                            const currentPage = Math.min(systemPageState[systemName] || 1, totalPages);
-                            const start = (currentPage - 1) * ROMS_PER_PAGE;
-                            const pageRoms = roms.slice(start, start + ROMS_PER_PAGE);
+                        ${entries.map(([systemName, summary]) => {
+                            const count = Number(summary.rom_count || 0);
                             return `
-                                <details>
-                                    <summary>${systemName} (${roms.length} ROMs, ${totalMb} MB)</summary>
-                                    <ul class="list-unstyled ms-3 mt-2">
-                                        ${pageRoms.map(rom => {
-                                            const path = rom.file_path || rom.relative_path || rom.rom_name || '';
-                                            const size = rom.file_size ? ` ${(rom.file_size / 1024 / 1024).toFixed(2)} MB` : '';
-                                            return `<li class="py-1 border-bottom small">
-                                                <div>${escapeHtml(rom.rom_name || path)}</div>
-                                                <div class="text-muted">${escapeHtml(path)}${size ? ` <span>(${size.trim()})</span>` : ''}${rom.rom_md5 ? ` <span class="mono">md5: ${escapeHtml(rom.rom_md5)}</span>` : ''}</div>
-                                            </li>`;
-                                        }).join('')}
-                                    </ul>
-                                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 ms-3 mt-2 small text-muted">
-                                        <span>Showing ${roms.length ? start + 1 : 0}-${Math.min(start + ROMS_PER_PAGE, roms.length)} of ${roms.length}</span>
-                                        <div class="btn-group btn-group-sm" role="group" aria-label="${systemName} pages">
-                                            <button class="btn btn-outline-secondary" ${currentPage <= 1 ? 'disabled' : ''} onclick="setSystemPage('${systemName.replace(/'/g, "\\'")}', ${currentPage - 1})">Previous</button>
-                                            <button class="btn btn-outline-secondary" disabled>Page ${currentPage} of ${totalPages}</button>
-                                            <button class="btn btn-outline-secondary" ${currentPage >= totalPages ? 'disabled' : ''} onclick="setSystemPage('${systemName.replace(/'/g, "\\'")}', ${currentPage + 1})">Next</button>
-                                        </div>
+                                <details ontoggle="if (this.open) loadSystemRomPage(${JSON.stringify(systemName)})">
+                                    <summary>${escapeHtml(systemName)} (${count} ROMs)</summary>
+                                    <div id="system-rom-page-${cssSafeId(systemName)}" class="system-rom-page">
+                                        <div class="small text-muted ms-3 mt-2">Open to load ROMs.</div>
                                     </div>
                                 </details>
                             `;

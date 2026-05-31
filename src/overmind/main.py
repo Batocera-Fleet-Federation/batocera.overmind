@@ -2014,6 +2014,8 @@ async def update_device_roms(
 async def get_device_roms(
     device_id: str,
     system_name: Optional[str] = None,
+    page: Optional[int] = None,
+    per_page: int = 100,
     authorization: Optional[str] = Header(default=None),
 ):
     """Get ROMs for a device."""
@@ -2025,6 +2027,10 @@ async def get_device_roms(
             detail="Device not found"
         )
     
+    if page is not None:
+        result = db.get_device_roms_page(device_id, system_name=system_name, page=page, per_page=per_page)
+        return {"roms": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
+
     if system_name:
         roms = db.get_device_roms_by_system(device_id, system_name)
     else:

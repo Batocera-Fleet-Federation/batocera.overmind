@@ -2043,6 +2043,34 @@ def test_demo_seed_exposes_devices_and_systems(client):
         assert len(rom_list) >= 5
 
 
+def test_device_roms_support_server_side_pagination(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    response = client.get(
+        "/api/devices/arcade-cabinet-001/roms?system_name=snes&page=1&per_page=2",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 5
+    assert payload["page"] == 1
+    assert payload["per_page"] == 2
+    assert len(payload["roms"]) == 2
+
+
+def test_device_systems_ui_loads_roms_by_page():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    assert "apiGet(`/api/devices/${selectedDeviceId}/systems`)" in js
+    assert "params.set('page', String(page));" in js
+    assert "params.set('per_page', String(ROMS_PER_PAGE));" in js
+    assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${params.toString()}`)" in js
+
+
 def test_demo_seed_exposes_pending_drone_connections(client):
     """Seeded demo user should see pending psionic Drone connection requests."""
     seed_test_fleet()

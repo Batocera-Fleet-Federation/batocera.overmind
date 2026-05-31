@@ -3406,6 +3406,49 @@ class PostgresMetadataStore:
                 rows = cur.fetchall()
         return [_decode_state(row[0]) for row in rows]
 
+    def page_device_assets(
+        self,
+        device_internal_id: str,
+        asset_type: str,
+        *,
+        system_name: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> tuple[list[dict], int]:
+        if not self.assets_enabled():
+            return [], 0
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return [], 0
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 500))
+        offset = (page - 1) * per_page
+        where = ["device_internal_id = %s", "asset_type = %s"]
+        params: list[object] = [device_internal_id, asset_type]
+        if system_name:
+            where.append("lower(coalesce(system_name, '')) = lower(%s)")
+            params.append(system_name)
+        where_sql = " AND ".join(where)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT count(*) FROM overmind_device_assets WHERE {where_sql}", params)
+                total = int((cur.fetchone() or [0])[0] or 0)
+                if not total:
+                    return [], 0
+                cur.execute(
+                    f"""
+                    SELECT payload
+                    FROM overmind_device_assets
+                    WHERE {where_sql}
+                    ORDER BY system_name NULLS LAST, item_key
+                    LIMIT %s OFFSET %s
+                    """,
+                    [*params, per_page, offset],
+                )
+                rows = cur.fetchall()
+        return [_decode_state(row[0]) for row in rows], total
+
     def list_assets_for_devices(self, device_internal_ids: Iterable[str], asset_type: str) -> list[dict]:
         ids = [str(value) for value in device_internal_ids if value]
         if not ids or not self.assets_enabled():

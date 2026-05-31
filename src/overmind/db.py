@@ -2948,6 +2948,32 @@ class OvermindDatabase:
             return []
         return self._asset_rows_for_device_internal(internal_device["id"], "rom", system_name=system_name)
 
+    def get_device_roms_page(
+        self,
+        device_id: str,
+        *,
+        system_name: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> dict:
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return {"rows": [], "total": 0, "page": max(1, int(page)), "per_page": max(1, min(int(per_page), 500))}
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 500))
+        if self._asset_store_enabled():
+            rows, total = postgres_store.page_device_assets(
+                internal_device["id"],
+                "rom",
+                system_name=system_name,
+                page=page,
+                per_page=per_page,
+            )
+            return {"rows": rows, "total": total, "page": page, "per_page": per_page}
+        rows = self.get_device_roms_by_system(device_id, system_name) if system_name else self.get_device_roms(device_id)
+        start = (page - 1) * per_page
+        return {"rows": rows[start:start + per_page], "total": len(rows), "page": page, "per_page": per_page}
+
     def get_user_systems_summary(self, user_id: str) -> List[dict]:
         """Get system summary across all devices owned by a user."""
         devices = self.get_user_devices(user_id)
@@ -2984,6 +3010,30 @@ class OvermindDatabase:
 
     def get_device_systems_summary(self, device_id: str) -> List[dict]:
         """Get system summary for a single device."""
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        if self._asset_store_enabled():
+            systems = {
+                row["system_name"]: {
+                    "system_name": row["system_name"],
+                    "rom_count": row["rom_count"],
+                    "last_played_at": None,
+                }
+                for row in postgres_store.summarize_rom_systems([internal_device["id"]])
+            }
+            for log in self.get_device_gamelogs(device_id):
+                system_name = log.get("system_name")
+                if not system_name:
+                    continue
+                systems.setdefault(system_name, {"system_name": system_name, "rom_count": 0, "last_played_at": None})
+                played_at = log.get("played_at")
+                previous = systems[system_name]["last_played_at"]
+                if played_at and (previous is None or played_at > previous):
+                    systems[system_name]["last_played_at"] = played_at
+            output = list(systems.values())
+            output.sort(key=lambda row: row["system_name"])
+            return output
         systems: Dict[str, dict] = {}
         roms = self.get_device_roms(device_id)
         for rom in roms:
