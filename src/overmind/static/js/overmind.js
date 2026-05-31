@@ -2480,6 +2480,9 @@
                 const cert = device.certificate || {};
                 const peerChecks = device.peer_checks || [];
                 const info = device.system_info || {};
+                const assetCache = info.asset_cache || {};
+                const assetHealth = assetCache.health || 'yellow';
+                const assetHealthClass = assetHealth === 'green' ? 'border-success bg-success-subtle' : (assetHealth === 'red' ? 'border-danger bg-danger-subtle' : 'border-warning bg-warning-subtle');
                 const systemRows = [
                     ['Hostname', info.hostname || device.device_name],
                     ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
@@ -2525,6 +2528,22 @@
                         <hr>
                         <strong>Performance Metrics</strong>
                         <div class="mt-2">${renderMetricsGrid(info.performance || {})}</div>
+                        <hr>
+                        <strong>Asset Cache</strong>
+                        <div class="mt-2 p-2 rounded border ${assetHealthClass}">
+                            <div class="d-flex justify-content-between gap-2">
+                                <span class="small fw-semibold">ROM, BIOS, and artwork cache</span>
+                                <span class="badge ${assetHealth === 'green' ? 'text-bg-success' : (assetHealth === 'red' ? 'text-bg-danger' : 'text-bg-warning')}">${escapeHtml(assetHealth.toUpperCase())}</span>
+                            </div>
+                            <div class="small text-muted mt-1">
+                                Cached ${assetCache.cached_percent ?? 'n/a'}% · Uploaded ${assetCache.uploaded_percent ?? 'n/a'}%
+                            </div>
+                            <div class="small text-muted">
+                                ${assetCache.counts ? `${assetCache.counts.roms || 0} ROMs · ${assetCache.counts.bios || 0} BIOS · ${assetCache.counts.artwork || 0} artwork` : 'No cache counts reported yet.'}
+                            </div>
+                            ${assetCache.error ? `<div class="small text-danger">${escapeHtml(assetCache.error)}</div>` : ''}
+                            ${assetCache.needs_upload ? '<div class="small text-warning">Upload pending</div>' : ''}
+                        </div>
                         <hr>
                         <strong>Peer-to-Peer Checks</strong>
                         ${latestPeers.length ? latestPeers.map(check => `
@@ -2612,6 +2631,9 @@
                 const cert = device.certificate || {};
                 const info = device.system_info || {};
                 const sample = device.last_speed_sample;
+                const assetCache = info.asset_cache || {};
+                const assetHealth = assetCache.health || 'yellow';
+                const assetHealthClass = assetHealth === 'green' ? 'border-success bg-success-subtle' : (assetHealth === 'red' ? 'border-danger bg-danger-subtle' : 'border-warning bg-warning-subtle');
                 const systemRows = [
                     ['Hostname', info.hostname || device.device_name],
                     ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
@@ -2650,6 +2672,22 @@
                         <hr>
                         <strong>Performance Metrics</strong>
                         <div class="mt-2">${renderMetricsGrid(info.performance || {})}</div>
+                        <hr>
+                        <strong>Asset Cache</strong>
+                        <div class="mt-2 p-2 rounded border ${assetHealthClass}">
+                            <div class="d-flex justify-content-between gap-2">
+                                <span class="small fw-semibold">ROM, BIOS, and artwork cache</span>
+                                <span class="badge ${assetHealth === 'green' ? 'text-bg-success' : (assetHealth === 'red' ? 'text-bg-danger' : 'text-bg-warning')}">${escapeHtml(assetHealth.toUpperCase())}</span>
+                            </div>
+                            <div class="small text-muted mt-1">
+                                Cached ${assetCache.cached_percent ?? 'n/a'}% · Uploaded ${assetCache.uploaded_percent ?? 'n/a'}%
+                            </div>
+                            <div class="small text-muted">
+                                ${assetCache.counts ? `${assetCache.counts.roms || 0} ROMs · ${assetCache.counts.bios || 0} BIOS · ${assetCache.counts.artwork || 0} artwork` : 'No cache counts reported yet.'}
+                            </div>
+                            ${assetCache.error ? `<div class="small text-danger">${escapeHtml(assetCache.error)}</div>` : ''}
+                            ${assetCache.needs_upload ? '<div class="small text-warning">Upload pending</div>' : ''}
+                        </div>
                         <hr>
                         <strong>Speed Sample</strong>
                         ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}

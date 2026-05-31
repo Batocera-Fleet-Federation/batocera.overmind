@@ -1826,6 +1826,7 @@ class OvermindDatabase:
         is_inventory_delta = update_mode == "inventory_delta"
         if update_mode == "rom_hash_patch":
             self._apply_rom_metadata_hash_patch(device, metadata)
+            self.update_device_last_seen(device["id"])
             return
         before = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
