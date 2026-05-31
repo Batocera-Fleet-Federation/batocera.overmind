@@ -104,6 +104,27 @@ def test_handler_loads_secret_without_runtime_startup_for_oauth_start(monkeypatc
     assert called == {"startup": False, "secret": True}
 
 
+def test_handler_loads_secret_without_runtime_startup_for_password_login(monkeypatch):
+    called = {"startup": False, "secret": False}
+
+    def fail_if_called(**kwargs):
+        called["startup"] = True
+        raise AssertionError("startup should be skipped")
+
+    def load_secret(**kwargs):
+        called["secret"] = True
+
+    monkeypatch.setattr(lambda_handler, "_LIGHTWEIGHT_RUNTIME_SECRET_LOADED", False)
+    monkeypatch.setattr(lambda_handler, "initialize_runtime", fail_if_called)
+    monkeypatch.setattr(lambda_handler, "load_runtime_secret_once", load_secret)
+    monkeypatch.setattr(lambda_handler, "_adapter", lambda event, context: {"statusCode": 401})
+
+    result = lambda_handler.handler({"rawPath": "/api/auth/login", "requestContext": {"http": {"method": "POST"}}}, None)
+
+    assert result == {"statusCode": 401}
+    assert called == {"startup": False, "secret": True}
+
+
 def test_handler_initializes_runtime_for_api_routes(monkeypatch):
     called = {"startup": False}
 

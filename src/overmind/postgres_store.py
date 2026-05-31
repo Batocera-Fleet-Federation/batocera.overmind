@@ -12,6 +12,21 @@ from typing import Iterable, Optional
 logger = logging.getLogger("overmind.postgres_store")
 
 
+def _is_lambda_runtime() -> bool:
+    return (os.getenv("OVERMIND_RUNTIME") or "").strip().lower() == "lambda" or bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _persist_json_app_state_enabled() -> bool:
+    return _env_bool("OVERMIND_PERSIST_JSON_STATE", not _is_lambda_runtime())
+
+
 def database_url() -> Optional[str]:
     value = os.getenv("OVERMIND_DATABASE_URL") or os.getenv("DATABASE_URL")
     if value:
@@ -64,8 +79,11 @@ class PostgresMetadataStore:
         self.ensure_schema()
         return self._ready
 
-    def _core_connection(self):
-        if not self.available():
+    def _core_connection(self, *, ensure_schema: bool = True):
+        if ensure_schema:
+            if not self.available():
+                return None
+        elif not self.url:
             return None
         return self._connect()
 
@@ -903,6 +921,9 @@ class PostgresMetadataStore:
             "devices": {},
             "device_admin_claims": {},
             "device_actions": {},
+            "gamelogs": {},
+            "speed_samples": {},
+            "device_events": {},
             "peer_checks": {},
             "download_states": {},
             "rom_sync_activity": {},
@@ -1145,6 +1166,89 @@ class PostgresMetadataStore:
 
         cur.execute(
             """
+            SELECT g.id, g.drone_id, g.system_name, g.game_name, g.rom_path, g.rom_md5,
+                   g.played_at, g.duration_seconds, g.received_at
+            FROM gameplay_sessions g
+            JOIN drones d ON d.id = g.drone_id
+            WHERE d.removed_at IS NULL
+            ORDER BY g.played_at ASC NULLS LAST, g.received_at ASC
+            """
+        )
+        for gameplay_id, drone_id, system_name, game_name, rom_path, rom_md5, played_at, duration_seconds, received_at in cur.fetchall():
+            state["gamelogs"].setdefault(drone_id, []).append({
+                "id": gameplay_id,
+                "system_name": system_name,
+                "game_name": game_name,
+                "name": game_name,
+                "rom_path": rom_path,
+                "rom_md5": rom_md5,
+                "played_at": played_at,
+                "duration_seconds": duration_seconds,
+                "received_at": received_at,
+            })
+
+        cur.execute(
+            """
+            SELECT s.drone_id, s.upload_mbps, s.download_mbps, s.latency_ms, s.measured_at, s.received_at
+            FROM drone_speed_samples s
+            JOIN drones d ON d.id = s.drone_id
+            WHERE d.removed_at IS NULL
+            ORDER BY s.received_at ASC, s.id ASC
+            """
+        )
+        for drone_id, upload_mbps, download_mbps, latency_ms, measured_at, received_at in cur.fetchall():
+            state["speed_samples"].setdefault(drone_id, []).append({
+                "upload_mbps": upload_mbps,
+                "download_mbps": download_mbps,
+                "latency_ms": latency_ms,
+                "measured_at": measured_at,
+                "sampled_at": received_at,
+            })
+
+        cur.execute(
+            """
+            SELECT e.id, e.drone_id, e.event_type, e.severity, e.message, e.occurred_at, e.received_at
+            FROM drone_events e
+            JOIN drones d ON d.id = e.drone_id
+            WHERE d.removed_at IS NULL
+            ORDER BY e.received_at ASC, e.id ASC
+            """
+        )
+        event_entries = {}
+        for event_id, drone_id, event_type, severity, message, occurred_at, received_at in cur.fetchall():
+            entry = {
+                "id": str(event_id),
+                "event_type": event_type,
+                "severity": severity,
+                "message": message,
+                "timestamp": occurred_at,
+                "occurred_at": occurred_at,
+                "received_at": received_at,
+                "metadata": {},
+            }
+            event_entries[event_id] = entry
+            state["device_events"].setdefault(drone_id, []).append(entry)
+        if event_entries:
+            cur.execute(
+                """
+                SELECT event_id, field_name, field_value
+                FROM drone_event_fields
+                WHERE event_id = ANY(%s)
+                """,
+                (list(event_entries),),
+            )
+            for event_id, field_name, field_value in cur.fetchall():
+                entry = event_entries.get(event_id)
+                if not entry or not field_name:
+                    continue
+                try:
+                    value = _decode_state(json.loads(field_value)) if field_value is not None else None
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    value = field_value
+                entry.setdefault("metadata", {})[str(field_name)] = value
+
+        cur.execute(
+            """
             SELECT c.id, c.source_drone_id, sd.device_id, c.target_drone_id, c.target_address,
                    c.status, c.latency_ms, c.checked_at, c.error, c.received_at
             FROM drone_peer_checks c
@@ -1292,18 +1396,19 @@ class PostgresMetadataStore:
         conn = self._connect()
         if conn is None:
             return
-        encoded = json.dumps(_encode_state(state))
         with conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO overmind_app_state (id, state, updated_at)
-                    VALUES (%s, %s::jsonb, now())
-                    ON CONFLICT (id)
-                    DO UPDATE SET state = EXCLUDED.state, updated_at = now()
-                    """,
-                    ("default", encoded),
-                )
+                if _persist_json_app_state_enabled():
+                    encoded = json.dumps(_encode_state(state))
+                    cur.execute(
+                        """
+                        INSERT INTO overmind_app_state (id, state, updated_at)
+                        VALUES (%s, %s::jsonb, now())
+                        ON CONFLICT (id)
+                        DO UPDATE SET state = EXCLUDED.state, updated_at = now()
+                        """,
+                        ("default", encoded),
+                    )
                 self._mirror_app_state_to_relational(cur, state)
 
     def _user_from_row(self, row) -> Optional[dict]:
@@ -1357,7 +1462,7 @@ class PostgresMetadataStore:
         """
 
     def get_user_by_email(self, email: str) -> Optional[dict]:
-        conn = self._core_connection()
+        conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
         with conn:
@@ -1367,7 +1472,7 @@ class PostgresMetadataStore:
                 return self._load_notification_types(cur, user) if user else None
 
     def get_user(self, user_id: str) -> Optional[dict]:
-        conn = self._core_connection()
+        conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
         with conn:
@@ -1380,7 +1485,7 @@ class PostgresMetadataStore:
         return self.get_user_by_email(email) is not None
 
     def username_exists(self, username: str, exclude_user_id: Optional[str] = None) -> bool:
-        conn = self._core_connection()
+        conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return False
         with conn:
@@ -1406,7 +1511,7 @@ class PostgresMetadataStore:
         username: Optional[str],
         notification_types: dict,
     ) -> Optional[dict]:
-        conn = self._core_connection()
+        conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
         with conn:
@@ -1445,7 +1550,7 @@ class PostgresMetadataStore:
         return self.get_user(user_id)
 
     def upsert_social_identity(self, user_id: str, provider: str, provider_subject: Optional[str], provider_email: Optional[str]) -> None:
-        conn = self._core_connection()
+        conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return
         with conn:
@@ -1463,7 +1568,7 @@ class PostgresMetadataStore:
                 )
 
     def set_user_verified(self, user_id: str) -> Optional[dict]:
-        conn = self._core_connection()
+        conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
         with conn:
@@ -1472,7 +1577,7 @@ class PostgresMetadataStore:
         return self.get_user(user_id)
 
     def update_user_profile(self, user_id: str, username: Optional[str], full_name: Optional[str], avatar_data_url: Optional[str]) -> Optional[dict]:
-        conn = self._core_connection()
+        conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
         with conn:
@@ -2293,27 +2398,84 @@ class PostgresMetadataStore:
             for row in rows if isinstance(rows, list) else []:
                 if not isinstance(row, dict):
                     continue
+                measured_at = self._dt(row.get("measured_at") or row.get("sampled_at"))
+                received_at = self._dt(row.get("sampled_at") or row.get("received_at"))
                 cur.execute(
                     """
                     INSERT INTO drone_speed_samples
                         (drone_id, upload_mbps, download_mbps, latency_ms, measured_at, received_at)
-                    VALUES (%s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    SELECT %s, %s, %s, %s, %s, COALESCE(%s, now())
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM drone_speed_samples
+                        WHERE drone_id = %s
+                          AND upload_mbps IS NOT DISTINCT FROM %s
+                          AND download_mbps IS NOT DISTINCT FROM %s
+                          AND latency_ms IS NOT DISTINCT FROM %s
+                          AND measured_at IS NOT DISTINCT FROM %s
+                          AND %s IS NOT NULL
+                          AND received_at IS NOT DISTINCT FROM %s
+                    )
                     """,
-                    (internal_id, row.get("upload_mbps"), row.get("download_mbps"), row.get("latency_ms"), self._dt(row.get("measured_at") or row.get("sampled_at")), self._dt(row.get("sampled_at"))),
+                    (
+                        internal_id,
+                        row.get("upload_mbps"),
+                        row.get("download_mbps"),
+                        row.get("latency_ms"),
+                        measured_at,
+                        received_at,
+                        internal_id,
+                        row.get("upload_mbps"),
+                        row.get("download_mbps"),
+                        row.get("latency_ms"),
+                        measured_at,
+                        received_at,
+                        received_at,
+                    ),
                 )
         for internal_id, rows in (state.get("device_events") if isinstance(state.get("device_events"), dict) else {}).items():
             for row in rows if isinstance(rows, list) else []:
                 if not isinstance(row, dict):
                     continue
+                message = row.get("message") or row.get("rom") or row.get("path")
+                occurred_at = self._dt(row.get("timestamp") or row.get("occurred_at"))
+                received_at = self._dt(row.get("received_at"))
                 cur.execute(
                     """
                     INSERT INTO drone_events (drone_id, event_type, severity, message, occurred_at, received_at)
-                    VALUES (%s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    SELECT %s, %s, %s, %s, %s, COALESCE(%s, now())
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM drone_events
+                        WHERE drone_id = %s
+                          AND event_type IS NOT DISTINCT FROM %s
+                          AND severity IS NOT DISTINCT FROM %s
+                          AND message IS NOT DISTINCT FROM %s
+                          AND occurred_at IS NOT DISTINCT FROM %s
+                          AND %s IS NOT NULL
+                          AND received_at IS NOT DISTINCT FROM %s
+                    )
                     RETURNING id
                     """,
-                    (internal_id, row.get("event_type"), row.get("severity"), row.get("message") or row.get("rom") or row.get("path"), self._dt(row.get("timestamp") or row.get("occurred_at")), self._dt(row.get("received_at"))),
+                    (
+                        internal_id,
+                        row.get("event_type"),
+                        row.get("severity"),
+                        message,
+                        occurred_at,
+                        received_at,
+                        internal_id,
+                        row.get("event_type"),
+                        row.get("severity"),
+                        message,
+                        occurred_at,
+                        received_at,
+                        received_at,
+                    ),
                 )
                 event_id = (cur.fetchone() or [None])[0]
+                if event_id is None:
+                    continue
                 for key, value in (row.get("metadata") if isinstance(row.get("metadata"), dict) else {}).items():
                     cur.execute(
                         "INSERT INTO drone_event_fields (event_id, field_name, field_value) VALUES (%s, %s, %s) ON CONFLICT (event_id, field_name) DO UPDATE SET field_value = EXCLUDED.field_value",
@@ -2327,7 +2489,20 @@ class PostgresMetadataStore:
                     """
                     INSERT INTO drone_peer_checks
                         (source_drone_id, target_drone_id, target_address, status, latency_ms, checked_at, error, received_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    SELECT %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now())
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM drone_peer_checks
+                        WHERE source_drone_id = %s
+                          AND target_drone_id = %s
+                          AND target_address IS NOT DISTINCT FROM %s
+                          AND status = %s
+                          AND latency_ms IS NOT DISTINCT FROM %s
+                          AND checked_at IS NOT DISTINCT FROM %s
+                          AND error IS NOT DISTINCT FROM %s
+                          AND %s IS NOT NULL
+                          AND received_at IS NOT DISTINCT FROM %s
+                    )
                     """,
                     (
                         internal_id,
@@ -2337,6 +2512,15 @@ class PostgresMetadataStore:
                         row.get("latency_ms"),
                         self._dt(row.get("checked_at")),
                         row.get("failure_reason") or row.get("error"),
+                        self._dt(row.get("received_at")),
+                        internal_id,
+                        row.get("target_drone_id"),
+                        row.get("target_address"),
+                        row.get("status") or "fail",
+                        row.get("latency_ms"),
+                        self._dt(row.get("checked_at")),
+                        row.get("failure_reason") or row.get("error"),
+                        self._dt(row.get("received_at")),
                         self._dt(row.get("received_at")),
                     ),
                 )
@@ -2369,15 +2553,33 @@ class PostgresMetadataStore:
 
     def _insert_download_snapshot(self, cur, internal_id: str, state: dict) -> None:
         concurrency = state.get("concurrency") if isinstance(state.get("concurrency"), dict) else {}
+        reported_at = self._dt(state.get("received_at"))
         cur.execute(
             """
             INSERT INTO download_snapshots (target_drone_id, reported_at, concurrency_scope, active_limit)
-            VALUES (%s, COALESCE(%s, now()), %s, %s)
+            SELECT %s, COALESCE(%s, now()), %s, %s
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM download_snapshots
+                WHERE target_drone_id = %s
+                  AND %s IS NOT NULL
+                  AND reported_at IS NOT DISTINCT FROM %s
+            )
             RETURNING id
             """,
-            (internal_id, self._dt(state.get("received_at")), concurrency.get("scope"), concurrency.get("active_limit")),
+            (
+                internal_id,
+                reported_at,
+                concurrency.get("scope"),
+                concurrency.get("active_limit"),
+                internal_id,
+                reported_at,
+                reported_at,
+            ),
         )
         snapshot_id = (cur.fetchone() or [None])[0]
+        if snapshot_id is None:
+            return
         for bucket in ("active", "queued", "recent"):
             for item in state.get(bucket) if isinstance(state.get(bucket), list) else []:
                 if not isinstance(item, dict):

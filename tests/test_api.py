@@ -4240,6 +4240,61 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
     assert action["payload"] == {"options": {"force": True}}
 
 
+def test_postgres_store_rehydrates_telemetry_from_relational_tables():
+    from overmind.postgres_store import PostgresMetadataStore
+
+    received_at = datetime(2026, 5, 31, 5, 0, tzinfo=timezone.utc)
+
+    class RecordingCursor:
+        def __init__(self):
+            self.sql = ""
+            self.params = None
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+            self.params = params
+
+        def fetchall(self):
+            if "FROM users u" in self.sql:
+                return [(
+                    "u1", "owner@example.com", "hash", True, True, "password", received_at,
+                    "owner", None, None,
+                    True,
+                    False, False, True, "", "", "owner@example.com",
+                )]
+            if "FROM user_notification_type_settings" in self.sql:
+                return []
+            if "FROM swarms" in self.sql:
+                return [("s1", "u1", "Main", received_at)]
+            if "FROM swarm_memberships" in self.sql:
+                return [("s1", "u1", "overlord", received_at)]
+            if "FROM integration_tokens" in self.sql:
+                return []
+            if "FROM drones d" in self.sql and "LEFT JOIN drone_network_state" in self.sql:
+                return [(
+                    "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
+                    None, "token-hash", received_at, received_at,
+                    8443, "https", "https://drone-a:8443", False, None, None,
+                    None, None, None, None, None, None, None,
+                    None, None, None, None, None,
+                )]
+            if "FROM gameplay_sessions" in self.sql:
+                return [("game-1", "d1", "snes", "Game", "Game.zip", "abc", received_at, 60, received_at)]
+            if "FROM drone_speed_samples" in self.sql:
+                return [("d1", 4.5, 10.25, 12.0, received_at, received_at)]
+            if "FROM drone_events e" in self.sql:
+                return [(9, "d1", "rom_sync", "info", "Synced", received_at, received_at)]
+            if "FROM drone_event_fields" in self.sql:
+                return [(9, "job_id", json.dumps("job-1"))]
+            return []
+
+    state = PostgresMetadataStore()._load_relational_state(RecordingCursor())
+
+    assert state["gamelogs"]["d1"][0]["game_name"] == "Game"
+    assert state["speed_samples"]["d1"][0]["download_mbps"] == 10.25
+    assert state["device_events"]["d1"][0]["metadata"] == {"job_id": "job-1"}
+
+
 def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_tables():
     from overmind.postgres_store import PostgresMetadataStore
 

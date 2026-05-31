@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from overmind import emailer
 from overmind import main as overmind_main
-from overmind.postgres_store import PostgresMetadataStore
+from overmind.postgres_store import PostgresMetadataStore, _persist_json_app_state_enabled
 from overmind.runtime_secrets import RuntimeSecretRefresher
 
 
@@ -161,6 +161,19 @@ def test_lambda_runtime_detection(monkeypatch):
     monkeypatch.setenv("OVERMIND_RUNTIME", "")
     monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "bff-overmind-prod-low")
     assert overmind_main.is_lambda_runtime() is True
+
+
+def test_postgres_json_app_state_defaults_off_in_lambda(monkeypatch):
+    monkeypatch.delenv("OVERMIND_PERSIST_JSON_STATE", raising=False)
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    monkeypatch.delenv("OVERMIND_RUNTIME", raising=False)
+    assert _persist_json_app_state_enabled() is True
+
+    monkeypatch.setenv("OVERMIND_RUNTIME", "lambda")
+    assert _persist_json_app_state_enabled() is False
+
+    monkeypatch.setenv("OVERMIND_PERSIST_JSON_STATE", "true")
+    assert _persist_json_app_state_enabled() is True
 
 
 def test_postgres_store_refreshes_after_runtime_secret(monkeypatch):

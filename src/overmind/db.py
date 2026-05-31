@@ -1,5 +1,7 @@
 """Overmind repository facade with optional PostgreSQL persistence."""
 
+import os
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -68,7 +70,6 @@ class OvermindDatabase:
         "add_device_admin_claim",
         "update_device_last_seen",
         "update_device_public_reachability",
-        "verify_device_token",
         "rotate_device_token",
         "set_device_authorization_token",
         "update_device_auto_sync_policy",
@@ -109,6 +110,12 @@ class OvermindDatabase:
         "mark_notifications_read",
         "dismiss_notifications",
     }
+    _SKIP_AUTO_REFRESH_METHODS = {
+        "get_user_by_email",
+        "get_user",
+        "user_exists",
+        "username_exists",
+    }
 
     def __getattribute__(self, name):
         attr = object.__getattribute__(self, name)
@@ -121,7 +128,8 @@ class OvermindDatabase:
                 depth = object.__getattribute__(self, "_operation_depth")
                 is_outermost = depth == 0
                 if is_outermost:
-                    object.__getattribute__(self, "_refresh_from_source_of_truth")()
+                    if name not in object.__getattribute__(self, "_SKIP_AUTO_REFRESH_METHODS"):
+                        object.__getattribute__(self, "_refresh_from_source_of_truth")()
                     object.__setattr__(self, "_operation_dirty", False)
                 object.__setattr__(self, "_operation_depth", depth + 1)
                 try:
@@ -166,6 +174,7 @@ class OvermindDatabase:
         self.notifications: Dict[str, list] = {}
         self._operation_depth = 0
         self._operation_dirty = False
+        self._last_source_refresh_at = 0.0
         self._load_persistent_state()
 
     def _state_snapshot(self) -> dict:
@@ -187,9 +196,25 @@ class OvermindDatabase:
         """Reload shared persisted state after runtime database config is available."""
         self._load_persistent_state()
 
+    @staticmethod
+    def _is_lambda_runtime() -> bool:
+        return (os.getenv("OVERMIND_RUNTIME") or "").strip().lower() == "lambda" or bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+
+    def _source_refresh_min_seconds(self) -> float:
+        default = "5" if self._is_lambda_runtime() else "0"
+        try:
+            return max(0.0, float(os.getenv("OVERMIND_STATE_REFRESH_MIN_SECONDS", default)))
+        except (TypeError, ValueError):
+            return float(default)
+
     def _refresh_from_source_of_truth(self) -> None:
+        min_seconds = self._source_refresh_min_seconds()
+        now = time.monotonic()
+        if min_seconds and self._last_source_refresh_at and now - self._last_source_refresh_at < min_seconds:
+            return
         if postgres_store.available():
             self._load_persistent_state()
+            self._last_source_refresh_at = now
 
     def _persist_state(self) -> None:
         try:

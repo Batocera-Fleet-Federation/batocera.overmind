@@ -695,8 +695,15 @@ def build_login_response(user: dict) -> dict:
 def _authenticate_password_user(email: str, password: str) -> Optional[dict]:
     user = db.get_user_by_email(email)
     if not user:
-        db.refresh_persistent_state()
-        user = db.get_user_by_email(email)
+        if is_lambda_runtime():
+            if getattr(postgres_store, "last_error", None):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"PostgreSQL is unavailable: {postgres_store.last_error}",
+                )
+        else:
+            db.refresh_persistent_state()
+            user = db.get_user_by_email(email)
     if not user or not auth.verify_password(password, user["password"]):
         return None
     ensure_active_user(user)

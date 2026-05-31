@@ -24,6 +24,27 @@ _adapter = Mangum(app, lifespan="off")
 _LIGHTWEIGHT_RUNTIME_SECRET_LOADED = False
 
 
+def _is_oauth_start_path(path: str) -> bool:
+    return path.startswith("/api/auth/") and path.endswith("/start") and len(path.strip("/").split("/")) == 4
+
+
+def _is_auth_callback_path(path: str) -> bool:
+    return path.startswith("/api/auth/") and path.endswith("/callback") and len(path.strip("/").split("/")) == 4
+
+
+def _is_lightweight_auth_path(path: str) -> bool:
+    return path in {
+        "/api/auth/providers",
+        "/api/auth/login",
+        "/api/auth/register",
+        "/api/auth/refresh",
+        "/api/auth/verify-email",
+        "/api/auth/resend-verification",
+        "/api/auth/forgot-password",
+        "/api/auth/reset-password",
+    } or _is_oauth_start_path(path) or _is_auth_callback_path(path)
+
+
 def _event_path(event: dict[str, Any]) -> str:
     return (
         event.get("rawPath")
@@ -42,29 +63,23 @@ def _event_method(event: dict[str, Any]) -> str:
 
 
 def _can_skip_startup(event: dict[str, Any]) -> bool:
-    if _event_method(event) not in {"GET", "HEAD", "OPTIONS"}:
+    method = _event_method(event)
+    if method == "OPTIONS":
+        return True
+    if method not in {"GET", "HEAD", "POST"}:
         return False
     path = _event_path(event)
     if path in {"/", "/health", "/docs", "/openapi.json"}:
         return True
-    if path == "/api/auth/providers" or (
-        path.startswith("/api/auth/")
-        and path.endswith("/start")
-        and len(path.strip("/").split("/")) == 4
-    ):
+    if _is_lightweight_auth_path(path):
         return True
     return path.startswith(("/static/", "/content/", "/favicon"))
 
 
 def _needs_lightweight_runtime_secret(event: dict[str, Any]) -> bool:
-    if _event_method(event) not in {"GET", "HEAD"}:
+    if _event_method(event) not in {"GET", "HEAD", "POST"}:
         return False
-    path = _event_path(event)
-    return path == "/api/auth/providers" or (
-        path.startswith("/api/auth/")
-        and path.endswith("/start")
-        and len(path.strip("/").split("/")) == 4
-    )
+    return _is_lightweight_auth_path(_event_path(event))
 
 
 def _load_lightweight_runtime_secret() -> None:
