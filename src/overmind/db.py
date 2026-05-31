@@ -251,6 +251,8 @@ class OvermindDatabase:
     def add_swarm_notification(self, swarm_id: str, event_type: str, title: str, message: str, details: Optional[dict] = None, actor_user_id: Optional[str] = None) -> dict:
         if not swarm_id:
             return {}
+        if event_type in {"drone_online", "drone_offline"} and self._recent_drone_status_notification_exists(swarm_id, event_type, details):
+            return {}
         entry = {
             "id": str(uuid.uuid4()),
             "swarm_id": swarm_id,
@@ -276,6 +278,44 @@ class OvermindDatabase:
             notification_delivery.deliver_notification(self, entry)
             entry["delivery_completed_at"] = datetime.utcnow()
         return entry
+
+    def _recent_drone_status_notification_exists(self, swarm_id: str, event_type: str, details: Optional[dict]) -> bool:
+        device = details.get("device") if isinstance(details, dict) else None
+        device_id = str(device.get("device_id") or "").strip() if isinstance(device, dict) else ""
+        if not device_id:
+            return False
+        try:
+            dedupe_seconds = int(os.getenv("OVERMIND_STATUS_NOTIFICATION_DEDUPE_SECONDS", "900"))
+        except ValueError:
+            dedupe_seconds = 900
+        if dedupe_seconds <= 0:
+            return False
+        cutoff = datetime.utcnow() - timedelta(seconds=dedupe_seconds)
+        for notification in reversed(self.notifications.get(swarm_id, [])):
+            if notification.get("event_type") != event_type:
+                continue
+            created_at = notification.get("created_at")
+            if isinstance(created_at, datetime) and created_at < cutoff:
+                break
+            notification_device = notification.get("details", {}).get("device") if isinstance(notification.get("details"), dict) else None
+            if isinstance(notification_device, dict) and str(notification_device.get("device_id") or "").strip() == device_id:
+                return True
+        return False
+
+    def claim_pending_notifications_for_delivery(self, notification_ids: list[str], limit: int = 0) -> Optional[set[str]]:
+        claimed = postgres_store.claim_pending_notifications(notification_ids, limit=limit)
+        if claimed is None:
+            return None
+        claimed_ids = set(claimed)
+        if not claimed_ids:
+            return set()
+        for rows in self.notifications.values():
+            for notification in rows:
+                notification_id = notification.get("id")
+                if notification_id in claimed:
+                    notification["delivery_pending"] = False
+                    notification["delivery_completed_at"] = claimed[notification_id]
+        return claimed_ids
 
     def get_user_notifications(self, user_id: str, limit: int = 50) -> List[dict]:
         swarm_ids = {row["id"] for row in self.get_user_swarms(user_id)}

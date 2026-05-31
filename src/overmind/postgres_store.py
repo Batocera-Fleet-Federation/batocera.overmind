@@ -23,6 +23,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 def _persist_json_app_state_enabled() -> bool:
     return _env_bool("OVERMIND_PERSIST_JSON_STATE", not _is_lambda_runtime())
 
@@ -856,7 +863,12 @@ class PostgresMetadataStore:
             "CREATE INDEX IF NOT EXISTS idx_actions_drone_status ON drone_actions(drone_id, status, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_sync_activity_target ON sync_activity(target_drone_id, received_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_gameplay_drone_system ON gameplay_sessions(drone_id, system_name, played_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_gameplay_drone_received ON gameplay_sessions(drone_id, received_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received ON drone_speed_samples(drone_id, received_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_events_drone_received ON drone_events(drone_id, received_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received ON drone_peer_checks(source_drone_id, received_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_notifications_swarm_created ON notifications(swarm_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery ON notifications(delivery_pending, created_at) WHERE delivery_pending IS TRUE AND delivery_completed_at IS NULL",
         ]
         for statement in indexes:
             cur.execute(statement)
@@ -909,11 +921,48 @@ class PostgresMetadataStore:
                     state = _decode_state(row[0])
                     if not _persist_json_app_state_enabled() and isinstance(state, dict):
                         state.pop("notifications", None)
+                        _strip_json_only_device_status(state)
                 relational = self._load_relational_state(cur)
         if not isinstance(state, dict):
             state = {}
         _merge_state_dicts(state, relational)
         return state if state else None
+
+    def claim_pending_notifications(self, notification_ids: Iterable[str], limit: int = 0) -> Optional[dict[str, datetime]]:
+        ids = [str(item) for item in notification_ids if item]
+        if not self.url:
+            return None
+        if not ids:
+            return {}
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return None
+        row_limit = max(1, min(len(ids), int(limit or len(ids))))
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH selected AS (
+                        SELECT id
+                        FROM notifications
+                        WHERE id = ANY(%s)
+                          AND delivery_pending IS TRUE
+                          AND delivery_completed_at IS NULL
+                        ORDER BY created_at ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE notifications AS n
+                    SET delivery_pending = false,
+                        delivery_completed_at = now()
+                    FROM selected
+                    WHERE n.id = selected.id
+                    RETURNING n.id, n.delivery_completed_at
+                    """,
+                    (ids, row_limit),
+                )
+                return {notification_id: completed_at for notification_id, completed_at in cur.fetchall()}
 
     def _load_relational_state(self, cur) -> dict:
         """Rehydrate core app state from normalized tables for fresh workers."""
@@ -986,7 +1035,11 @@ class PostgresMetadataStore:
             state["user_by_email"][email] = user_id
             state["user_devices"].setdefault(user_id, [])
 
-        cur.execute("SELECT user_id, event_type, enabled FROM user_notification_type_settings")
+        active_user_ids = list(state["users"])
+        cur.execute(
+            "SELECT user_id, event_type, enabled FROM user_notification_type_settings WHERE user_id = ANY(%s)",
+            (active_user_ids,),
+        )
         for user_id, event_type, enabled in cur.fetchall():
             user = state["users"].get(user_id)
             if user:
@@ -995,7 +1048,11 @@ class PostgresMetadataStore:
         cur.execute("SELECT id, owner_user_id, name, created_at FROM swarms")
         for swarm_id, owner_id, name, created_at in cur.fetchall():
             state["swarms"][swarm_id] = {"id": swarm_id, "owner_id": owner_id, "name": name, "created_at": created_at}
-        cur.execute("SELECT swarm_id, user_id, role, created_at FROM swarm_memberships")
+        active_swarm_ids = list(state["swarms"])
+        cur.execute(
+            "SELECT swarm_id, user_id, role, created_at FROM swarm_memberships WHERE swarm_id = ANY(%s)",
+            (active_swarm_ids,),
+        )
         for swarm_id, user_id, role, created_at in cur.fetchall():
             state["swarm_memberships"].setdefault(swarm_id, {})[user_id] = {"user_id": user_id, "role": role, "created_at": created_at}
 
@@ -1003,7 +1060,9 @@ class PostgresMetadataStore:
             """
             SELECT id, user_id, label, token_hash, bound_device_id, bound_fingerprint, created_at, last_used_at, revoked_at
             FROM integration_tokens
-            """
+            WHERE user_id = ANY(%s)
+            """,
+            (active_user_ids,),
         )
         for token_id, user_id, label, token_hash, bound_device_id, bound_fingerprint, created_at, last_used_at, revoked_at in cur.fetchall():
             state["integration_tokens"].setdefault(user_id, []).append({
@@ -1073,15 +1132,20 @@ class PostgresMetadataStore:
             state["devices"][internal_id] = device
             state["user_devices"].setdefault(user_id, []).append(internal_id)
 
+        active_drone_ids = list(state["devices"])
+        history_limit = _env_int("OVERMIND_RELATIONAL_HISTORY_ROWS_PER_DRONE", 200)
+        action_limit = _env_int("OVERMIND_RELATIONAL_ACTION_ROWS_PER_DRONE", 100)
+        notification_limit = _env_int("OVERMIND_RELATIONAL_NOTIFICATIONS_PER_SWARM", 500)
+
         cur.execute(
             """
             SELECT c.drone_id, c.status, c.fingerprint, c.sha256_fingerprint, c.public_certificate,
                    c.subject, c.issuer, c.valid_from, c.valid_until, c.serial_number, c.overmind_signed_at,
                    c.updated_at
             FROM drone_certificates c
-            JOIN drones d ON d.id = c.drone_id
-            WHERE d.removed_at IS NULL
-            """
+            WHERE c.drone_id = ANY(%s)
+            """,
+            (active_drone_ids,),
         )
         for drone_id, cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer, valid_from, valid_until, serial_number, overmind_signed_at, updated_at in cur.fetchall():
             device = state["devices"].get(drone_id)
@@ -1107,28 +1171,34 @@ class PostgresMetadataStore:
             """
             SELECT s.drone_id, s.san
             FROM drone_certificate_sans s
-            JOIN drones d ON d.id = s.drone_id
-            WHERE d.removed_at IS NULL
+            WHERE s.drone_id = ANY(%s)
             ORDER BY s.san
-            """
+            """,
+            (active_drone_ids,),
         )
         for drone_id, san in cur.fetchall():
             cert = (state["devices"].get(drone_id) or {}).get("certificate")
             if isinstance(cert, dict) and san:
                 cert.setdefault("san", []).append(san)
 
-        cur.execute("SELECT drone_id, user_id FROM device_admin_claims")
+        cur.execute("SELECT drone_id, user_id FROM device_admin_claims WHERE drone_id = ANY(%s)", (active_drone_ids,))
         for drone_id, user_id in cur.fetchall():
             state["device_admin_claims"].setdefault(drone_id, []).append(user_id)
 
         cur.execute(
             """
             SELECT a.id, a.drone_id, d.device_id, a.action, a.status, a.created_at, a.claimed_at, a.completed_at, a.message
-            FROM drone_actions a
+            FROM (
+                SELECT a.*, row_number() OVER (PARTITION BY a.drone_id ORDER BY a.created_at DESC, a.id DESC) AS rn
+                FROM drone_actions a
+                WHERE a.drone_id = ANY(%s)
+                  AND (a.status IN ('pending', 'claimed') OR a.created_at >= now() - interval '30 days')
+            ) a
             JOIN drones d ON d.id = a.drone_id
-            WHERE d.removed_at IS NULL
+            WHERE a.rn <= %s
             ORDER BY a.created_at ASC
-            """
+            """,
+            (active_drone_ids, action_limit),
         )
         for action_id, drone_id, device_id, action_type, action_status, created_at, claimed_at, completed_at, message in cur.fetchall():
             if not action_id or not drone_id:
@@ -1147,21 +1217,22 @@ class PostgresMetadataStore:
                 "result_received_at": None,
             })
 
-        cur.execute(
-            """
-            SELECT p.action_id, p.parameter_name, p.parameter_value
-            FROM drone_action_parameters p
-            JOIN drone_actions a ON a.id = p.action_id
-            JOIN drones d ON d.id = a.drone_id
-            WHERE d.removed_at IS NULL
-            """
-        )
         actions_by_id = {
             action.get("id"): action
             for rows in state["device_actions"].values()
             for action in rows
             if isinstance(action, dict)
         }
+        cur.execute(
+            """
+            SELECT p.action_id, p.parameter_name, p.parameter_value
+            FROM drone_action_parameters p
+            JOIN drone_actions a ON a.id = p.action_id
+            WHERE a.drone_id = ANY(%s)
+              AND p.action_id = ANY(%s)
+            """,
+            (active_drone_ids, list(actions_by_id) or [""]),
+        )
         for action_id, parameter_name, parameter_value in cur.fetchall():
             action = actions_by_id.get(action_id)
             if not action or not parameter_name:
@@ -1176,11 +1247,15 @@ class PostgresMetadataStore:
             """
             SELECT g.id, g.drone_id, g.system_name, g.game_name, g.rom_path, g.rom_md5,
                    g.played_at, g.duration_seconds, g.received_at
-            FROM gameplay_sessions g
-            JOIN drones d ON d.id = g.drone_id
-            WHERE d.removed_at IS NULL
+            FROM (
+                SELECT g.*, row_number() OVER (PARTITION BY g.drone_id ORDER BY g.played_at DESC NULLS LAST, g.received_at DESC, g.id DESC) AS rn
+                FROM gameplay_sessions g
+                WHERE g.drone_id = ANY(%s)
+            ) g
+            WHERE g.rn <= %s
             ORDER BY g.played_at ASC NULLS LAST, g.received_at ASC
-            """
+            """,
+            (active_drone_ids, history_limit),
         )
         for gameplay_id, drone_id, system_name, game_name, rom_path, rom_md5, played_at, duration_seconds, received_at in cur.fetchall():
             state["gamelogs"].setdefault(drone_id, []).append({
@@ -1198,11 +1273,15 @@ class PostgresMetadataStore:
         cur.execute(
             """
             SELECT s.drone_id, s.upload_mbps, s.download_mbps, s.latency_ms, s.measured_at, s.received_at
-            FROM drone_speed_samples s
-            JOIN drones d ON d.id = s.drone_id
-            WHERE d.removed_at IS NULL
+            FROM (
+                SELECT s.*, row_number() OVER (PARTITION BY s.drone_id ORDER BY s.received_at DESC, s.id DESC) AS rn
+                FROM drone_speed_samples s
+                WHERE s.drone_id = ANY(%s)
+            ) s
+            WHERE s.rn <= %s
             ORDER BY s.received_at ASC, s.id ASC
-            """
+            """,
+            (active_drone_ids, history_limit),
         )
         for drone_id, upload_mbps, download_mbps, latency_ms, measured_at, received_at in cur.fetchall():
             state["speed_samples"].setdefault(drone_id, []).append({
@@ -1216,11 +1295,15 @@ class PostgresMetadataStore:
         cur.execute(
             """
             SELECT e.id, e.drone_id, e.event_type, e.severity, e.message, e.occurred_at, e.received_at
-            FROM drone_events e
-            JOIN drones d ON d.id = e.drone_id
-            WHERE d.removed_at IS NULL
+            FROM (
+                SELECT e.*, row_number() OVER (PARTITION BY e.drone_id ORDER BY e.received_at DESC, e.id DESC) AS rn
+                FROM drone_events e
+                WHERE e.drone_id = ANY(%s)
+            ) e
+            WHERE e.rn <= %s
             ORDER BY e.received_at ASC, e.id ASC
-            """
+            """,
+            (active_drone_ids, history_limit),
         )
         event_entries = {}
         for event_id, drone_id, event_type, severity, message, occurred_at, received_at in cur.fetchall():
@@ -1259,11 +1342,16 @@ class PostgresMetadataStore:
             """
             SELECT c.id, c.source_drone_id, sd.device_id, c.target_drone_id, c.target_address,
                    c.status, c.latency_ms, c.checked_at, c.error, c.received_at
-            FROM drone_peer_checks c
+            FROM (
+                SELECT c.*, row_number() OVER (PARTITION BY c.source_drone_id ORDER BY c.received_at DESC, c.id DESC) AS rn
+                FROM drone_peer_checks c
+                WHERE c.source_drone_id = ANY(%s)
+            ) c
             JOIN drones sd ON sd.id = c.source_drone_id
-            WHERE sd.removed_at IS NULL
+            WHERE c.rn <= %s
             ORDER BY c.received_at ASC, c.id ASC
-            """
+            """,
+            (active_drone_ids, history_limit),
         )
         for check_id, source_internal_id, source_device_id, target_drone_id, target_address, check_status, latency_ms, checked_at, error, received_at in cur.fetchall():
             state["peer_checks"].setdefault(source_internal_id, []).append({
@@ -1284,9 +1372,11 @@ class PostgresMetadataStore:
             FROM (
                 SELECT s.*, row_number() OVER (PARTITION BY s.target_drone_id ORDER BY s.reported_at DESC, s.id DESC) AS rn
                 FROM download_snapshots s
+                WHERE s.target_drone_id = ANY(%s)
             ) ranked
             WHERE rn = 1
-            """
+            """,
+            (active_drone_ids,),
         )
         latest_download_snapshots = {}
         for target_internal_id, snapshot_id, reported_at, concurrency_scope, active_limit in cur.fetchall():
@@ -1346,11 +1436,16 @@ class PostgresMetadataStore:
                    a.status, a.system_name, a.file_path, a.rom_md5, a.bios_md5, a.artwork_type,
                    a.bytes_transferred, a.file_size, a.started_at, a.completed_at, a.failure_reason,
                    a.received_at
-            FROM sync_activity a
-            LEFT JOIN drones td ON td.id = a.target_drone_id
-            WHERE td.removed_at IS NULL OR td.id IS NULL
+            FROM (
+                SELECT a.*, row_number() OVER (PARTITION BY a.target_drone_id ORDER BY a.received_at DESC, a.id DESC) AS rn
+                FROM sync_activity a
+                WHERE a.target_drone_id = ANY(%s)
+            ) a
+            JOIN drones td ON td.id = a.target_drone_id
+            WHERE a.rn <= %s
             ORDER BY a.received_at ASC
-            """
+            """,
+            (active_drone_ids, history_limit),
         )
         for sync_id, target_internal_id, target_device_id, source_drone_id, asset_type, action, activity_status, system_name, file_path, rom_md5, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at, failure_reason, received_at in cur.fetchall():
             if not target_internal_id:
@@ -1385,9 +1480,17 @@ class PostgresMetadataStore:
             """
             SELECT id, swarm_id, event_type, title, message, actor_user_id,
                    created_at, delivery_pending, delivery_completed_at
-            FROM notifications
+            FROM (
+                SELECT n.*, row_number() OVER (PARTITION BY n.swarm_id ORDER BY n.created_at DESC, n.id DESC) AS rn
+                FROM notifications n
+                WHERE n.swarm_id = ANY(%s)
+            ) n
+            WHERE n.delivery_pending IS TRUE
+               OR n.delivery_completed_at IS NULL
+               OR n.rn <= %s
             ORDER BY created_at ASC
-            """
+            """,
+            (active_swarm_ids, notification_limit),
         )
         notifications_by_id = {}
         for notification_id, swarm_id, event_type, title, message, actor_user_id, created_at, delivery_pending, delivery_completed_at in cur.fetchall():
@@ -1442,7 +1545,14 @@ class PostgresMetadataStore:
                 if dismissed_at:
                     entry.setdefault("dismissed_by", {})[user_id] = dismissed_at
 
-        cur.execute("SELECT device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status FROM pending_drone_connections")
+        cur.execute(
+            """
+            SELECT device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status
+            FROM pending_drone_connections
+            WHERE user_id = ANY(%s) OR swarm_id = ANY(%s)
+            """,
+            (active_user_ids, active_swarm_ids),
+        )
         for device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status in cur.fetchall():
             state["pending_drone_connections"][device_id] = {
                 "id": device_id,
@@ -3570,6 +3680,17 @@ def _merge_state_dicts(base: dict, overlay: dict) -> None:
                 base[key].update(value)
         elif value:
             base[key] = value
+
+
+def _strip_json_only_device_status(state: dict) -> None:
+    devices = state.get("devices")
+    if not isinstance(devices, dict):
+        return
+    for device in devices.values():
+        if not isinstance(device, dict):
+            continue
+        device.pop("last_known_status", None)
+        device.pop("last_status_checked_at", None)
 
 
 def _asset_key(asset_type: str, row: dict) -> str:

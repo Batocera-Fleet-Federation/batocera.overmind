@@ -464,6 +464,14 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
     )
     assert len(sent) == 1
     assert "Drone online" in sent[0]["subject"]
+    db.add_swarm_notification(
+        swarm_id,
+        "drone_online",
+        "Drone online",
+        "Mail Drone is online.",
+        {"device": {"device_id": "mail-drone", "device_name": "Mail Drone"}, "status": "online"},
+    )
+    assert len(sent) == 1
 
 
 def test_notification_delivery_batches_multiple_asset_updates_in_one_email(client, monkeypatch):
@@ -489,6 +497,44 @@ def test_notification_delivery_batches_multiple_asset_updates_in_one_email(clien
     assert sent == []
     db_module.notification_delivery.deliver_pending_notifications(db)
     assert sent == ["Batocera Overmind: 2 swarm updates"]
+
+
+def test_notification_delivery_claims_pending_rows_before_sending(client, monkeypatch):
+    sent = []
+    completed_at = datetime.utcnow()
+
+    client.post("/api/auth/register", json={"email": "claimnotify@example.com", "username": "claimnotify-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("claimnotify@example.com")
+    swarm_id = db.default_swarm_id(user["id"])
+    db.update_user_notification_settings(user["id"], {"notify_email": True, "types": {"sync_triggered": True}})
+    notification = db.add_swarm_notification(
+        swarm_id,
+        "sync_triggered",
+        "Sync queued",
+        "Sync event queued",
+        {"sync_type": "ROM"},
+        actor_user_id=user["id"],
+    )
+
+    def claim_pending(notification_ids, limit=0):
+        return {notification["id"]: completed_at}
+
+    def send_email(to_email, subject, html_body, text_body, from_email=None):
+        row = db.notifications[swarm_id][0]
+        assert row["delivery_pending"] is False
+        assert row["delivery_completed_at"] == completed_at
+        sent.append(subject)
+        return True
+
+    monkeypatch.setattr(db_module.postgres_store, "claim_pending_notifications", claim_pending)
+    monkeypatch.setattr(db_module.notification_delivery.emailer, "send_email", send_email)
+
+    assert db_module.notification_delivery.deliver_pending_notifications(db) == 1
+    assert sent == ["Batocera Overmind: 1 swarm update"]
+
+    sent.clear()
+    assert db_module.notification_delivery.deliver_pending_notifications(db) == 0
+    assert sent == []
 
 
 def test_notification_delivery_limits_pending_notifications_per_run(client, monkeypatch):
@@ -4158,12 +4204,21 @@ def test_relational_schema_declares_domain_tables():
     assert "REFERENCES drones(id) ON DELETE CASCADE" in source
     assert "CREATE INDEX IF NOT EXISTS idx_roms_drone_system" in source
     assert "CREATE INDEX IF NOT EXISTS idx_actions_drone_status" in source
+    assert "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery" in source
+    assert "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received" in source
+    assert "CREATE INDEX IF NOT EXISTS idx_events_drone_received" in source
+    assert "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received" in source
     assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected" in source
     assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in source
     assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in source
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in source
     assert "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending" in source
     assert 'state.pop("notifications", None)' in source
+    assert '_strip_json_only_device_status(state)' in source
+    assert 'device.pop("last_known_status", None)' in source
+    assert "WHERE g.drone_id = ANY(%s)" in source
+    assert "WHERE n.swarm_id = ANY(%s)" in source
+    assert "WHERE user_id = ANY(%s) OR swarm_id = ANY(%s)" in source
 
 
 def test_postgres_store_materializes_state_and_assets_into_relational_tables():

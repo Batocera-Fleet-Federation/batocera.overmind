@@ -110,10 +110,17 @@ def deliver_pending_notifications(data_store: Any, *, email_client: Any = emaile
         (notification, data_store.swarms.get(swarm_id) or {})
         for swarm_id, notifications in list(data_store.notifications.items())
         for notification in notifications
-        if notification.get("delivery_pending") is True
+        if notification.get("delivery_pending") is True and not notification.get("delivery_completed_at")
     ]
     pending.sort(key=lambda item: str(item[0].get("created_at") or ""))
-    if limit:
+    claim_pending = getattr(data_store, "claim_pending_notifications_for_delivery", None)
+    if callable(claim_pending):
+        claimed_ids = claim_pending([str(item[0].get("id") or "") for item in pending], limit=limit)
+        if claimed_ids is not None:
+            pending = [item for item in pending if item[0].get("id") in claimed_ids]
+        elif limit:
+            pending = pending[:limit]
+    elif limit:
         pending = pending[:limit]
     if not pending:
         return 0
@@ -153,7 +160,7 @@ def deliver_pending_notifications(data_store: Any, *, email_client: Any = emaile
     completed_at = datetime.utcnow()
     for notification, _ in pending:
         notification["delivery_pending"] = False
-        notification["delivery_completed_at"] = completed_at
+        notification.setdefault("delivery_completed_at", completed_at)
     for notifications in data_store.notifications.values():
         del notifications[:-500]
     persist = getattr(data_store, "_persist_state", None)

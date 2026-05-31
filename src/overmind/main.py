@@ -1559,6 +1559,7 @@ async def deny_drone_connection(device_id: str, authorization: Optional[str] = H
 async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List all devices for the authenticated user."""
     user = get_current_user(authorization)
+    db.refresh_persistent_state()
     if not os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
         db.update_device_status_notifications(SWARM_OFFLINE_THRESHOLD_SECONDS)
     sid = selected_swarm_id(user, swarm_id) if swarm_id else None
