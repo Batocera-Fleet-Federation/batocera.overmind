@@ -17,7 +17,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 from functools import partial
 from pathlib import Path
@@ -72,6 +71,7 @@ from overmind.presenters import (
 
 SUPER_ADMIN_EMAIL = "mr_jerrodh@hotmail.com"
 logger = logging.getLogger("overmind.main")
+_LAMBDA_RUNTIME_ENV = (os.getenv("OVERMIND_RUNTIME") or "").strip().lower() == "lambda" or bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
 SUPPORTED_DEVICE_ACTIONS = {
     "restart",
@@ -93,12 +93,11 @@ SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS
 PUBLIC_PEER_PROBE_INTERVAL_SECONDS = int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "60"))
 PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "3"))
 PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS", "0.2"))
-PUBLIC_PEER_PROBE_SCAN_ALL_PORTS = os.getenv("PUBLIC_PEER_PROBE_SCAN_ALL_PORTS", "true").strip().lower() not in {"0", "false", "no", "off"}
-PUBLIC_PEER_PROBE_SCAN_WORKERS = int(os.getenv("PUBLIC_PEER_PROBE_SCAN_WORKERS", "256"))
-PUBLIC_PEER_PROBE_FALLBACK_PORTS = os.getenv(
-    "PUBLIC_PEER_PROBE_FALLBACK_PORTS",
-    "443,8443,8444,9443,10443,18443,28443,38443,48443,58443",
-)
+PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN = max(0, int(os.getenv(
+    "PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN",
+    "20" if _LAMBDA_RUNTIME_ENV else "0",
+)))
+PUBLIC_PEER_PROBE_PORTS = (8443, 443, 8080, 5000)
 NOTIFICATION_DELIVERY_INTERVAL_SECONDS = int(os.getenv("NOTIFICATION_DELIVERY_INTERVAL_SECONDS", "180"))
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
@@ -308,7 +307,7 @@ def probe_device_public_endpoint(device: dict) -> dict:
     result = {
         "resolvable": False,
         "public_ip": value or None,
-        "api_port": port,
+        "api_port": port if 1 <= port <= 65535 else None,
         "checked_at": checked_at,
         "latency_ms": None,
         "failure_reason": None,
@@ -321,24 +320,6 @@ def probe_device_public_endpoint(device: dict) -> dict:
     if not address.is_global:
         result["failure_reason"] = "Reported IP is not globally routable"
         return result
-    if port < 1 or port > 65535:
-        result["failure_reason"] = "Reported API port is invalid"
-        return result
-    def candidate_ports() -> list[int]:
-        ports = []
-        seen = set()
-        for raw in [port] + [item.strip() for item in PUBLIC_PEER_PROBE_FALLBACK_PORTS.split(",") if item.strip()]:
-            try:
-                value = int(raw)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= value <= 65535 and value not in seen:
-                seen.add(value)
-                ports.append(value)
-        if PUBLIC_PEER_PROBE_SCAN_ALL_PORTS:
-            ports.extend(candidate for candidate in range(1, 65536) if candidate not in seen)
-        return ports
-
     failures = []
     started = time.monotonic()
     timeout = max(0.05, min(PUBLIC_PEER_PROBE_TIMEOUT_SECONDS, PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS))
@@ -355,9 +336,7 @@ def probe_device_public_endpoint(device: dict) -> dict:
             "latency_ms": int((time.monotonic() - attempt_started) * 1000),
         }, None
 
-    ports = candidate_ports()
-    priority_ports = ports[: len(set([port] + [int(item) for item in PUBLIC_PEER_PROBE_FALLBACK_PORTS.split(",") if item.strip().isdigit()]))]
-    for candidate_port in priority_ports:
+    for candidate_port in PUBLIC_PEER_PROBE_PORTS:
         found, failure = try_port(candidate_port)
         if failure and len(failures) < 3:
             failures.append(failure)
@@ -370,37 +349,42 @@ def probe_device_public_endpoint(device: dict) -> dict:
         result["latency_ms"] = found["latency_ms"]
         result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
         return result
-
-    scan_ports = ports[len(priority_ports):]
-    if scan_ports:
-        executor = ThreadPoolExecutor(max_workers=max(1, PUBLIC_PEER_PROBE_SCAN_WORKERS))
-        try:
-            futures = {executor.submit(try_port, candidate_port): candidate_port for candidate_port in scan_ports}
-            for future in as_completed(futures):
-                found, failure = future.result()
-                if failure and len(failures) < 3:
-                    failures.append(failure)
-                if not found:
-                    continue
-                result["resolvable"] = True
-                result["api_port"] = found["port"]
-                result["discovered_port"] = found["port"]
-                result["latency_ms"] = found["latency_ms"]
-                result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
-                executor.shutdown(wait=False, cancel_futures=True)
-                return result
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
     result["failure_reason"] = "; ".join(failures) if failures else "No reachable public Drone API port found"
     result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
     return result
 
 
+def public_reachability_already_resolved(device: dict) -> bool:
+    """Return whether a Drone already has a stored successful public endpoint."""
+    reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
+    if not reachability.get("resolvable"):
+        return False
+    try:
+        port = int(reachability.get("api_port") or device.get("api_port") or 0)
+    except (TypeError, ValueError):
+        return False
+    if port not in PUBLIC_PEER_PROBE_PORTS:
+        return False
+    network = device.get("network") if isinstance(device.get("network"), dict) else {}
+    reported_ip = str(network.get("public_ip") or network.get("public") or "").strip()
+    resolved_ip = str(reachability.get("public_ip") or "").strip()
+    return bool(reported_ip and resolved_ip and reported_ip == resolved_ip)
+
+
 def poll_public_drone_reachability_once() -> None:
     """Probe public peer endpoints for all approved Drones."""
     db.refresh_persistent_state()
-    for device in list(db.devices.values()):
+    devices = [
+        device for device in list(db.devices.values())
+        if device.get("approval_status", "approved") == "approved"
+    ]
+    devices.sort(key=lambda item: str((item.get("public_reachability") or {}).get("checked_at") or ""))
+    if PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN:
+        devices = devices[:PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN]
+    for device in devices:
         if device.get("approval_status", "approved") != "approved":
+            continue
+        if public_reachability_already_resolved(device):
             continue
         db.update_device_public_reachability(device["id"], probe_device_public_endpoint(device))
 

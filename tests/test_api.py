@@ -3569,20 +3569,88 @@ def test_public_peer_poll_discovers_forwarded_public_port(client, monkeypatch):
             return None
 
     def connect(address, timeout):
-        if address == ("8.8.4.4", 9443):
+        if address == ("8.8.4.4", 8080):
             return FakeConnection()
         raise OSError("closed")
 
-    monkeypatch.setattr(overmind_main, "PUBLIC_PEER_PROBE_FALLBACK_PORTS", "9443")
-    monkeypatch.setattr(overmind_main, "PUBLIC_PEER_PROBE_SCAN_ALL_PORTS", False)
     monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
     overmind_main.poll_public_drone_reachability_once()
 
     device = db.get_device_by_device_id("forwarded-drone")
-    assert device["api_port"] == 9443
-    assert device["reachable_url"] == "https://8.8.4.4:9443"
+    assert device["api_port"] == 8080
+    assert device["reachable_url"] == "https://8.8.4.4:8080"
     swarm_peer = db.get_swarm_for_device("forwarded-drone")[0]
-    assert swarm_peer["public_reachable_url"] == "https://8.8.4.4:9443"
+    assert swarm_peer["public_reachable_url"] == "https://8.8.4.4:8080"
+
+
+def test_public_peer_poll_only_checks_fixed_ports(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "fixed-ports@example.com", "username": "fixed-ports-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("fixed-ports@example.com")
+    db.create_device(
+        owner["id"],
+        "fixed-ports-drone",
+        "Fixed Ports Drone",
+        {"network": {"public_ip": "8.8.4.4"}, "api_port": 8443, "scheme": "https"},
+        raw_token="drone-token",
+    )
+    calls = []
+
+    def connect(address, timeout):
+        calls.append(address)
+        raise OSError("closed")
+
+    monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
+
+    overmind_main.poll_public_drone_reachability_once()
+
+    assert calls == [("8.8.4.4", port) for port in overmind_main.PUBLIC_PEER_PROBE_PORTS]
+
+
+def test_public_peer_poll_skips_already_resolved_public_endpoint(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "skip-probe@example.com", "username": "skip-probe-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("skip-probe@example.com")
+    db.create_device(
+        owner["id"],
+        "skip-probe-drone",
+        "Skip Probe Drone",
+        {"network": {"public_ip": "8.8.4.4"}, "api_port": 8080, "scheme": "https"},
+        raw_token="drone-token",
+    )
+    device = db.get_device_by_device_id("skip-probe-drone")
+    db.update_device_public_reachability(
+        device["id"],
+        {"resolvable": True, "public_ip": "8.8.4.4", "api_port": 8080, "checked_at": datetime.utcnow()},
+    )
+    monkeypatch.setattr(overmind_main.socket, "create_connection", lambda *args, **kwargs: pytest.fail("resolved drone must not be reprobed"))
+
+    overmind_main.poll_public_drone_reachability_once()
+
+    assert db.get_device_by_device_id("skip-probe-drone")["api_port"] == 8080
+
+
+def test_public_peer_poll_limits_devices_per_scheduled_run(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "probe-limit@example.com", "username": "probe-limit-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("probe-limit@example.com")
+    for index in range(3):
+        db.create_device(
+            owner["id"],
+            f"probe-limit-{index}",
+            f"Probe Limit {index}",
+            {"network": {"public_ip": f"8.8.4.{index + 1}"}, "api_port": 8443, "scheme": "https"},
+            raw_token=f"drone-token-{index}",
+        )
+    probed = []
+
+    def probe(device):
+        probed.append(device["device_id"])
+        return {"resolvable": False, "public_ip": (device.get("network") or {}).get("public_ip")}
+
+    monkeypatch.setattr(overmind_main, "PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN", 2)
+    monkeypatch.setattr(overmind_main, "probe_device_public_endpoint", probe)
+
+    overmind_main.poll_public_drone_reachability_once()
+
+    assert len(probed) == 2
 
 
 def test_public_peer_poll_rejects_private_reported_addresses_without_connecting(client, monkeypatch):

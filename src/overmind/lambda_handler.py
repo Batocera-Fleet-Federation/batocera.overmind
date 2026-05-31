@@ -6,6 +6,7 @@ API Gateway invokes ``handler``; EventBridge scheduled rules invoke
 """
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -14,6 +15,8 @@ os.environ.setdefault("OVERMIND_RUNTIME", "lambda")
 from mangum import Mangum  # type: ignore
 
 from overmind.main import app, initialize_runtime, run_scheduled_job
+
+logger = logging.getLogger("overmind.lambda")
 
 
 _adapter = Mangum(app, lifespan="off")
@@ -51,4 +54,5 @@ def scheduled_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         or event.get("detail", {}).get("job")
         or event.get("resources", [""])[0].split("/")[-1]
     )
+    logger.info("Running scheduled Overmind job job=%s", job_name)
     return run_scheduled_job(str(job_name or ""))
