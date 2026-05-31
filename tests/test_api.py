@@ -2981,6 +2981,28 @@ def test_log_source_upload_appends_changed_content(client):
     assert content.splitlines() == ["line-1", "line-2"]
 
 
+def test_log_source_upload_accepts_drone_incremental_fields_and_marks_online(client):
+    user_id = db.create_user("log-upload-online@example.com", "hash")
+    internal_id = db.create_device(user_id, "log-online-drone", "Log Online Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+    db.devices[internal_id]["last_seen"] = datetime.utcnow() - timedelta(seconds=999)
+    db.devices[internal_id]["last_known_status"] = "offline"
+
+    response = client.post(
+        "/api/devices/log-online-drone/log-sources",
+        headers={"Authorization": "Bearer drone-token"},
+        json={
+            "type": "log_sources",
+            "collected_at": "2026-05-31T02:31:51+00:00",
+            "append": True,
+            "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-1\n"}]}],
+        },
+    )
+    assert response.status_code == 200
+    device = db.get_device_by_device_id("log-online-drone")
+    assert device["last_known_status"] == "online"
+    assert device["last_seen"] >= datetime.utcnow() - timedelta(seconds=5)
+
+
 def test_emulator_config_upload_stores_changed_configs(client):
     user_id = db.create_user("config-upload@example.com", "hash")
     db.create_device(user_id, "config-upload-drone", "Config Upload Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")

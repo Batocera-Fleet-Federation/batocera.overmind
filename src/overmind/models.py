@@ -392,6 +392,8 @@ class DroneLogSource(ExtensibleContractModel):
 
 class DroneLogSourcesUpload(StrictContractModel):
     type: Optional[Literal["log_sources"]] = "log_sources"
+    collected_at: Optional[str] = None
+    append: bool = True
     logs: list[DroneLogSource] = Field(default_factory=list)
 
 

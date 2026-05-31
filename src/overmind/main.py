@@ -2547,6 +2547,7 @@ async def upload_device_game_logs(device_id: str, payload: DroneGameLogsUpload, 
 async def upload_device_log_sources(device_id: str, payload: DroneLogSourcesUpload, authorization: Optional[str] = Header(default=None)):
     """Accept changed log source content from a Drone."""
     device = get_current_drone(device_id, authorization)
+    db.update_device_last_seen(device["id"])
     result = payload.model_dump(exclude_none=True)
     result["type"] = "log_sources"
     db.store_action_result(device, result)
