@@ -778,6 +778,38 @@ class PostgresMetadataStore:
         ]
         for statement in statements:
             cur.execute(statement)
+        migrations = [
+            "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_id TEXT REFERENCES swarms(id) ON DELETE SET NULL",
+            "ALTER TABLE drones ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'approved'",
+            "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected BOOLEAN NOT NULL DEFAULT true",
+            "ALTER TABLE drones ADD COLUMN IF NOT EXISTS authorization_token_id TEXT",
+            "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash TEXT",
+            "ALTER TABLE drones ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+            "ALTER TABLE drones ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ",
+            "ALTER TABLE drones ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ",
+            "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS api_port INTEGER",
+            "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS scheme TEXT",
+            "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS reachable_url TEXT",
+            "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_ip TEXT",
+            "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS checked_at TIMESTAMPTZ",
+            "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS hostname TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS model TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS system_name TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS architecture TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS cpu_model TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS cpu_cores INTEGER",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS cpu_threads INTEGER",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS cpu_max_frequency TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS memory_available TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS memory_total TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version TEXT",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS container BOOLEAN",
+            "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+        ]
+        for statement in migrations:
+            cur.execute(statement)
         cur.execute("ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS batocera_info JSONB")
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_drones_user_swarm ON drones(user_id, swarm_id)",

@@ -3996,6 +3996,10 @@ def test_relational_schema_declares_domain_tables():
     assert "REFERENCES drones(id) ON DELETE CASCADE" in source
     assert "CREATE INDEX IF NOT EXISTS idx_roms_drone_system" in source
     assert "CREATE INDEX IF NOT EXISTS idx_actions_drone_status" in source
+    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected" in source
+    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in source
+    assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in source
+    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in source
 
 
 def test_postgres_store_materializes_state_and_assets_into_relational_tables():
