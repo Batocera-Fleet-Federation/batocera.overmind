@@ -4111,6 +4111,84 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
     assert action["payload"] == {"options": {"force": True}}
 
 
+def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_tables():
+    from overmind.postgres_store import PostgresMetadataStore
+
+    reported_at = datetime(2026, 5, 31, 5, 0, tzinfo=timezone.utc)
+
+    class RecordingCursor:
+        def __init__(self):
+            self.sql = ""
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            if "FROM users u" in self.sql:
+                return [(
+                    "u1", "owner@example.com", "hash", True, True, "password", reported_at,
+                    "owner", None, None,
+                    True,
+                    False, False, True, "", "", "owner@example.com",
+                )]
+            if "FROM user_notification_type_settings" in self.sql:
+                return []
+            if "FROM swarms" in self.sql:
+                return [("s1", "u1", "Main", reported_at)]
+            if "FROM swarm_memberships" in self.sql:
+                return [("s1", "u1", "overlord", reported_at)]
+            if "FROM integration_tokens" in self.sql:
+                return []
+            if "FROM drones d" in self.sql and "LEFT JOIN drone_network_state" in self.sql:
+                return [(
+                    "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
+                    None, "target-hash", reported_at, reported_at,
+                    8443, "https", "https://drone-a:8443", False, None, None,
+                    None, None, None, None, None, None, None,
+                    None, None, None, None, None,
+                ), (
+                    "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
+                    None, "source-hash", reported_at, reported_at,
+                    8443, "https", "https://drone-b:8443", True, "198.51.100.2", reported_at,
+                    None, None, None, None, None, None, None,
+                    None, None, None, None, None,
+                )]
+            if "FROM drone_certificates" in self.sql:
+                return [("d2", "loaded", "fp", "sha", "-----BEGIN CERTIFICATE-----\\npeer\\n-----END CERTIFICATE-----", "subject", "issuer", None, None, "1", None, reported_at)]
+            if "FROM drone_certificate_sans" in self.sql:
+                return [("d2", "DNS:drone-b")]
+            if "FROM device_admin_claims" in self.sql:
+                return []
+            if "FROM drone_actions a" in self.sql:
+                return []
+            if "FROM drone_action_parameters" in self.sql:
+                return []
+            if "FROM drone_peer_checks" in self.sql:
+                return [(7, "d1", "drone-a", "drone-b", "https://drone-b:8443", "pass", 12.5, reported_at, None, reported_at)]
+            if "FROM download_snapshots" in self.sql:
+                return [("d1", 11, reported_at, "target_drone", 1)]
+            if "FROM download_items" in self.sql:
+                return [(11, "job-1", "active", "rom", "downloading", "drone-b", "snes", "Game.zip", "Game.zip", None, None, 100, 25, 25.0, 1024.0, 1, None)]
+            if "FROM sync_activity" in self.sql:
+                return [("sync-1", "d1", "drone-a", "drone-b", "rom", "download", "completed", "snes", "Game.zip", "abc", None, None, 100, 100, reported_at, reported_at, None, reported_at)]
+            if "FROM pending_drone_connections" in self.sql:
+                return []
+            return []
+
+    state = PostgresMetadataStore()._load_relational_state(RecordingCursor())
+
+    assert state["devices"]["d2"]["certificate"]["public_certificate"].startswith("-----BEGIN CERTIFICATE-----")
+    assert state["devices"]["d2"]["certificate"]["san"] == ["DNS:drone-b"]
+    assert state["peer_checks"]["d1"][0]["target_drone_id"] == "drone-b"
+    assert state["peer_checks"]["d1"][0]["status"] == "pass"
+    active = state["download_states"]["d1"]["active"][0]
+    assert active["job_id"] == "job-1"
+    assert active["downloaded_bytes"] == 25
+    sync = state["rom_sync_activity"]["d1"][0]
+    assert sync["source_drone_id"] == "drone-b"
+    assert sync["status"] == "completed"
+
+
 def test_overmind_database_requires_postgres_without_legacy_seed_gate():
     source = Path(__file__).resolve().parents[1].joinpath("src/overmind/db.py").read_text(encoding="utf-8")
     main_source = Path(__file__).resolve().parents[1].joinpath("src/overmind/main.py").read_text(encoding="utf-8")

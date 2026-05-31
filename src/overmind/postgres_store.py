@@ -890,6 +890,9 @@ class PostgresMetadataStore:
             "devices": {},
             "device_admin_claims": {},
             "device_actions": {},
+            "peer_checks": {},
+            "download_states": {},
+            "rom_sync_activity": {},
             "pending_drone_connections": {},
         }
         try:
@@ -1028,6 +1031,50 @@ class PostgresMetadataStore:
             state["devices"][internal_id] = device
             state["user_devices"].setdefault(user_id, []).append(internal_id)
 
+        cur.execute(
+            """
+            SELECT c.drone_id, c.status, c.fingerprint, c.sha256_fingerprint, c.public_certificate,
+                   c.subject, c.issuer, c.valid_from, c.valid_until, c.serial_number, c.overmind_signed_at,
+                   c.updated_at
+            FROM drone_certificates c
+            JOIN drones d ON d.id = c.drone_id
+            WHERE d.removed_at IS NULL
+            """
+        )
+        for drone_id, cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer, valid_from, valid_until, serial_number, overmind_signed_at, updated_at in cur.fetchall():
+            device = state["devices"].get(drone_id)
+            if not device:
+                continue
+            device["certificate"] = {
+                "status": cert_status,
+                "fingerprint": fingerprint,
+                "sha256_fingerprint": sha256_fingerprint,
+                "public_certificate": public_certificate,
+                "certificate_pem": public_certificate,
+                "subject": subject,
+                "issuer": issuer,
+                "valid_from": valid_from,
+                "valid_until": valid_until,
+                "serial_number": serial_number,
+                "overmind_signed_at": overmind_signed_at,
+                "updated_at": updated_at,
+                "san": [],
+            }
+
+        cur.execute(
+            """
+            SELECT s.drone_id, s.san
+            FROM drone_certificate_sans s
+            JOIN drones d ON d.id = s.drone_id
+            WHERE d.removed_at IS NULL
+            ORDER BY s.san
+            """
+        )
+        for drone_id, san in cur.fetchall():
+            cert = (state["devices"].get(drone_id) or {}).get("certificate")
+            if isinstance(cert, dict) and san:
+                cert.setdefault("san", []).append(san)
+
         cur.execute("SELECT drone_id, user_id FROM device_admin_claims")
         for drone_id, user_id in cur.fetchall():
             state["device_admin_claims"].setdefault(drone_id, []).append(user_id)
@@ -1082,6 +1129,132 @@ class PostgresMetadataStore:
             except (TypeError, ValueError, json.JSONDecodeError):
                 value = parameter_value
             action.setdefault("payload", {})[str(parameter_name)] = value
+
+        cur.execute(
+            """
+            SELECT c.id, c.source_drone_id, sd.device_id, c.target_drone_id, c.target_address,
+                   c.status, c.latency_ms, c.checked_at, c.error, c.received_at
+            FROM drone_peer_checks c
+            JOIN drones sd ON sd.id = c.source_drone_id
+            WHERE sd.removed_at IS NULL
+            ORDER BY c.received_at ASC, c.id ASC
+            """
+        )
+        for check_id, source_internal_id, source_device_id, target_drone_id, target_address, check_status, latency_ms, checked_at, error, received_at in cur.fetchall():
+            state["peer_checks"].setdefault(source_internal_id, []).append({
+                "id": str(check_id),
+                "source_drone_id": source_device_id,
+                "target_drone_id": target_drone_id,
+                "target_address": target_address,
+                "status": check_status or "fail",
+                "latency_ms": latency_ms,
+                "failure_reason": error,
+                "checked_at": checked_at,
+                "received_at": received_at,
+            })
+
+        cur.execute(
+            """
+            SELECT target_drone_id, id, reported_at, concurrency_scope, active_limit
+            FROM (
+                SELECT s.*, row_number() OVER (PARTITION BY s.target_drone_id ORDER BY s.reported_at DESC, s.id DESC) AS rn
+                FROM download_snapshots s
+            ) ranked
+            WHERE rn = 1
+            """
+        )
+        latest_download_snapshots = {}
+        for target_internal_id, snapshot_id, reported_at, concurrency_scope, active_limit in cur.fetchall():
+            latest_download_snapshots[snapshot_id] = target_internal_id
+            state["download_states"][target_internal_id] = {
+                "target_drone_id": (state["devices"].get(target_internal_id) or {}).get("device_id"),
+                "concurrency": {"scope": concurrency_scope or "target_drone", "active_limit": active_limit or 1},
+                "active": [],
+                "queued": [],
+                "recent": [],
+                "downloads": [],
+                "received_at": reported_at,
+            }
+        if latest_download_snapshots:
+            cur.execute(
+                """
+                SELECT snapshot_id, job_id, state_bucket, asset_type, status, source_drone_id, system_name,
+                       file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes,
+                       percentage, transfer_speed_bps, queue_position, failure_reason
+                FROM download_items
+                WHERE snapshot_id = ANY(%s)
+                ORDER BY id ASC
+                """,
+                (list(latest_download_snapshots),),
+            )
+            for snapshot_id, job_id, state_bucket, asset_type, item_status, source_drone_id, system_name, file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes, percentage, transfer_speed_bps, queue_position, failure_reason in cur.fetchall():
+                target_internal_id = latest_download_snapshots.get(snapshot_id)
+                state_row = state["download_states"].get(target_internal_id)
+                if not state_row or state_bucket not in {"active", "queued", "recent"}:
+                    continue
+                item = {
+                    "job_id": job_id,
+                    "asset_type": asset_type,
+                    "status": item_status,
+                    "source_drone_id": source_drone_id,
+                    "system": system_name,
+                    "file_path": file_path,
+                    "relative_path": file_path,
+                    "rom_path": rom_path,
+                    "bios_name": bios_name,
+                    "artwork_type": artwork_type,
+                    "file_size": file_size,
+                    "total_bytes": file_size,
+                    "downloaded_bytes": downloaded_bytes,
+                    "bytes_transferred": downloaded_bytes,
+                    "percentage": percentage,
+                    "transfer_speed_bps": transfer_speed_bps,
+                    "queue_position": queue_position,
+                    "failure_reason": failure_reason,
+                }
+                state_row[state_bucket].append(item)
+                state_row["downloads"].append(item)
+
+        cur.execute(
+            """
+            SELECT a.id, a.target_drone_id, td.device_id, a.source_drone_id, a.asset_type, a.action,
+                   a.status, a.system_name, a.file_path, a.rom_md5, a.bios_md5, a.artwork_type,
+                   a.bytes_transferred, a.file_size, a.started_at, a.completed_at, a.failure_reason,
+                   a.received_at
+            FROM sync_activity a
+            LEFT JOIN drones td ON td.id = a.target_drone_id
+            WHERE td.removed_at IS NULL OR td.id IS NULL
+            ORDER BY a.received_at ASC
+            """
+        )
+        for sync_id, target_internal_id, target_device_id, source_drone_id, asset_type, action, activity_status, system_name, file_path, rom_md5, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at, failure_reason, received_at in cur.fetchall():
+            if not target_internal_id:
+                continue
+            state["rom_sync_activity"].setdefault(target_internal_id, []).append({
+                "id": sync_id,
+                "sync_id": sync_id,
+                "asset_type": asset_type,
+                "source_drone_id": source_drone_id,
+                "target_drone_id": target_device_id,
+                "system": system_name,
+                "rom_name": file_path,
+                "rom_path": file_path,
+                "bios_name": file_path if asset_type == "bios" else None,
+                "artwork_type": artwork_type,
+                "relative_path": file_path,
+                "action": action or "download",
+                "status": activity_status or "pending",
+                "bytes_transferred": bytes_transferred,
+                "file_size": file_size,
+                "rom_md5": rom_md5,
+                "bios_md5": bios_md5,
+                "download_started_at": started_at,
+                "download_completed_at": completed_at,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "failure_reason": failure_reason,
+                "received_at": received_at,
+            })
 
         cur.execute("SELECT device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status FROM pending_drone_connections")
         for device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status in cur.fetchall():
