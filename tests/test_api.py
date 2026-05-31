@@ -683,6 +683,10 @@ def test_super_admin_overview_and_delete_permissions(client):
     assert "cpu" in metrics.json()["metrics"]
     assert "memory" in metrics.json()["metrics"]
 
+    logs = client.get("/api/admin/runtime-logs", headers={"Authorization": f"Bearer {admin_token}"})
+    assert logs.status_code == 200
+    assert set(logs.json()["logs"]) >= {"stdout", "stderr", "max_lines", "captured_at"}
+
     self_delete = client.delete(
         f"/api/admin/users/{db.get_user_by_email('mr_jerrodh@hotmail.com')['id']}",
         headers={"Authorization": f"Bearer {admin_token}"},
@@ -3316,7 +3320,10 @@ def test_super_admin_runtime_metrics_ui_refreshes_when_viewed():
     js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
 
     assert 'id="super-admin-metrics"' in html
+    assert 'id="super-admin-logs"' in html
     assert "apiGet('/api/admin/runtime-metrics')" in js
+    assert "apiGet('/api/admin/runtime-logs')" in js
+    assert "Overmind Runtime Logs" in js
     assert "setInterval(() =>" in js
     assert "5000" in js
 

@@ -3779,12 +3779,47 @@
                 }
             }
 
+            async function loadSuperAdminLogs() {
+                const container = document.getElementById('super-admin-logs');
+                if (!container || !isSuperAdmin()) return;
+                try {
+                    const response = await apiGet('/api/admin/runtime-logs');
+                    if (!response.ok) throw new Error('Failed to load runtime logs');
+                    const payload = await response.json();
+                    const logs = payload.logs || {};
+                    container.innerHTML = `
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                            <h4 class="h5 mb-0">Overmind Runtime Logs</h4>
+                            <span class="badge text-bg-secondary">last ${Number(logs.max_lines || 0)} lines</span>
+                        </div>
+                        <div class="row g-3">
+                            <div class="col-12 col-xl-6">
+                                <div class="small text-muted mb-1">stdout</div>
+                                <pre class="mono bg-dark text-light p-3 rounded mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;">${escapeHtml(logs.stdout || 'No stdout captured yet.')}</pre>
+                            </div>
+                            <div class="col-12 col-xl-6">
+                                <div class="small text-muted mb-1">stderr</div>
+                                <pre class="mono bg-dark text-light p-3 rounded mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;">${escapeHtml(logs.stderr || 'No stderr captured yet.')}</pre>
+                            </div>
+                        </div>
+                        <div class="small text-muted mt-2">Captured: ${logs.captured_at ? new Date(logs.captured_at).toLocaleString() : 'n/a'}</div>
+                    `;
+                } catch (error) {
+                    console.error('Error loading runtime logs:', error);
+                    container.innerHTML = '<div class="empty-state">Unable to load runtime logs.</div>';
+                }
+            }
+
             function startSuperAdminMetricsPolling() {
                 if (!isSuperAdmin()) return;
                 loadSuperAdminMetrics();
+                loadSuperAdminLogs();
                 if (superAdminMetricsTimer) return;
                 superAdminMetricsTimer = setInterval(() => {
-                    if (currentTab === 'super-admin') loadSuperAdminMetrics();
+                    if (currentTab === 'super-admin') {
+                        loadSuperAdminMetrics();
+                        loadSuperAdminLogs();
+                    }
                 }, 5000);
             }
 

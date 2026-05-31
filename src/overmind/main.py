@@ -10,6 +10,7 @@ import logging
 import os
 import secrets
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -17,6 +18,7 @@ import urllib.parse
 import urllib.request
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
 from functools import partial
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -108,11 +110,96 @@ CONTENT_DIR = Path(__file__).resolve().parent.parent.parent / "content"
 VERSION_FILE = Path(__file__).resolve().parent.parent.parent / "VERSION"
 OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
+OVERMIND_LOG_CAPTURE_LINES = max(100, int(os.getenv("OVERMIND_LOG_CAPTURE_LINES", "1000")))
+_STREAM_LOG_CAPTURE: Optional["StreamLogCapture"] = None
 
 admin_user_row = partial(_admin_user_row, data_store=db, super_admin_email=SUPER_ADMIN_EMAIL)
 admin_swarm_row = partial(_admin_swarm_row, data_store=db)
 admin_drone_row = partial(_admin_drone_row, data_store=db)
 device_response = partial(_device_response, data_store=db, offline_threshold_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
+
+
+class CapturedStream:
+    """Mirror a stream while retaining a bounded recent tail for the UI."""
+
+    def __init__(self, name: str, wrapped: object, max_lines: int) -> None:
+        self.name = name
+        self.wrapped = wrapped
+        self.lines = deque(maxlen=max_lines)
+        self._pending = ""
+        self._lock = threading.RLock()
+        self.encoding = getattr(wrapped, "encoding", "utf-8")
+        self.errors = getattr(wrapped, "errors", "replace")
+
+    def write(self, data: object) -> int:
+        text = str(data)
+        with self._lock:
+            self._pending += text
+            while "\n" in self._pending:
+                line, self._pending = self._pending.split("\n", 1)
+                self.lines.append(line)
+        return self.wrapped.write(text)
+
+    def flush(self) -> None:
+        flush = getattr(self.wrapped, "flush", None)
+        if callable(flush):
+            flush()
+
+    def isatty(self) -> bool:
+        isatty = getattr(self.wrapped, "isatty", None)
+        return bool(isatty()) if callable(isatty) else False
+
+    def fileno(self) -> int:
+        fileno = getattr(self.wrapped, "fileno", None)
+        if not callable(fileno):
+            raise OSError("wrapped stream has no file descriptor")
+        return int(fileno())
+
+    def snapshot(self) -> str:
+        with self._lock:
+            rows = list(self.lines)
+            if self._pending:
+                rows.append(self._pending)
+        return "\n".join(rows)
+
+
+class StreamLogCapture:
+    def __init__(self, max_lines: int) -> None:
+        self.stdout = CapturedStream("stdout", sys.stdout, max_lines)
+        self.stderr = CapturedStream("stderr", sys.stderr, max_lines)
+
+    def install(self) -> None:
+        sys.stdout = self.stdout  # type: ignore[assignment]
+        sys.stderr = self.stderr  # type: ignore[assignment]
+
+    def snapshot(self) -> dict:
+        return {
+            "stdout": self.stdout.snapshot(),
+            "stderr": self.stderr.snapshot(),
+            "max_lines": OVERMIND_LOG_CAPTURE_LINES,
+            "captured_at": datetime.utcnow().isoformat() + "Z",
+            "capture_active": True,
+        }
+
+
+def install_stream_log_capture() -> None:
+    global _STREAM_LOG_CAPTURE
+    if _STREAM_LOG_CAPTURE is not None:
+        return
+    _STREAM_LOG_CAPTURE = StreamLogCapture(OVERMIND_LOG_CAPTURE_LINES)
+    _STREAM_LOG_CAPTURE.install()
+
+
+def stream_log_snapshot() -> dict:
+    return _STREAM_LOG_CAPTURE.snapshot() if _STREAM_LOG_CAPTURE else {
+        "stdout": "",
+        "stderr": "",
+        "max_lines": OVERMIND_LOG_CAPTURE_LINES,
+        "captured_at": datetime.utcnow().isoformat() + "Z",
+        "capture_active": False,
+    }
+
+
 send_verification_email = partial(
     _send_verification_email,
     email_client=emailer,
@@ -358,6 +445,7 @@ def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Opt
     global _RUNTIME_SECRET_REFRESHER, _RUNTIME_INITIALIZED
     if _RUNTIME_INITIALIZED:
         return
+    install_stream_log_capture()
 
     lambda_runtime = is_lambda_runtime()
     if start_pollers is None:
@@ -1022,6 +1110,12 @@ async def admin_overview(authorization: Optional[str] = Header(default=None)):
 async def admin_runtime_metrics(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
     return {"metrics": collect_runtime_metrics(Path.cwd())}
+
+
+@app.get("/api/admin/runtime-logs")
+async def admin_runtime_logs(authorization: Optional[str] = Header(default=None)):
+    require_super_admin(authorization)
+    return {"logs": stream_log_snapshot()}
 
 
 @app.delete("/api/admin/users/{user_id}")
