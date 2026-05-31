@@ -62,6 +62,48 @@ def test_handler_skips_runtime_startup_for_public_health(monkeypatch):
     assert called["startup"] is False
 
 
+def test_handler_loads_secret_without_runtime_startup_for_auth_providers(monkeypatch):
+    called = {"startup": False, "secret": False}
+
+    def fail_if_called(**kwargs):
+        called["startup"] = True
+        raise AssertionError("startup should be skipped")
+
+    def load_secret(**kwargs):
+        called["secret"] = True
+
+    monkeypatch.setattr(lambda_handler, "_LIGHTWEIGHT_RUNTIME_SECRET_LOADED", False)
+    monkeypatch.setattr(lambda_handler, "initialize_runtime", fail_if_called)
+    monkeypatch.setattr(lambda_handler, "load_runtime_secret_once", load_secret)
+    monkeypatch.setattr(lambda_handler, "_adapter", lambda event, context: {"statusCode": 200})
+
+    result = lambda_handler.handler({"rawPath": "/api/auth/providers", "requestContext": {"http": {"method": "GET"}}}, None)
+
+    assert result == {"statusCode": 200}
+    assert called == {"startup": False, "secret": True}
+
+
+def test_handler_loads_secret_without_runtime_startup_for_oauth_start(monkeypatch):
+    called = {"startup": False, "secret": False}
+
+    def fail_if_called(**kwargs):
+        called["startup"] = True
+        raise AssertionError("startup should be skipped")
+
+    def load_secret(**kwargs):
+        called["secret"] = True
+
+    monkeypatch.setattr(lambda_handler, "_LIGHTWEIGHT_RUNTIME_SECRET_LOADED", False)
+    monkeypatch.setattr(lambda_handler, "initialize_runtime", fail_if_called)
+    monkeypatch.setattr(lambda_handler, "load_runtime_secret_once", load_secret)
+    monkeypatch.setattr(lambda_handler, "_adapter", lambda event, context: {"statusCode": 307})
+
+    result = lambda_handler.handler({"rawPath": "/api/auth/github/start", "requestContext": {"http": {"method": "GET"}}}, None)
+
+    assert result == {"statusCode": 307}
+    assert called == {"startup": False, "secret": True}
+
+
 def test_handler_initializes_runtime_for_api_routes(monkeypatch):
     called = {"startup": False}
 
