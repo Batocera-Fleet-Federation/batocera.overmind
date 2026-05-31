@@ -117,11 +117,14 @@ def hive_response(user: dict, *, data_store: Any) -> dict:
 def device_response(device: dict, *, data_store: Any, offline_threshold_seconds: int) -> dict:
     """Return the public device shape for the Overmind UI."""
     last_seen = device.get("last_seen")
+    cutoff = datetime.utcnow() - timedelta(seconds=offline_threshold_seconds)
     online = False
-    try:
-        online = bool(last_seen and last_seen >= datetime.utcnow() - timedelta(seconds=offline_threshold_seconds))
-    except Exception:
-        online = False
+    if isinstance(last_seen, datetime):
+        if last_seen.tzinfo is None and cutoff.tzinfo is not None:
+            last_seen = last_seen.replace(tzinfo=cutoff.tzinfo)
+        elif last_seen.tzinfo is not None and cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=last_seen.tzinfo)
+        online = last_seen >= cutoff
     cert = dict(device.get("certificate") or {})
     cert.pop("private_key", None)
     cert.pop("key", None)

@@ -3436,6 +3436,21 @@ def test_swarm_response_handles_postgres_timezone_aware_last_seen(client):
     assert swarm[0]["online"] is True
 
 
+def test_device_list_marks_postgres_timezone_aware_last_seen_online(client):
+    client.post("/api/auth/register", json={"email": "aware-list@example.com", "username": "aware-list-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "aware-list@example.com", "password": "testpass123"}).json()["access_token"]
+    user = db.get_user_by_email("aware-list@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    db.get_device_by_device_id("drone-a")["last_seen"] = datetime.now(timezone.utc)
+
+    response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    device = response.json()["devices"][0]
+    assert device["online"] is True
+    assert device["status"] == "online"
+
+
 def test_public_peer_poll_marks_public_endpoint_resolvable_for_swarm_transfer(client, monkeypatch):
     client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
     token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
