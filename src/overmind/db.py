@@ -55,7 +55,6 @@ class OvermindDatabase:
     )
     _PERSIST_AFTER_METHODS = {
         "create_user",
-        "get_or_create_social_user",
         "update_user_profile",
         "update_user_fleet_settings",
         "update_user_notification_settings",
@@ -115,6 +114,7 @@ class OvermindDatabase:
         "get_user",
         "user_exists",
         "username_exists",
+        "get_or_create_social_user",
     }
 
     def __getattribute__(self, name):
@@ -584,6 +584,27 @@ class OvermindDatabase:
 
     def get_or_create_social_user(self, email: str, full_name: Optional[str], provider: str) -> dict:
         """Create or return a user authenticated by a configured social provider."""
+        requested_username = self.available_username(full_name or email.split("@", 1)[0])
+        if postgres_store.url:
+            user_id = str(uuid.uuid4())
+            result = postgres_store.complete_social_login(
+                email=email,
+                full_name=full_name,
+                provider=provider,
+                user_id=user_id,
+                password_hash=auth.hash_password(str(uuid.uuid4())),
+                username=requested_username,
+                notification_types=dict(DEFAULT_NOTIFICATION_TYPES),
+            )
+            if not result or not result.get("user"):
+                raise RuntimeError("PostgreSQL is unavailable while completing social login")
+            user = result["user"]
+            self.users[user["id"]] = user
+            self.user_by_email[user["email"]] = user["id"]
+            self.user_devices.setdefault(user["id"], [])
+            self._record_social_login_relationships(user, result.get("swarm"), result.get("accepted_invitations") or [])
+            return user
+
         existing = self.get_user_by_email(email)
         if existing:
             existing["auth_provider"] = existing.get("auth_provider") or provider
@@ -593,29 +614,102 @@ class OvermindDatabase:
                 existing["username"] = self.available_username(full_name or email.split("@", 1)[0], exclude_user_id=existing["id"])
             existing["email_verified"] = True
             existing["is_active"] = True
-            postgres_store.set_user_verified(existing["id"])
-            postgres_store.update_user_profile(
-                existing["id"],
-                existing.get("username"),
-                existing.get("full_name"),
-                existing.get("avatar_data_url"),
-            )
-            postgres_store.upsert_social_identity(existing["id"], provider, email, email)
-            self.ensure_personal_swarm(existing["id"])
-            self.accept_invitations_for_email(email, existing["id"])
+            self._ensure_social_login_relationships(existing, email)
             return existing
 
-        username = self.available_username(full_name or email.split("@", 1)[0])
-        user_id = self.create_user(email, auth.hash_password(str(uuid.uuid4())), full_name, verified=True, auth_provider=provider, username=username)
-        user = self.users[user_id]
+        username = requested_username
+        user_id = str(uuid.uuid4())
+        user = {
+            "id": user_id,
+            "email": email,
+            "password": auth.hash_password(str(uuid.uuid4())),
+            "full_name": full_name,
+            "username": username,
+            "email_verified": True,
+            "is_active": True,
+            "auth_provider": provider,
+            "fleet_settings": {"auto_sync_roms": True},
+            "notification_settings": {
+                "notify_slack": False,
+                "notify_discord": False,
+                "notify_email": True,
+                "slack_webhook": "",
+                "discord_webhook": "",
+                "email_address": email,
+                "types": dict(DEFAULT_NOTIFICATION_TYPES),
+            },
+            "created_at": datetime.utcnow(),
+        }
+        relational_user = postgres_store.create_user_record(
+            user_id=user_id,
+            email=email,
+            password_hash=user["password"],
+            full_name=full_name,
+            verified=True,
+            auth_provider=provider,
+            username=username,
+            notification_types=dict(DEFAULT_NOTIFICATION_TYPES),
+        )
+        if relational_user:
+            user = relational_user
+            user_id = user["id"]
+        elif postgres_store.url:
+            raise RuntimeError("PostgreSQL is unavailable while completing social login")
+        self.users[user_id] = user
+        self.user_by_email[email] = user_id
+        self.user_devices.setdefault(user_id, [])
         user["auth_provider"] = provider
         user["email_verified"] = True
         user["is_active"] = True
-        postgres_store.set_user_verified(user_id)
-        postgres_store.upsert_social_identity(user_id, provider, email, email)
-        self.ensure_personal_swarm(user_id)
-        self.accept_invitations_for_email(email, user_id)
+        self._ensure_social_login_relationships(user, email)
         return user
+
+    def _ensure_social_login_relationships(self, user: dict, email: str) -> None:
+        user_id = user.get("id")
+        if not user_id:
+            return
+        swarm_name = f"{user.get('full_name') or user.get('email') or 'Overlord'}'s Swarm"
+        relational_swarm = postgres_store.ensure_personal_swarm(user_id, swarm_name)
+        if relational_swarm:
+            swarm_id = relational_swarm["id"]
+            self.swarms[swarm_id] = relational_swarm
+            self.swarm_memberships.setdefault(swarm_id, {})[user_id] = {
+                "user_id": user_id,
+                "role": "overlord",
+                "created_at": relational_swarm.get("created_at") or datetime.utcnow(),
+            }
+        else:
+            self.ensure_personal_swarm(user_id)
+        accepted = postgres_store.accept_invitations_for_email(email, user_id)
+        for invite in accepted:
+            swarm_id = invite.get("swarm_id")
+            if swarm_id:
+                self.swarm_memberships.setdefault(swarm_id, {})[user_id] = {
+                    "user_id": user_id,
+                    "role": invite.get("role") or "overseer",
+                    "created_at": invite.get("accepted_at") or datetime.utcnow(),
+                }
+        if not accepted:
+            self.accept_invitations_for_email(email, user_id)
+
+    def _record_social_login_relationships(self, user: dict, swarm: Optional[dict], accepted: list[dict]) -> None:
+        user_id = user.get("id")
+        if swarm and user_id:
+            swarm_id = swarm["id"]
+            self.swarms[swarm_id] = swarm
+            self.swarm_memberships.setdefault(swarm_id, {})[user_id] = {
+                "user_id": user_id,
+                "role": "overlord",
+                "created_at": swarm.get("created_at") or datetime.utcnow(),
+            }
+        for invite in accepted:
+            swarm_id = invite.get("swarm_id")
+            if swarm_id and user_id:
+                self.swarm_memberships.setdefault(swarm_id, {})[user_id] = {
+                    "user_id": user_id,
+                    "role": invite.get("role") or "overseer",
+                    "created_at": invite.get("accepted_at") or datetime.utcnow(),
+                }
 
     def set_user_verified(self, user_id: str) -> Optional[dict]:
         relational = postgres_store.set_user_verified(user_id)
@@ -1312,7 +1406,7 @@ class OvermindDatabase:
             "peer_checks": [],
             "approval_status": "approved",
         }
-        self.user_devices[user_id].append(internal_id)
+        self.user_devices.setdefault(user_id, []).append(internal_id)
         self.roms[internal_id] = []
         self.bios[internal_id] = []
         self.artwork[internal_id] = []

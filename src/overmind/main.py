@@ -1028,8 +1028,11 @@ async def social_auth_callback(provider: str, request: Request):
         logger.warning("OAuth provider did not return an email provider=%s", provider)
         return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login did not return a verified email.")
 
-    db.refresh_persistent_state()
-    user = db.get_or_create_social_user(email, full_name, provider)
+    try:
+        user = db.get_or_create_social_user(email, full_name, provider)
+    except RuntimeError as error:
+        logger.warning("OAuth social login persistence failed provider=%s error=%s", provider, error)
+        return oauth_failure_redirect(provider, f"{oauth_provider_label(provider)} login could not reach Overmind storage. Please try again.")
     login_data = build_login_response(user)
     token = urllib.parse.quote(login_data["access_token"])
     return RedirectResponse(f"/#oauth_token={token}&provider={provider}")
@@ -1556,8 +1559,8 @@ async def deny_drone_connection(device_id: str, authorization: Optional[str] = H
 async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List all devices for the authenticated user."""
     user = get_current_user(authorization)
-    db.refresh_persistent_state()
-    db.update_device_status_notifications(SWARM_OFFLINE_THRESHOLD_SECONDS)
+    if not os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        db.update_device_status_notifications(SWARM_OFFLINE_THRESHOLD_SECONDS)
     sid = selected_swarm_id(user, swarm_id) if swarm_id else None
     devices = db.get_user_devices(user["id"], sid)
     

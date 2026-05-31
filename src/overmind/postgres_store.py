@@ -775,7 +775,9 @@ class PostgresMetadataStore:
                 title TEXT NOT NULL,
                 message TEXT NOT NULL,
                 actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                delivery_pending BOOLEAN NOT NULL DEFAULT false,
+                delivery_completed_at TIMESTAMPTZ
             )
             """,
             """
@@ -838,6 +840,8 @@ class PostgresMetadataStore:
             "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version TEXT",
             "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS container BOOLEAN",
             "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+            "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_completed_at TIMESTAMPTZ",
         ]
         for statement in migrations:
             cur.execute(statement)
@@ -903,6 +907,8 @@ class PostgresMetadataStore:
                 row = cur.fetchone()
                 if row:
                     state = _decode_state(row[0])
+                    if not _persist_json_app_state_enabled() and isinstance(state, dict):
+                        state.pop("notifications", None)
                 relational = self._load_relational_state(cur)
         if not isinstance(state, dict):
             state = {}
@@ -927,6 +933,7 @@ class PostgresMetadataStore:
             "peer_checks": {},
             "download_states": {},
             "rom_sync_activity": {},
+            "notifications": {},
             "pending_drone_connections": {},
         }
         try:
@@ -977,6 +984,7 @@ class PostgresMetadataStore:
             }
             state["users"][user_id] = user
             state["user_by_email"][email] = user_id
+            state["user_devices"].setdefault(user_id, [])
 
         cur.execute("SELECT user_id, event_type, enabled FROM user_notification_type_settings")
         for user_id, event_type, enabled in cur.fetchall():
@@ -1373,6 +1381,67 @@ class PostgresMetadataStore:
                 "received_at": received_at,
             })
 
+        cur.execute(
+            """
+            SELECT id, swarm_id, event_type, title, message, actor_user_id,
+                   created_at, delivery_pending, delivery_completed_at
+            FROM notifications
+            ORDER BY created_at ASC
+            """
+        )
+        notifications_by_id = {}
+        for notification_id, swarm_id, event_type, title, message, actor_user_id, created_at, delivery_pending, delivery_completed_at in cur.fetchall():
+            entry = {
+                "id": notification_id,
+                "swarm_id": swarm_id,
+                "event_type": event_type,
+                "title": title,
+                "message": message,
+                "actor_user_id": actor_user_id,
+                "created_at": created_at,
+                "details": {},
+                "read_by": {},
+                "dismissed_by": {},
+                "delivery_pending": bool(delivery_pending),
+                "delivery_completed_at": delivery_completed_at,
+            }
+            notifications_by_id[notification_id] = entry
+            state["notifications"].setdefault(swarm_id, []).append(entry)
+        if notifications_by_id:
+            cur.execute(
+                """
+                SELECT notification_id, field_name, field_value
+                FROM notification_fields
+                WHERE notification_id = ANY(%s)
+                """,
+                (list(notifications_by_id),),
+            )
+            for notification_id, field_name, field_value in cur.fetchall():
+                entry = notifications_by_id.get(notification_id)
+                if not entry or not field_name:
+                    continue
+                try:
+                    value = _decode_state(json.loads(field_value)) if field_value is not None else None
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    value = field_value
+                entry.setdefault("details", {})[str(field_name)] = value
+            cur.execute(
+                """
+                SELECT notification_id, user_id, read_at, dismissed_at
+                FROM notification_recipients
+                WHERE notification_id = ANY(%s)
+                """,
+                (list(notifications_by_id),),
+            )
+            for notification_id, user_id, read_at, dismissed_at in cur.fetchall():
+                entry = notifications_by_id.get(notification_id)
+                if not entry or not user_id:
+                    continue
+                if read_at:
+                    entry.setdefault("read_by", {})[user_id] = read_at
+                if dismissed_at:
+                    entry.setdefault("dismissed_by", {})[user_id] = dismissed_at
+
         cur.execute("SELECT device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status FROM pending_drone_connections")
         for device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status in cur.fetchall():
             state["pending_drone_connections"][device_id] = {
@@ -1595,6 +1664,175 @@ class PostgresMetadataStore:
                     (user_id, username, full_name, avatar_data_url),
                 )
         return self.get_user(user_id)
+
+    def complete_social_login(
+        self,
+        *,
+        email: str,
+        full_name: Optional[str],
+        provider: str,
+        user_id: str,
+        password_hash: str,
+        username: Optional[str],
+        notification_types: dict,
+    ) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(self._select_user_sql("lower(u.email) = lower(%s)"), (email,))
+                existing = self._user_from_row(cur.fetchone())
+                if existing:
+                    user_id = existing["id"]
+                    username = existing.get("username") or username
+                    full_name = existing.get("full_name") or full_name
+                    cur.execute(
+                        "UPDATE users SET email_verified = true, is_active = true, updated_at = now() WHERE id = %s",
+                        (user_id,),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO user_profiles (user_id, username, full_name, avatar_data_url, updated_at)
+                        VALUES (%s, %s, %s, %s, now())
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            username = COALESCE(user_profiles.username, EXCLUDED.username),
+                            full_name = COALESCE(user_profiles.full_name, EXCLUDED.full_name),
+                            avatar_data_url = COALESCE(user_profiles.avatar_data_url, EXCLUDED.avatar_data_url),
+                            updated_at = now()
+                        """,
+                        (user_id, username, full_name, existing.get("avatar_data_url")),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO users (id, email, password_hash, email_verified, is_active, auth_provider, created_at, updated_at)
+                        VALUES (%s, %s, %s, true, true, %s, now(), now())
+                        """,
+                        (user_id, email, password_hash, provider or "password"),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO user_profiles (user_id, username, full_name, avatar_data_url, updated_at)
+                        VALUES (%s, %s, %s, NULL, now())
+                        """,
+                        (user_id, username, full_name),
+                    )
+                    cur.execute("INSERT INTO user_fleet_settings (user_id, auto_sync_roms) VALUES (%s, true)", (user_id,))
+                    cur.execute(
+                        """
+                        INSERT INTO user_notification_settings
+                            (user_id, notify_slack, notify_discord, notify_email, slack_webhook, discord_webhook, email_address)
+                        VALUES (%s, false, false, true, NULL, NULL, %s)
+                        """,
+                        (user_id, email),
+                    )
+                    for event_type, enabled in notification_types.items():
+                        cur.execute(
+                            """
+                            INSERT INTO user_notification_type_settings (user_id, event_type, enabled)
+                            VALUES (%s, %s, %s)
+                            """,
+                            (user_id, str(event_type), bool(enabled)),
+                        )
+                cur.execute(
+                    """
+                    INSERT INTO user_auth_identities (user_id, provider, provider_subject, provider_email, last_login_at)
+                    VALUES (%s, %s, %s, %s, now())
+                    ON CONFLICT (user_id, provider) DO UPDATE SET
+                        provider_subject = EXCLUDED.provider_subject,
+                        provider_email = EXCLUDED.provider_email,
+                        last_login_at = now()
+                    """,
+                    (user_id, provider, email, email),
+                )
+                swarm = self._ensure_personal_swarm_with_cursor(cur, user_id, f"{full_name or email or 'Overlord'}'s Swarm")
+                accepted = self._accept_invitations_for_email_with_cursor(cur, email, user_id)
+                cur.execute(self._select_user_sql("u.id = %s"), (user_id,))
+                user = self._user_from_row(cur.fetchone())
+                if user:
+                    self._load_notification_types(cur, user)
+                return {"user": user, "swarm": swarm, "accepted_invitations": accepted}
+
+    def ensure_personal_swarm(self, user_id: str, name: str) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None or not user_id:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                return self._ensure_personal_swarm_with_cursor(cur, user_id, name)
+
+    def _ensure_personal_swarm_with_cursor(self, cur, user_id: str, name: str) -> dict:
+        cur.execute(
+            """
+            SELECT id, owner_user_id, name, created_at
+            FROM swarms
+            WHERE owner_user_id = %s
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            swarm_id, owner_id, swarm_name, created_at = row
+        else:
+            swarm_id = str(uuid.uuid4())
+            swarm_name = (name or "Overlord's Swarm").strip() or "Overlord's Swarm"
+            cur.execute(
+                """
+                INSERT INTO swarms (id, owner_user_id, name, is_public, created_at, updated_at)
+                VALUES (%s, %s, %s, false, now(), now())
+                RETURNING id, owner_user_id, name, created_at
+                """,
+                (swarm_id, user_id, swarm_name),
+            )
+            swarm_id, owner_id, swarm_name, created_at = cur.fetchone()
+        cur.execute(
+            """
+            INSERT INTO swarm_memberships (swarm_id, user_id, role, created_at)
+            VALUES (%s, %s, 'overlord', now())
+            ON CONFLICT (swarm_id, user_id) DO UPDATE SET role = 'overlord'
+            """,
+            (swarm_id, user_id),
+        )
+        return {"id": swarm_id, "owner_id": owner_id, "name": swarm_name, "created_at": created_at}
+
+    def accept_invitations_for_email(self, email: str, user_id: str) -> list[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None or not email or not user_id:
+            return []
+        with conn:
+            with conn.cursor() as cur:
+                rows = self._accept_invitations_for_email_with_cursor(cur, email, user_id)
+        return rows
+
+    def _accept_invitations_for_email_with_cursor(self, cur, email: str, user_id: str) -> list[dict]:
+        cur.execute(
+            """
+            UPDATE swarm_invitations
+            SET status = 'accepted', accepted_at = now()
+            WHERE lower(email) = lower(%s)
+              AND status = 'pending'
+              AND expires_at >= now()
+            RETURNING id, swarm_id, role, accepted_at
+            """,
+            (email,),
+        )
+        rows = cur.fetchall()
+        for _invite_id, swarm_id, role, _accepted_at in rows:
+            cur.execute(
+                """
+                INSERT INTO swarm_memberships (swarm_id, user_id, role, created_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (swarm_id, user_id) DO UPDATE SET role = EXCLUDED.role
+                """,
+                (swarm_id, user_id, role if role in {"overlord", "overseer"} else "overseer"),
+            )
+        return [
+            {"id": invite_id, "swarm_id": swarm_id, "role": role, "accepted_at": accepted_at}
+            for invite_id, swarm_id, role, accepted_at in rows
+        ]
 
     def update_user_fleet_settings(self, user_id: str, fleet_settings: dict) -> Optional[dict]:
         conn = self._core_connection()
@@ -2287,13 +2525,16 @@ class PostgresMetadataStore:
                     continue
                 cur.execute(
                     """
-                    INSERT INTO notifications (id, swarm_id, event_type, title, message, actor_user_id, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    INSERT INTO notifications
+                        (id, swarm_id, event_type, title, message, actor_user_id, created_at, delivery_pending, delivery_completed_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()), %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
                         event_type = EXCLUDED.event_type,
                         title = EXCLUDED.title,
                         message = EXCLUDED.message,
-                        actor_user_id = EXCLUDED.actor_user_id
+                        actor_user_id = EXCLUDED.actor_user_id,
+                        delivery_pending = EXCLUDED.delivery_pending,
+                        delivery_completed_at = EXCLUDED.delivery_completed_at
                     """,
                     (
                         note.get("id"),
@@ -2303,6 +2544,8 @@ class PostgresMetadataStore:
                         note.get("message") or "",
                         note.get("actor_user_id"),
                         self._dt(note.get("created_at")),
+                        bool(note.get("delivery_pending")),
+                        self._dt(note.get("delivery_completed_at")),
                     ),
                 )
                 cur.execute("DELETE FROM notification_fields WHERE notification_id = %s", (note.get("id"),))

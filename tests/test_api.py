@@ -690,6 +690,7 @@ def test_social_auth_callback_completes_github_with_private_primary_email(client
     monkeypatch.setenv("GITHUB_CLIENT_ID", "github-client")
     monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
     overmind_main.oauth_states["state-2"] = "github"
+    monkeypatch.setattr(db, "refresh_persistent_state", lambda: (_ for _ in ()).throw(AssertionError("callback should not refresh full state")))
 
     def mock_urlopen(request, timeout=10):
         if request.full_url == "https://github.com/login/oauth/access_token":
@@ -1887,6 +1888,38 @@ def test_accept_pending_drone_connection_tolerates_relational_row_without_batoce
 
     assert response.status_code == 200
     assert response.json()["device"]["device_id"] == "58:47:ca:7e:38:57"
+
+
+def test_accept_pending_drone_connection_initializes_missing_user_device_bucket(client):
+    client.post(
+        "/api/auth/register",
+        json={"email": "accept-cache@example.com", "username": "accept-cache", "password": "testpass123"},
+    )
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "accept-cache@example.com", "username": "accept-cache", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("accept-cache@example.com")
+    db.user_devices.pop(user["id"], None)
+    db.pending_drone_connections["cache-drone"] = {
+        "id": "cache-drone",
+        "user_id": user["id"],
+        "device_id": "cache-drone",
+        "device_name": "Cache Drone",
+        "status": "pending",
+        "batocera_info": {},
+        "detected_at": datetime.utcnow(),
+        "last_seen": datetime.utcnow(),
+    }
+
+    response = client.post(
+        "/api/drone-connections/cache-drone/accept",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["device"]["device_id"] == "cache-drone"
+    assert db.user_devices[user["id"]]
 
 
 def test_list_devices_uses_authorization_header(client):
@@ -4129,6 +4162,8 @@ def test_relational_schema_declares_domain_tables():
     assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in source
     assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in source
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in source
+    assert "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending" in source
+    assert 'state.pop("notifications", None)' in source
 
 
 def test_postgres_store_materializes_state_and_assets_into_relational_tables():
@@ -4286,6 +4321,12 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                 return [(9, "d1", "rom_sync", "info", "Synced", received_at, received_at)]
             if "FROM drone_event_fields" in self.sql:
                 return [(9, "job_id", json.dumps("job-1"))]
+            if "FROM notifications" in self.sql:
+                return [("n1", "s1", "sync_triggered", "Sync", "Sync queued", "u1", received_at, True, None)]
+            if "FROM notification_fields" in self.sql:
+                return [("n1", "sync_type", json.dumps("ROM"))]
+            if "FROM notification_recipients" in self.sql:
+                return [("n1", "u1", received_at, None)]
             return []
 
     state = PostgresMetadataStore()._load_relational_state(RecordingCursor())
@@ -4293,6 +4334,10 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
     assert state["gamelogs"]["d1"][0]["game_name"] == "Game"
     assert state["speed_samples"]["d1"][0]["download_mbps"] == 10.25
     assert state["device_events"]["d1"][0]["metadata"] == {"job_id": "job-1"}
+    notification = state["notifications"]["s1"][0]
+    assert notification["delivery_pending"] is True
+    assert notification["details"] == {"sync_type": "ROM"}
+    assert notification["read_by"] == {"u1": received_at}
 
 
 def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_tables():
