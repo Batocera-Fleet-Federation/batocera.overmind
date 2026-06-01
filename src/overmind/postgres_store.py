@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime
 from typing import Iterable, Optional
@@ -32,6 +33,104 @@ def _env_int(name: str, default: int) -> int:
 
 def _persist_json_app_state_enabled() -> bool:
     return _env_bool("OVERMIND_PERSIST_JSON_STATE", not _is_lambda_runtime())
+
+
+def _postgres_query_logging_enabled() -> bool:
+    return _env_bool("OVERMIND_POSTGRES_QUERY_LOGGING", _is_lambda_runtime())
+
+
+def _postgres_query_log_min_ms() -> float:
+    try:
+        return max(0.0, float(os.getenv("OVERMIND_POSTGRES_QUERY_LOG_MIN_MS", "0")))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _postgres_query_log_sql_chars() -> int:
+    try:
+        return max(80, int(os.getenv("OVERMIND_POSTGRES_QUERY_LOG_SQL_CHARS", "2000")))
+    except (TypeError, ValueError):
+        return 2000
+
+
+def _format_query_for_log(query) -> str:
+    text = " ".join(str(query or "").split())
+    limit = _postgres_query_log_sql_chars()
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+class _TimedCursor:
+    def __init__(self, cursor) -> None:
+        self._cursor = cursor
+
+    def __enter__(self):
+        self._cursor.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._cursor.__exit__(exc_type, exc, tb)
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+    def execute(self, query, params=None, *args, **kwargs):
+        return self._time_query("execute", query, params, lambda: self._cursor.execute(query, params, *args, **kwargs))
+
+    def executemany(self, query, params_seq, *args, **kwargs):
+        return self._time_query("executemany", query, params_seq, lambda: self._cursor.executemany(query, params_seq, *args, **kwargs))
+
+    def _time_query(self, operation: str, query, params, call):
+        if not _postgres_query_logging_enabled():
+            return call()
+        started = time.perf_counter()
+        error_name = None
+        try:
+            return call()
+        except Exception as error:
+            error_name = error.__class__.__name__
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000
+            if duration_ms >= _postgres_query_log_min_ms() or error_name:
+                logger.warning(
+                    "PostgreSQL query operation=%s duration_ms=%.2f rowcount=%s error=%s query=%s params=%s",
+                    operation,
+                    duration_ms,
+                    getattr(self._cursor, "rowcount", None),
+                    error_name or "-",
+                    _format_query_for_log(query),
+                    _format_params_for_log(params),
+                )
+
+
+class _TimedConnection:
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._conn.__exit__(exc_type, exc, tb)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def cursor(self, *args, **kwargs):
+        return _TimedCursor(self._conn.cursor(*args, **kwargs))
+
+
+def _format_params_for_log(params) -> str:
+    if not _env_bool("OVERMIND_POSTGRES_QUERY_LOG_PARAMS", False):
+        return "hidden"
+    try:
+        return _format_query_for_log(repr(params))
+    except Exception:
+        return "unavailable"
 
 
 def database_url() -> Optional[str]:
@@ -73,7 +172,8 @@ class PostgresMetadataStore:
             return None
         try:
             timeout = max(1, int(os.getenv("OVERMIND_POSTGRES_CONNECT_TIMEOUT_SECONDS", "3")))
-            return psycopg.connect(self.url, connect_timeout=timeout)
+            conn = psycopg.connect(self.url, connect_timeout=timeout)
+            return _TimedConnection(conn) if _postgres_query_logging_enabled() else conn
         except Exception as error:
             self._ready = False
             self.last_error = f"{error.__class__.__name__}: {error}"
@@ -908,25 +1008,20 @@ class PostgresMetadataStore:
     def load_app_state(self) -> Optional[dict]:
         if not self.url:
             return None
+        if not _persist_json_app_state_enabled():
+            return None
         self.ensure_schema()
         conn = self._connect()
         if conn is None:
             return None
-        state = None
         with conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT state FROM overmind_app_state WHERE id = %s", ("default",))
                 row = cur.fetchone()
-                if row:
-                    state = _decode_state(row[0])
-                    if not _persist_json_app_state_enabled() and isinstance(state, dict):
-                        state.pop("notifications", None)
-                        _strip_json_only_device_status(state)
-                relational = self._load_relational_state(cur)
-        if not isinstance(state, dict):
-            state = {}
-        _merge_state_dicts(state, relational)
-        return state if state else None
+                if not row:
+                    return None
+                state = _decode_state(row[0])
+                return state if isinstance(state, dict) else None
 
     def claim_pending_notifications(self, notification_ids: Iterable[str], limit: int = 0) -> Optional[dict[str, datetime]]:
         ids = [str(item) for item in notification_ids if item]
@@ -1567,6 +1662,699 @@ class PostgresMetadataStore:
                 "status": status,
             }
         return state
+
+    def _device_from_row(self, row) -> Optional[dict]:
+        if not row:
+            return None
+        (
+            internal_id, device_id, device_name, user_id, swarm_id, approval_status, swarm_connected,
+            authorization_token_id, drone_token_hash, registered_at, last_seen, removed_at,
+            api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
+            hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
+            cpu_max_frequency, memory_available, memory_total, batocera_version, container,
+            cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer,
+            valid_from, valid_until, serial_number, overmind_signed_at,
+            auto_sync_enabled, auto_sync_systems, ipv4, ipv6, hostnames, macs, last_speed_sample,
+        ) = row
+        network = {
+            "ipv4": list(ipv4 or []),
+            "ipv6": list(ipv6 or []),
+            "hostnames": list(hostnames or []),
+            "mac_addresses": list(macs or []),
+        }
+        if public_ip:
+            network["public_ip"] = public_ip
+        certificate = None
+        if public_certificate or fingerprint or sha256_fingerprint:
+            certificate = {
+                "status": cert_status,
+                "fingerprint": fingerprint,
+                "sha256_fingerprint": sha256_fingerprint,
+                "public_certificate": public_certificate,
+                "certificate_pem": public_certificate,
+                "subject": subject,
+                "issuer": issuer,
+                "valid_from": valid_from,
+                "valid_until": valid_until,
+                "serial_number": serial_number,
+                "overmind_signed_at": overmind_signed_at,
+                "san": [],
+            }
+        return {
+            "id": internal_id,
+            "device_id": device_id,
+            "device_name": device_name,
+            "user_id": user_id,
+            "swarm_id": swarm_id,
+            "approval_status": approval_status or "approved",
+            "swarm_connected": bool(swarm_connected),
+            "authorization_token_id": authorization_token_id,
+            "drone_token_hash": drone_token_hash,
+            "registered_at": registered_at,
+            "last_seen": last_seen,
+            "removed_at": removed_at,
+            "api_port": api_port,
+            "scheme": scheme or "https",
+            "reachable_url": reachable_url,
+            "network": network,
+            "resolved_network": {"ipv4": list(ipv4 or []), "ipv6": list(ipv6 or [])},
+            "public_reachability": {
+                "resolvable": bool(public_resolvable),
+                "public_ip": public_ip,
+                "api_port": api_port,
+                "checked_at": checked_at,
+            },
+            "system_info": {
+                "hostname": hostname,
+                "model": model,
+                "system": system_name,
+                "system_name": system_name,
+                "architecture": architecture,
+                "cpu_model": cpu_model,
+                "cpu_cores": cpu_cores,
+                "cpu_threads": cpu_threads,
+                "cpu_max_frequency": cpu_max_frequency,
+                "memory_available": memory_available,
+                "memory_total": memory_total,
+                "batocera_version": batocera_version,
+                "container": container,
+            },
+            "batocera_info": {},
+            "certificate": certificate,
+            "auto_sync_policy": {"enabled": bool(auto_sync_enabled), "systems": list(auto_sync_systems or [])},
+            "rom_systems": list(auto_sync_systems or []),
+            "last_speed_sample": _decode_state(last_speed_sample) if isinstance(last_speed_sample, dict) else last_speed_sample,
+        }
+
+    def _select_device_sql(self, where_clause: str) -> str:
+        return f"""
+            SELECT d.id, d.device_id, d.device_name, d.user_id, d.swarm_id, d.approval_status,
+                   d.swarm_connected, d.authorization_token_id, d.drone_token_hash,
+                   d.registered_at, d.last_seen, d.removed_at,
+                   ns.api_port, ns.scheme, ns.reachable_url, ns.public_resolvable, ns.public_ip, ns.checked_at,
+                   si.hostname, si.model, si.system_name, si.architecture, si.cpu_model, si.cpu_cores,
+                   si.cpu_threads, si.cpu_max_frequency, si.memory_available, si.memory_total,
+                   si.batocera_version, si.container,
+                   dc.status, dc.fingerprint, dc.sha256_fingerprint, dc.public_certificate, dc.subject,
+                   dc.issuer, dc.valid_from, dc.valid_until, dc.serial_number, dc.overmind_signed_at,
+                   COALESCE(p.enabled, false),
+                   COALESCE((
+                       SELECT array_agg(system_name ORDER BY system_name)
+                       FROM drone_auto_sync_policy_systems aps
+                       WHERE aps.drone_id = d.id
+                   ), ARRAY[]::text[]),
+                   COALESCE((
+                       SELECT array_agg(address ORDER BY address)
+                       FROM drone_network_addresses a
+                       WHERE a.drone_id = d.id AND a.address_type = 'ipv4'
+                   ), ARRAY[]::text[]),
+                   COALESCE((
+                       SELECT array_agg(address ORDER BY address)
+                       FROM drone_network_addresses a
+                       WHERE a.drone_id = d.id AND a.address_type = 'ipv6'
+                   ), ARRAY[]::text[]),
+                   COALESCE((
+                       SELECT array_agg(address ORDER BY address)
+                       FROM drone_network_addresses a
+                       WHERE a.drone_id = d.id AND a.address_type = 'hostname'
+                   ), ARRAY[]::text[]),
+                   COALESCE((
+                       SELECT array_agg(address ORDER BY address)
+                       FROM drone_network_addresses a
+                       WHERE a.drone_id = d.id AND a.address_type = 'mac'
+                   ), ARRAY[]::text[]),
+                   (
+                       SELECT jsonb_build_object(
+                           'upload_mbps', s.upload_mbps,
+                           'download_mbps', s.download_mbps,
+                           'latency_ms', s.latency_ms,
+                           'measured_at', s.measured_at,
+                           'sampled_at', s.received_at
+                       )
+                       FROM drone_speed_samples s
+                       WHERE s.drone_id = d.id
+                       ORDER BY s.received_at DESC, s.id DESC
+                       LIMIT 1
+                   )
+            FROM drones d
+            LEFT JOIN drone_network_state ns ON ns.drone_id = d.id
+            LEFT JOIN drone_system_info si ON si.drone_id = d.id
+            LEFT JOIN drone_certificates dc ON dc.drone_id = d.id
+            LEFT JOIN drone_auto_sync_policies p ON p.drone_id = d.id
+            WHERE {where_clause}
+        """
+
+    def get_device(self, internal_id: str) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(self._select_device_sql("d.id = %s"), (internal_id,))
+                return self._device_from_row(cur.fetchone())
+
+    def get_device_by_device_id(self, device_id: str) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(self._select_device_sql("d.device_id = %s"), (device_id,))
+                return self._device_from_row(cur.fetchone())
+
+    def list_user_swarms(self, user_id: str) -> Optional[list[dict]]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.id, s.owner_user_id, s.name, s.is_public, s.created_at, m.role
+                    FROM swarms s
+                    JOIN swarm_memberships m ON m.swarm_id = s.id
+                    WHERE m.user_id = %s
+                    ORDER BY s.created_at ASC, s.name ASC
+                    """,
+                    (user_id,),
+                )
+                return [
+                    {
+                        "id": swarm_id,
+                        "owner_id": owner_id,
+                        "name": name,
+                        "is_public": bool(is_public),
+                        "created_at": created_at,
+                        "role": role,
+                    }
+                    for swarm_id, owner_id, name, is_public, created_at, role in cur.fetchall()
+                ]
+
+    def get_swarm_member(self, swarm_id: str, user_id: str) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT swarm_id, user_id, role, created_at FROM swarm_memberships WHERE swarm_id = %s AND user_id = %s",
+                    (swarm_id, user_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {"swarm_id": row[0], "user_id": row[1], "role": row[2], "created_at": row[3]}
+
+    def default_swarm_id(self, user_id: str) -> Optional[str]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.id
+                    FROM swarms s
+                    JOIN swarm_memberships m ON m.swarm_id = s.id
+                    WHERE m.user_id = %s
+                    ORDER BY (s.owner_user_id = %s) DESC, s.created_at ASC
+                    LIMIT 1
+                    """,
+                    (user_id, user_id),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+
+    def list_user_devices(self, user_id: str, swarm_id: Optional[str] = None) -> Optional[list[dict]]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        where = """
+            d.approval_status = 'approved'
+            AND (
+                EXISTS (
+                    SELECT 1 FROM swarm_memberships m
+                    WHERE m.swarm_id = d.swarm_id AND m.user_id = %s
+                )
+                OR EXISTS (
+                    SELECT 1 FROM device_admin_claims c
+                    WHERE c.drone_id = d.id AND c.user_id = %s
+                )
+            )
+        """
+        params = [user_id, user_id]
+        if swarm_id:
+            where += " AND d.swarm_id = %s"
+            params.append(swarm_id)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(self._select_device_sql(where) + " ORDER BY d.device_name ASC, d.device_id ASC", tuple(params))
+                return [device for device in (self._device_from_row(row) for row in cur.fetchall()) if device]
+
+    def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        where = """
+            d.device_id = %s
+            AND d.approval_status = 'approved'
+            AND (
+                EXISTS (
+                    SELECT 1 FROM swarm_memberships m
+                    WHERE m.swarm_id = d.swarm_id AND m.user_id = %s
+                )
+                OR EXISTS (
+                    SELECT 1 FROM device_admin_claims c
+                    WHERE c.drone_id = d.id AND c.user_id = %s
+                )
+            )
+        """
+        params = [device_id, user_id, user_id]
+        if swarm_id:
+            where += " AND d.swarm_id = %s"
+            params.append(swarm_id)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(self._select_device_sql(where), tuple(params))
+                return self._device_from_row(cur.fetchone())
+
+    def count_device_roms(self, device_id: str) -> Optional[int]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT count(*)
+                    FROM drone_roms r
+                    JOIN drones d ON d.id = r.drone_id
+                    WHERE d.device_id = %s
+                    """,
+                    (device_id,),
+                )
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+
+    def list_user_notifications(self, user_id: str, limit: int = 50) -> Optional[list[dict]]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        row_limit = max(1, min(int(limit or 50), 500))
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT n.id, n.swarm_id, s.name, n.event_type, n.title, n.message, n.actor_user_id,
+                           n.created_at, n.delivery_pending, n.delivery_completed_at,
+                           r.read_at, r.dismissed_at
+                    FROM notifications n
+                    JOIN swarm_memberships m ON m.swarm_id = n.swarm_id AND m.user_id = %s
+                    JOIN swarms s ON s.id = n.swarm_id
+                    LEFT JOIN notification_recipients r ON r.notification_id = n.id AND r.user_id = %s
+                    WHERE r.dismissed_at IS NULL
+                    ORDER BY n.created_at DESC, n.id DESC
+                    LIMIT %s
+                    """,
+                    (user_id, user_id, row_limit),
+                )
+                rows = cur.fetchall()
+                ids = [row[0] for row in rows]
+                details: dict[str, dict] = {notification_id: {} for notification_id in ids}
+                if ids:
+                    cur.execute(
+                        """
+                        SELECT notification_id, field_name, field_value
+                        FROM notification_fields
+                        WHERE notification_id = ANY(%s)
+                        """,
+                        (ids,),
+                    )
+                    for notification_id, field_name, field_value in cur.fetchall():
+                        try:
+                            value = _decode_state(json.loads(field_value)) if field_value is not None else None
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            value = field_value
+                        details.setdefault(notification_id, {})[field_name] = value
+                return [
+                    {
+                        "id": notification_id,
+                        "swarm_id": swarm_id,
+                        "swarm_name": swarm_name,
+                        "event_type": event_type,
+                        "title": title,
+                        "message": message,
+                        "actor_user_id": actor_user_id,
+                        "created_at": created_at,
+                        "details": details.get(notification_id, {}),
+                        "read": bool(read_at),
+                        "delivery_pending": bool(delivery_pending),
+                        "delivery_completed_at": delivery_completed_at,
+                    }
+                    for (
+                        notification_id, swarm_id, swarm_name, event_type, title, message, actor_user_id,
+                        created_at, delivery_pending, delivery_completed_at, read_at, dismissed_at,
+                    ) in rows
+                ]
+
+    def mark_notifications_read(self, user_id: str, notification_ids: Optional[Iterable[str]] = None) -> Optional[int]:
+        ids = [str(item) for item in (notification_ids or []) if str(item)]
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                if ids:
+                    cur.execute(
+                        """
+                        INSERT INTO notification_recipients (notification_id, user_id, read_at)
+                        SELECT n.id, %s, now()
+                        FROM notifications n
+                        JOIN swarm_memberships m ON m.swarm_id = n.swarm_id AND m.user_id = %s
+                        WHERE n.id = ANY(%s)
+                        ON CONFLICT (notification_id, user_id)
+                        DO UPDATE SET read_at = COALESCE(notification_recipients.read_at, EXCLUDED.read_at)
+                        """,
+                        (user_id, user_id, ids),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO notification_recipients (notification_id, user_id, read_at)
+                        SELECT n.id, %s, now()
+                        FROM notifications n
+                        JOIN swarm_memberships m ON m.swarm_id = n.swarm_id AND m.user_id = %s
+                        ON CONFLICT (notification_id, user_id)
+                        DO UPDATE SET read_at = COALESCE(notification_recipients.read_at, EXCLUDED.read_at)
+                        """,
+                        (user_id, user_id),
+                    )
+                return cur.rowcount
+
+    def dismiss_notifications(self, user_id: str, notification_ids: Optional[Iterable[str]] = None) -> Optional[int]:
+        ids = [str(item) for item in (notification_ids or []) if str(item)]
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                if ids:
+                    cur.execute(
+                        """
+                        INSERT INTO notification_recipients (notification_id, user_id, read_at, dismissed_at)
+                        SELECT n.id, %s, now(), now()
+                        FROM notifications n
+                        JOIN swarm_memberships m ON m.swarm_id = n.swarm_id AND m.user_id = %s
+                        WHERE n.id = ANY(%s)
+                        ON CONFLICT (notification_id, user_id)
+                        DO UPDATE SET read_at = COALESCE(notification_recipients.read_at, EXCLUDED.read_at),
+                                      dismissed_at = COALESCE(notification_recipients.dismissed_at, EXCLUDED.dismissed_at)
+                        """,
+                        (user_id, user_id, ids),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO notification_recipients (notification_id, user_id, read_at, dismissed_at)
+                        SELECT n.id, %s, now(), now()
+                        FROM notifications n
+                        JOIN swarm_memberships m ON m.swarm_id = n.swarm_id AND m.user_id = %s
+                        ON CONFLICT (notification_id, user_id)
+                        DO UPDATE SET read_at = COALESCE(notification_recipients.read_at, EXCLUDED.read_at),
+                                      dismissed_at = COALESCE(notification_recipients.dismissed_at, EXCLUDED.dismissed_at)
+                        """,
+                        (user_id, user_id),
+                    )
+                return cur.rowcount
+
+    def store_download_state(self, device_id: str, state: dict) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        clean = {
+            "target_drone_id": state.get("target_drone_id") or device_id,
+            "concurrency": state.get("concurrency") if isinstance(state.get("concurrency"), dict) else {"scope": "target_drone", "active_limit": 1},
+            "active": state.get("active") if isinstance(state.get("active"), list) else [],
+            "queued": state.get("queued") if isinstance(state.get("queued"), list) else [],
+            "recent": state.get("recent") if isinstance(state.get("recent"), list) else [],
+            "downloads": state.get("downloads") if isinstance(state.get("downloads"), list) else [],
+            "received_at": datetime.utcnow(),
+        }
+        if not clean["downloads"]:
+            clean["downloads"] = clean["active"] + clean["queued"] + clean["recent"]
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                self._insert_download_snapshot(cur, device["id"], clean)
+        return clean
+
+    def list_download_states(self, user_id: str, device_id: Optional[str] = None) -> Optional[list[dict]]:
+        devices = [self.user_can_access_device(user_id, device_id)] if device_id else self.list_user_devices(user_id)
+        if devices is None:
+            return None
+        ids = [device["id"] for device in devices if device]
+        latest: dict[int, str] = {}
+        states = {
+            device["id"]: {
+                "target_drone_id": device.get("device_id"),
+                "device_name": device.get("device_name"),
+                "concurrency": {"scope": "target_drone", "active_limit": 1},
+                "active": [],
+                "queued": [],
+                "recent": [],
+                "downloads": [],
+                "received_at": None,
+            }
+            for device in devices if device
+        }
+        if not ids:
+            return []
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT target_drone_id, id, reported_at, concurrency_scope, active_limit
+                    FROM (
+                        SELECT s.*, row_number() OVER (PARTITION BY s.target_drone_id ORDER BY s.reported_at DESC, s.id DESC) AS rn
+                        FROM download_snapshots s
+                        WHERE s.target_drone_id = ANY(%s)
+                    ) ranked
+                    WHERE rn = 1
+                    """,
+                    (ids,),
+                )
+                for target_id, snapshot_id, reported_at, concurrency_scope, active_limit in cur.fetchall():
+                    latest[snapshot_id] = target_id
+                    state = states.get(target_id)
+                    if state is not None:
+                        state["received_at"] = reported_at
+                        state["concurrency"] = {"scope": concurrency_scope or "target_drone", "active_limit": active_limit or 1}
+                if latest:
+                    cur.execute(
+                        """
+                        SELECT snapshot_id, job_id, state_bucket, asset_type, status, source_drone_id, system_name,
+                               file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes,
+                               percentage, transfer_speed_bps, queue_position, failure_reason
+                        FROM download_items
+                        WHERE snapshot_id = ANY(%s)
+                        ORDER BY id ASC
+                        """,
+                        (list(latest),),
+                    )
+                    for snapshot_id, job_id, bucket, asset_type, item_status, source_drone_id, system_name, file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes, percentage, transfer_speed_bps, queue_position, failure_reason in cur.fetchall():
+                        state = states.get(latest.get(snapshot_id))
+                        if state is None or bucket not in {"active", "queued", "recent"}:
+                            continue
+                        item = {
+                            "job_id": job_id,
+                            "asset_type": asset_type,
+                            "status": item_status,
+                            "source_drone_id": source_drone_id,
+                            "system": system_name,
+                            "file_path": file_path,
+                            "relative_path": file_path,
+                            "rom_path": rom_path,
+                            "bios_name": bios_name,
+                            "artwork_type": artwork_type,
+                            "file_size": file_size,
+                            "total_bytes": file_size,
+                            "downloaded_bytes": downloaded_bytes,
+                            "bytes_transferred": downloaded_bytes,
+                            "percentage": percentage,
+                            "transfer_speed_bps": transfer_speed_bps,
+                            "queue_position": queue_position,
+                            "failure_reason": failure_reason,
+                        }
+                        state[bucket].append(item)
+                        state["downloads"].append(item)
+        rows = list(states.values())
+        rows.sort(key=lambda row: str(row.get("target_drone_id") or "").lower())
+        return rows
+
+    def create_device_action(self, user_id: str, device_id: str, action_type: str, payload: Optional[dict] = None) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device.get("user_id") != user_id:
+            return None
+        action = {
+            "id": str(uuid.uuid4()),
+            "device_id": device_id,
+            "action": action_type,
+            "status": "pending",
+            "payload": payload or {},
+            "created_at": datetime.utcnow(),
+            "claimed_at": None,
+            "completed_at": None,
+            "message": None,
+            "result": None,
+            "result_received_at": None,
+        }
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO drone_actions (id, drone_id, action, status, created_at)
+                    VALUES (%s, %s, %s, 'pending', %s)
+                    """,
+                    (action["id"], device["id"], action_type, action["created_at"]),
+                )
+                for key, value in action["payload"].items():
+                    cur.execute(
+                        """
+                        INSERT INTO drone_action_parameters (action_id, parameter_name, parameter_value)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (action_id, parameter_name) DO UPDATE SET parameter_value = EXCLUDED.parameter_value
+                        """,
+                        (action["id"], str(key), self._json(value)),
+                    )
+        return action
+
+    def list_device_actions(self, user_id: str, device_id: str) -> Optional[list[dict]]:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device.get("user_id") != user_id:
+            return None
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT a.id, a.action, a.status, a.created_at, a.claimed_at, a.completed_at, a.message
+                    FROM drone_actions a
+                    WHERE a.drone_id = %s AND a.status IN ('pending', 'claimed', 'in_progress')
+                    ORDER BY a.created_at DESC, a.id DESC
+                    LIMIT 100
+                    """,
+                    (device["id"],),
+                )
+                rows = cur.fetchall()
+                actions = [
+                    {
+                        "id": action_id,
+                        "device_id": device_id,
+                        "action": action,
+                        "status": "in_progress" if action_status == "claimed" else action_status,
+                        "payload": {},
+                        "created_at": created_at,
+                        "claimed_at": claimed_at,
+                        "completed_at": completed_at,
+                        "message": message,
+                    }
+                    for action_id, action, action_status, created_at, claimed_at, completed_at, message in rows
+                ]
+                by_id = {action["id"]: action for action in actions}
+                if by_id:
+                    cur.execute(
+                        "SELECT action_id, parameter_name, parameter_value FROM drone_action_parameters WHERE action_id = ANY(%s)",
+                        (list(by_id),),
+                    )
+                    for action_id, parameter_name, parameter_value in cur.fetchall():
+                        try:
+                            value = _decode_state(json.loads(parameter_value)) if parameter_value is not None else None
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            value = parameter_value
+                        by_id[action_id].setdefault("payload", {})[parameter_name] = value
+                return actions
+
+    def claim_pending_device_actions(self, device_id: str, limit: int = 25) -> Optional[list[dict]]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        row_limit = max(1, int(limit or 25))
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH selected AS (
+                        SELECT id
+                        FROM drone_actions
+                        WHERE drone_id = %s AND status = 'pending'
+                        ORDER BY created_at ASC, id ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE drone_actions a
+                    SET status = 'claimed', claimed_at = now()
+                    FROM selected
+                    WHERE a.id = selected.id
+                    RETURNING a.id, a.action, a.status, a.created_at, a.claimed_at, a.completed_at, a.message
+                    """,
+                    (device["id"], row_limit),
+                )
+                rows = cur.fetchall()
+                actions = [
+                    {
+                        "id": action_id,
+                        "device_id": device_id,
+                        "action": action,
+                        "status": "in_progress",
+                        "payload": {},
+                        "created_at": created_at,
+                        "claimed_at": claimed_at,
+                        "completed_at": completed_at,
+                        "message": message,
+                    }
+                    for action_id, action, action_status, created_at, claimed_at, completed_at, message in rows
+                ]
+                by_id = {action["id"]: action for action in actions}
+                if by_id:
+                    cur.execute(
+                        "SELECT action_id, parameter_name, parameter_value FROM drone_action_parameters WHERE action_id = ANY(%s)",
+                        (list(by_id),),
+                    )
+                    for action_id, parameter_name, parameter_value in cur.fetchall():
+                        try:
+                            value = _decode_state(json.loads(parameter_value)) if parameter_value is not None else None
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            value = parameter_value
+                        by_id[action_id].setdefault("payload", {})[parameter_name] = value
+                return actions
+
+    def clear_device_actions(self, user_id: str, device_id: str) -> Optional[int]:
+        device = self.get_device_by_device_id(device_id)
+        if not device or device.get("user_id") != user_id:
+            return None
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM drone_actions WHERE drone_id = %s AND status IN ('pending', 'claimed', 'in_progress')",
+                    (device["id"],),
+                )
+                return cur.rowcount
 
     def store_app_state(self, state: dict) -> None:
         if not self.url:

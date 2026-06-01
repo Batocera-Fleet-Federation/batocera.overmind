@@ -2071,6 +2071,17 @@ def test_device_systems_ui_loads_roms_by_page():
     assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${params.toString()}`)" in js
 
 
+def test_background_polling_does_not_pin_global_loading_toast():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    assert "const controller = new AbortController();" in js
+    assert "setInterval(() => loadPendingConnections({showLoader: false}), 30000)" in js
+    assert "setInterval(() => loadNotifications({showLoader: false}), 60000)" in js
+    assert "loadDevices({showLoader: false})" in js
+    assert "if (devicesRefreshInFlight) return;" in js
+    assert "if (pendingConnectionsInFlight) return;" in js
+    assert "if (notificationsInFlight) return;" in js
+
+
 def test_demo_seed_exposes_pending_drone_connections(client):
     """Seeded demo user should see pending psionic Drone connection requests."""
     seed_test_fleet()
@@ -3421,10 +3432,14 @@ def test_metadata_panels_submit_searches_explicitly_and_show_loading_toast():
     assert 'id="ui-loading-popout"' not in html
     assert ".ui-loading-popout.show" not in css
     assert ".toast-alert.alert-loading" in css
-    assert "function beginUiLoading()" in js
+    assert "function beginUiLoading(message = 'Loading...')" in js
     assert "function endUiLoading()" in js
     assert "function showToast(" in js
     assert "function showLoadingToast(" in js
+    assert "function loadingMessageForPath(path)" in js
+    assert "Loading devices..." in js
+    assert "Loading ROMs..." in js
+    assert "Loading notifications..." in js
     assert 'onclick="submitDeviceRomSearch()"' in html
     assert 'oninput="handleDeviceRomSearch(event)"' not in html
     assert "function submitBiosSearch()" in js
@@ -4236,14 +4251,18 @@ def test_relational_schema_declares_domain_tables():
     assert "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received" in source
     assert "CREATE INDEX IF NOT EXISTS idx_events_drone_received" in source
     assert "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received" in source
+    assert "class _TimedCursor" in source
+    assert "PostgreSQL query operation=%s duration_ms=%.2f" in source
+    assert "OVERMIND_POSTGRES_QUERY_LOG_PARAMS" in source
     assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected" in source
     assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in source
     assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in source
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in source
     assert "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending" in source
-    assert 'state.pop("notifications", None)' in source
-    assert '_strip_json_only_device_status(state)' in source
-    assert 'device.pop("last_known_status", None)' in source
+    assert "if not _persist_json_app_state_enabled():\n            return None" in source
+    assert "relational = self._load_relational_state(cur)" not in source
+    assert "def list_user_notifications" in source
+    assert "def list_user_devices" in source
     assert "WHERE g.drone_id = ANY(%s)" in source
     assert "WHERE n.swarm_id = ANY(%s)" in source
     assert "WHERE user_id = ANY(%s) OR swarm_id = ANY(%s)" in source

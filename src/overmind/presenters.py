@@ -134,7 +134,11 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
     public_resolvable = bool(public_reachability.get("resolvable")) and str(public_reachability.get("public_ip") or "") == str(public_ip or "")
     rom_count = 0
     try:
-        rom_count = len(data_store.get_device_roms(device.get("device_id")))
+        count_device_roms = getattr(data_store, "count_device_roms", None)
+        if callable(count_device_roms):
+            rom_count = int(count_device_roms(device.get("device_id")) or 0)
+        else:
+            rom_count = len(data_store.get_device_roms(device.get("device_id")))
     except Exception:
         rom_count = 0
     return {

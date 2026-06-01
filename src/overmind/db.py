@@ -128,7 +128,7 @@ class OvermindDatabase:
                 depth = object.__getattribute__(self, "_operation_depth")
                 is_outermost = depth == 0
                 if is_outermost:
-                    if name not in object.__getattribute__(self, "_SKIP_AUTO_REFRESH_METHODS"):
+                    if not getattr(postgres_store, "url", None) and name not in object.__getattribute__(self, "_SKIP_AUTO_REFRESH_METHODS"):
                         object.__getattribute__(self, "_refresh_from_source_of_truth")()
                     object.__setattr__(self, "_operation_dirty", False)
                 object.__setattr__(self, "_operation_depth", depth + 1)
@@ -182,6 +182,8 @@ class OvermindDatabase:
         return {field: getattr(self, field) for field in self._PERSISTED_FIELDS if field not in skipped}
 
     def _load_persistent_state(self) -> None:
+        if getattr(postgres_store, "url", None):
+            return
         state = postgres_store.load_app_state()
         if not isinstance(state, dict):
             return
@@ -194,6 +196,8 @@ class OvermindDatabase:
 
     def refresh_persistent_state(self) -> None:
         """Reload shared persisted state after runtime database config is available."""
+        if getattr(postgres_store, "url", None):
+            return
         self._load_persistent_state()
 
     @staticmethod
@@ -208,6 +212,8 @@ class OvermindDatabase:
             return float(default)
 
     def _refresh_from_source_of_truth(self) -> None:
+        if getattr(postgres_store, "url", None):
+            return
         min_seconds = self._source_refresh_min_seconds()
         now = time.monotonic()
         if min_seconds and self._last_source_refresh_at and now - self._last_source_refresh_at < min_seconds:
@@ -318,6 +324,10 @@ class OvermindDatabase:
         return claimed_ids
 
     def get_user_notifications(self, user_id: str, limit: int = 50) -> List[dict]:
+        if postgres_store.available():
+            relational = postgres_store.list_user_notifications(user_id, limit=limit)
+            if relational is not None:
+                return relational
         swarm_ids = {row["id"] for row in self.get_user_swarms(user_id)}
         rows = []
         for swarm_id in swarm_ids:
@@ -336,6 +346,10 @@ class OvermindDatabase:
         return rows[: max(1, int(limit))]
 
     def mark_notifications_read(self, user_id: str, notification_ids: Optional[list] = None) -> int:
+        if postgres_store.available():
+            relational = postgres_store.mark_notifications_read(user_id, notification_ids)
+            if relational is not None:
+                return relational
         allowed_swarms = {row["id"] for row in self.get_user_swarms(user_id)}
         wanted = {str(item) for item in notification_ids or [] if str(item)}
         count = 0
@@ -351,6 +365,10 @@ class OvermindDatabase:
         return count
 
     def dismiss_notifications(self, user_id: str, notification_ids: Optional[list] = None) -> int:
+        if postgres_store.available():
+            relational = postgres_store.dismiss_notifications(user_id, notification_ids)
+            if relational is not None:
+                return relational
         allowed_swarms = {row["id"] for row in self.get_user_swarms(user_id)}
         wanted = {str(item) for item in notification_ids or [] if str(item)}
         count = 0
@@ -830,6 +848,10 @@ class OvermindDatabase:
         return self.create_swarm(user_id, f"{user.get('full_name') or user.get('email') or 'Overlord'}'s Swarm")
 
     def get_user_swarms(self, user_id: str) -> List[dict]:
+        if postgres_store.available():
+            relational = postgres_store.list_user_swarms(user_id)
+            if relational is not None:
+                return relational
         rows = []
         for swarm_id, members in self.swarm_memberships.items():
             member = members.get(user_id)
@@ -841,6 +863,10 @@ class OvermindDatabase:
         return rows
 
     def get_swarm_member(self, swarm_id: str, user_id: str) -> Optional[dict]:
+        if postgres_store.available():
+            relational = postgres_store.get_swarm_member(swarm_id, user_id)
+            if relational is not None:
+                return relational
         member = self.swarm_memberships.get(swarm_id, {}).get(user_id)
         if member:
             self._normalize_member_role(member)
@@ -861,6 +887,10 @@ class OvermindDatabase:
         return member
 
     def default_swarm_id(self, user_id: str) -> Optional[str]:
+        if postgres_store.available():
+            relational = postgres_store.default_swarm_id(user_id)
+            if relational is not None:
+                return relational
         owned = [swarm for swarm in self.swarms.values() if swarm.get("owner_id") == user_id]
         owned.sort(key=lambda row: str(row.get("created_at") or ""))
         if owned:
@@ -1494,14 +1524,26 @@ class OvermindDatabase:
     
     def get_device(self, internal_id: str) -> Optional[dict]:
         """Get device by internal ID."""
+        if postgres_store.available():
+            relational = postgres_store.get_device(internal_id)
+            if relational is not None:
+                return relational
         return self.devices.get(internal_id)
     
     def get_device_by_device_id(self, device_id: str) -> Optional[dict]:
         """Get device by device_id (unique per user)."""
+        if postgres_store.available():
+            relational = postgres_store.get_device_by_device_id(device_id)
+            if relational is not None:
+                return relational
         return self._dedupe_device_records(device_id)
     
     def get_user_devices(self, user_id: str, swarm_id: Optional[str] = None) -> List[dict]:
         """Get all devices for a user."""
+        if postgres_store.available():
+            relational = postgres_store.list_user_devices(user_id, swarm_id=swarm_id)
+            if relational is not None:
+                return relational
         self._dedupe_all_device_records()
         visible_swarm_ids = {swarm_id} if swarm_id else {row["id"] for row in self.get_user_swarms(user_id)}
         return [
@@ -1515,6 +1557,10 @@ class OvermindDatabase:
         ]
 
     def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
+        if postgres_store.available():
+            relational = postgres_store.user_can_access_device(user_id, device_id, swarm_id=swarm_id)
+            if relational is not None:
+                return relational
         device = self.get_device_by_device_id(device_id)
         if not device or device.get("approval_status", "approved") != "approved":
             return None
@@ -1837,6 +1883,10 @@ class OvermindDatabase:
         payload: Optional[dict] = None,
     ) -> Optional[dict]:
         """Queue an action for a user's device."""
+        if postgres_store.available():
+            relational = postgres_store.create_device_action(user_id, device_id, action_type, payload)
+            if relational is not None:
+                return relational
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
             return None
@@ -1860,6 +1910,8 @@ class OvermindDatabase:
 
     def get_device_actions(self, user_id: str, device_id: str) -> Optional[List[dict]]:
         """Get currently queued or running actions for a user's device."""
+        if postgres_store.available():
+            return postgres_store.list_device_actions(user_id, device_id)
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
             return None
@@ -1872,6 +1924,8 @@ class OvermindDatabase:
 
     def clear_device_actions(self, user_id: str, device_id: str) -> Optional[int]:
         """Remove currently queued or running actions for a user's device."""
+        if postgres_store.available():
+            return postgres_store.clear_device_actions(user_id, device_id)
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
             return None
@@ -1898,6 +1952,10 @@ class OvermindDatabase:
 
     def claim_pending_device_actions(self, device_id: str, limit: int = 25) -> List[dict]:
         """Claim all currently pending actions for a device, bounded for one poll."""
+        if postgres_store.available():
+            relational = postgres_store.claim_pending_device_actions(device_id, limit=limit)
+            if relational is not None:
+                return relational
         device = self.get_device_by_device_id(device_id)
         if not device:
             return []
@@ -2228,6 +2286,18 @@ class OvermindDatabase:
             if device["device_id"] == device_id:
                 return device["user_id"] == user_id and device.get("approval_status", "approved") == "approved"
         return False
+
+    def count_device_roms(self, device_id: str) -> int:
+        if postgres_store.available():
+            relational = postgres_store.count_device_roms(device_id)
+            if relational is not None:
+                return relational
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return 0
+        if self._asset_store_enabled():
+            return len(postgres_store.list_device_assets(device["id"], "rom"))
+        return len(self.roms.get(device["id"], []))
     
     # ROM operations
     def _clean_rom_rows(self, device_id: str, system_name: str, roms: list) -> list:
@@ -2861,6 +2931,10 @@ class OvermindDatabase:
         return entry
 
     def store_download_state(self, device_id: str, payload: dict) -> Optional[dict]:
+        if postgres_store.available():
+            relational = postgres_store.store_download_state(device_id, payload if isinstance(payload, dict) else {})
+            if relational is not None:
+                return relational
         device = self.get_device_by_device_id(device_id)
         if not device:
             return None
@@ -2880,6 +2954,10 @@ class OvermindDatabase:
         return clean
 
     def get_download_states(self, user_id: str, device_id: Optional[str] = None) -> List[dict]:
+        if postgres_store.available():
+            relational = postgres_store.list_download_states(user_id, device_id=device_id)
+            if relational is not None:
+                return relational
         devices = [self.user_can_access_device(user_id, device_id)] if device_id else self.get_user_devices(user_id)
         rows = []
         for device in devices:

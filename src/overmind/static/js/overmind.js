@@ -83,8 +83,11 @@
             let uiLoadingTimer = null;
             let loadingToastEl = null;
             let devicesRefreshTimer = null;
+            let devicesRefreshInFlight = false;
+            let pendingConnectionsInFlight = false;
             let downloadsRefreshTimer = null;
             let downloadsRefreshInFlight = false;
+            let notificationsInFlight = false;
             let systemFilterOptionsRequestId = 0;
             let superAdminMetricsTimer = null;
             let notificationsRefreshTimer = null;
@@ -253,7 +256,7 @@
                 return toast;
             }
 
-            function showLoadingToast(message = 'Loading data...') {
+            function showLoadingToast(message = 'Loading...') {
                 if (loadingToastEl) return;
                 loadingToastEl = document.createElement('div');
                 loadingToastEl.className = 'toast-alert alert-loading';
@@ -272,11 +275,11 @@
                 dismissToast(loadingToastEl);
             }
 
-            function beginUiLoading() {
+            function beginUiLoading(message = 'Loading...') {
                 uiLoadingRequests += 1;
                 if (uiLoadingRequests !== 1) return;
                 uiLoadingTimer = setTimeout(() => {
-                    if (uiLoadingRequests > 0) showLoadingToast('Loading data...');
+                    if (uiLoadingRequests > 0) showLoadingToast(message);
                 }, 120);
             }
 
@@ -290,18 +293,51 @@
                 hideLoadingToast();
             }
 
-	            async function apiGet(path) {
-                beginUiLoading();
+	            async function apiGet(path, options = {}) {
+                const showLoader = options.showLoader !== false;
+                const loadingMessage = options.loadingMessage || loadingMessageForPath(path);
+                const timeoutMs = Math.max(1000, Number(options.timeoutMs || 20000));
+                const controller = new AbortController();
+                const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+                if (showLoader) beginUiLoading(loadingMessage);
                 try {
                     const response = await fetch(path, {
-                        headers: { 'Authorization': `Bearer ${authToken}` }
+                        headers: { 'Authorization': `Bearer ${authToken}` },
+                        signal: controller.signal,
                     });
                     await handleApiAuthFailure(response);
                     return response;
                 } finally {
-                    endUiLoading();
+                    window.clearTimeout(timeout);
+                    if (showLoader) endUiLoading();
                 }
 	            }
+
+            function loadingMessageForPath(path) {
+                const cleanPath = String(path || '').split('?')[0];
+                if (cleanPath.includes('/api/notifications')) return 'Loading notifications...';
+                if (cleanPath.includes('/api/drone-connections')) return 'Loading Drone requests...';
+                if (cleanPath.includes('/api/devices') && cleanPath.includes('/roms')) return 'Loading ROMs...';
+                if (cleanPath.includes('/api/devices') && cleanPath.includes('/systems')) return 'Loading systems...';
+                if (cleanPath.includes('/api/devices') && cleanPath.includes('/master-roms')) return 'Loading master ROMs...';
+                if (cleanPath.includes('/api/devices') && cleanPath.includes('/master-bios')) return 'Loading master BIOS...';
+                if (cleanPath.includes('/api/devices') && cleanPath.includes('/master-artwork')) return 'Loading artwork...';
+                if (cleanPath.includes('/api/devices') && cleanPath.includes('/gamelogs')) return 'Loading game logs...';
+                if (cleanPath.includes('/api/devices') && cleanPath.includes('/actions')) return 'Loading actions...';
+                if (cleanPath.includes('/api/devices') && cleanPath.includes('/sync-activity')) return 'Loading sync activity...';
+                if (cleanPath.includes('/api/devices')) return 'Loading devices...';
+                if (cleanPath.includes('/api/downloads')) return 'Loading downloads...';
+                if (cleanPath.includes('/api/sync-activity')) return 'Loading sync activity...';
+                if (cleanPath.includes('/api/master-roms')) return 'Loading master ROMs...';
+                if (cleanPath.includes('/api/systems')) return 'Loading systems...';
+                if (cleanPath.includes('/api/hive')) return 'Loading hive...';
+                if (cleanPath.includes('/api/profile')) return 'Loading profile...';
+                if (cleanPath.includes('/api/swarms')) return 'Loading swarms...';
+                if (cleanPath.includes('/api/admin/runtime-metrics')) return 'Loading runtime metrics...';
+                if (cleanPath.includes('/api/admin/runtime-logs')) return 'Loading runtime logs...';
+                if (cleanPath.includes('/api/admin/overview')) return 'Loading admin overview...';
+                return 'Loading...';
+            }
 
 	            function withSwarm(path) {
 	                if (!selectedSwarmId) return path;
@@ -369,14 +405,18 @@
                 }).join('');
             }
 
-            async function loadNotifications() {
+            async function loadNotifications(options = {}) {
                 if (!authToken) return;
+                if (notificationsInFlight) return;
+                notificationsInFlight = true;
                 try {
-                    const response = await apiGet('/api/notifications');
+                    const response = await apiGet('/api/notifications', { showLoader: options.showLoader !== false });
                     if (!response.ok) throw new Error('Failed to load notifications');
                     renderNotifications(await response.json());
                 } catch (error) {
                     console.error('Error loading notifications:', error);
+                } finally {
+                    notificationsInFlight = false;
                 }
             }
 
@@ -524,7 +564,7 @@
 
             function startNotificationPolling() {
                 if (notificationsRefreshTimer) clearInterval(notificationsRefreshTimer);
-                notificationsRefreshTimer = setInterval(loadNotifications, 60000);
+                notificationsRefreshTimer = setInterval(() => loadNotifications({showLoader: false}), 60000);
             }
 
             async function loadAuthProviders() {
@@ -903,7 +943,7 @@
 
             function startPendingConnectionPolling() {
                 if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
-                pendingConnectionTimer = setInterval(loadPendingConnections, 10000);
+                pendingConnectionTimer = setInterval(() => loadPendingConnections({showLoader: false}), 30000);
             }
 
             function startDevicesPolling() {
@@ -911,7 +951,7 @@
                 devicesRefreshTimer = setInterval(() => {
                     // only poll when on devices tab
                     if (currentTab === 'devices' && document.getElementById('devices-tab')?.style.display !== 'none') {
-                        loadDevices();
+                        loadDevices({showLoader: false});
                     }
                 }, 30000);
             }
@@ -1448,8 +1488,10 @@
 
             async function loadDevices(options = {}) {
                 const applyRoute = options.applyRoute !== false;
+                if (devicesRefreshInFlight) return;
+                devicesRefreshInFlight = true;
                 try {
-                    const response = await apiGet(withSwarm('/api/devices'));
+                    const response = await apiGet(withSwarm('/api/devices'), { showLoader: options.showLoader !== false });
                     if (!response.ok) throw new Error('Failed to load devices');
                     const data = await response.json();
                     currentDevices = data.devices;
@@ -1460,23 +1502,29 @@
                     if (applyRoute) applyRouteFromHash();
                 } catch (error) {
                     console.error('Error loading devices:', error);
+                } finally {
+                    devicesRefreshInFlight = false;
                 }
             }
 
-            async function loadPendingConnections() {
+            async function loadPendingConnections(options = {}) {
                 if (!authToken || !canMutateSwarm()) {
                     pendingConnections = [];
                     displayPendingConnections();
                     return;
                 }
+                if (pendingConnectionsInFlight) return;
+                pendingConnectionsInFlight = true;
                 try {
-	                    const response = await apiGet(withSwarm('/api/drone-connections'));
+	                    const response = await apiGet(withSwarm('/api/drone-connections'), { showLoader: options.showLoader !== false });
                     if (!response.ok) throw new Error('Failed to load drone connections');
                     const data = await response.json();
                     pendingConnections = data.connections || [];
                     displayPendingConnections();
                 } catch (error) {
                     console.error('Error loading drone connections:', error);
+                } finally {
+                    pendingConnectionsInFlight = false;
                 }
             }
 
