@@ -3043,6 +3043,41 @@ def test_device_action_lifecycle(client):
     assert len(action_notifications) == 1
 
 
+def test_device_action_completion_uses_postgres_store_when_available(client, monkeypatch):
+    device = {
+        "id": "internal-drone",
+        "device_id": "pg-drone",
+        "device_name": "PG Drone",
+        "user_id": "owner",
+        "swarm_id": "swarm-1",
+        "approval_status": "approved",
+    }
+    calls = {}
+
+    def complete(device_id, action_id, status, message, result):
+        calls["args"] = (device_id, action_id, status, message, result)
+        return {
+            "id": action_id,
+            "device_id": device_id,
+            "action": "restart",
+            "status": status,
+            "message": message,
+            "result": result,
+        }
+
+    monkeypatch.setattr(db_module.postgres_store, "available", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "get_device_by_device_id", lambda device_id: device if device_id == "pg-drone" else None)
+    monkeypatch.setattr(db_module.postgres_store, "complete_device_action", complete)
+
+    action = db.complete_device_action("pg-drone", "action-1", "completed", "Reboot command issued.", {"type": "restart"})
+
+    assert action["id"] == "action-1"
+    assert calls["args"] == ("pg-drone", "action-1", "completed", "Reboot command issued.", {"type": "restart"})
+    notifications = db.notifications["swarm-1"]
+    assert notifications[-1]["event_type"] == "device_action_completed"
+    assert notifications[-1]["details"]["action_id"] == "action-1"
+
+
 def test_action_results_do_not_store_raw_logs(client):
     user_id = db.create_user("logs@example.com", "hash")
     internal_id = db.create_device(user_id, "log-drone", "Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")

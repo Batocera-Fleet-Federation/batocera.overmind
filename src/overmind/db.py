@@ -1983,6 +1983,13 @@ class OvermindDatabase:
         device = self.get_device_by_device_id(device_id)
         if not device:
             return None
+        if postgres_store.available():
+            relational = postgres_store.complete_device_action(device_id, action_id, status, message, result)
+            if relational is not None:
+                if not relational.get("_already_terminal"):
+                    self._notify_device_action_completion(device, device_id, relational, status, message)
+                return relational
+            return None
         for action in self.device_actions.get(device["id"], []):
             if action.get("id") == action_id:
                 if action.get("status") in {"completed", "failed"}:
@@ -1998,33 +2005,36 @@ class OvermindDatabase:
                         postgres_store.store_action_result(device_id, action_id, result)
                     except Exception as error:
                         print(f"Overmind PostgreSQL action result persistence failed: {error}")
-                action_label = {
-                    "restart": "Remote Restart",
-                    "enable_kiosk": "Enable Kiosk Mode",
-                    "disable_kiosk": "Disable Kiosk Mode",
-                }.get(
-                    str(action.get("action") or ""),
-                    str(action.get("action") or "action").replace("_", " ").title(),
-                )
-                device_label = self._device_label(device, device_id)
-                status_label = "completed" if status == "completed" else "failed"
-                message_text = f"{action_label} {status_label} on {device_label}."
-                if message:
-                    message_text = f"{message_text} {message}"
-                self.add_swarm_notification(
-                    device.get("swarm_id"),
-                    f"device_action_{status_label}",
-                    f"Remote action {status_label}",
-                    message_text,
-                    {
-                        "action_id": action_id,
-                        "action": action.get("action"),
-                        "status": status,
-                        "device": {"device_id": device_id, "device_name": device_label},
-                    },
-                )
+                self._notify_device_action_completion(device, device_id, action, status, message)
                 return action
         return None
+
+    def _notify_device_action_completion(self, device: dict, device_id: str, action: dict, status: str, message: Optional[str]) -> None:
+        action_label = {
+            "restart": "Remote Restart",
+            "enable_kiosk": "Enable Kiosk Mode",
+            "disable_kiosk": "Disable Kiosk Mode",
+        }.get(
+            str(action.get("action") or ""),
+            str(action.get("action") or "action").replace("_", " ").title(),
+        )
+        device_label = self._device_label(device, device_id)
+        status_label = "completed" if status == "completed" else "failed"
+        message_text = f"{action_label} {status_label} on {device_label}."
+        if message:
+            message_text = f"{message_text} {message}"
+        self.add_swarm_notification(
+            device.get("swarm_id"),
+            f"device_action_{status_label}",
+            f"Remote action {status_label}",
+            message_text,
+            {
+                "action_id": action.get("id"),
+                "action": action.get("action"),
+                "status": status,
+                "device": {"device_id": device_id, "device_name": device_label},
+            },
+        )
 
     def store_action_result(self, device: dict, result: dict) -> None:
         """Persist returned action data on the device record for UI use."""

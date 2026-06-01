@@ -2343,6 +2343,79 @@ class PostgresMetadataStore:
                         by_id[action_id].setdefault("payload", {})[parameter_name] = value
                 return actions
 
+    def complete_device_action(
+        self,
+        device_id: str,
+        action_id: str,
+        status: str,
+        message: Optional[str] = None,
+        result: Optional[dict] = None,
+    ) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, action, status, created_at, claimed_at, completed_at, message
+                    FROM drone_actions
+                    WHERE id = %s AND drone_id = %s
+                    FOR UPDATE
+                    """,
+                    (action_id, device["id"]),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                current_id, action, current_status, created_at, claimed_at, completed_at, current_message = row
+                already_terminal = current_status in {"completed", "failed"}
+                if already_terminal:
+                    return {
+                        "id": current_id,
+                        "device_id": device_id,
+                        "action": action,
+                        "status": current_status,
+                        "payload": {},
+                        "created_at": created_at,
+                        "claimed_at": claimed_at,
+                        "completed_at": completed_at,
+                        "message": current_message,
+                        "_already_terminal": True,
+                    }
+                completed_at = datetime.utcnow()
+                cur.execute(
+                    """
+                    UPDATE drone_actions
+                    SET status = %s, completed_at = %s, message = %s
+                    WHERE id = %s AND drone_id = %s
+                    RETURNING id, action, status, created_at, claimed_at, completed_at, message
+                    """,
+                    (status, completed_at, message, action_id, device["id"]),
+                )
+                updated = cur.fetchone()
+        if not updated:
+            return None
+        updated_id, action, updated_status, created_at, claimed_at, completed_at, updated_message = updated
+        if isinstance(result, dict):
+            self.store_action_result(device_id, action_id, result)
+        return {
+            "id": updated_id,
+            "device_id": device_id,
+            "action": action,
+            "status": updated_status,
+            "payload": {},
+            "created_at": created_at,
+            "claimed_at": claimed_at,
+            "completed_at": completed_at,
+            "message": updated_message,
+            "result": result,
+            "result_received_at": datetime.utcnow() if result is not None else None,
+        }
+
     def clear_device_actions(self, user_id: str, device_id: str) -> Optional[int]:
         device = self.get_device_by_device_id(device_id)
         if not device or device.get("user_id") != user_id:
