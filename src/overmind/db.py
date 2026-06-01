@@ -1739,6 +1739,8 @@ class OvermindDatabase:
         auth_token_id = device.get("authorization_token_id")
         if auth_token_id:
             token_rows = self.integration_tokens.get(device.get("user_id"), [])
+            if postgres_store.available():
+                token_rows = postgres_store.get_integration_tokens(device.get("user_id")) or token_rows
             backing = next((row for row in token_rows if row.get("id") == auth_token_id), None)
             if not backing or backing.get("revoked_at"):
                 return None
@@ -2282,6 +2284,10 @@ class OvermindDatabase:
     
     def device_exists(self, user_id: str, device_id: str) -> bool:
         """Check if device exists for user."""
+        if postgres_store.available():
+            relational = postgres_store.get_device_by_device_id(device_id)
+            if relational is not None:
+                return relational["user_id"] == user_id and relational.get("approval_status", "approved") == "approved"
         for device in self.devices.values():
             if device["device_id"] == device_id:
                 return device["user_id"] == user_id and device.get("approval_status", "approved") == "approved"

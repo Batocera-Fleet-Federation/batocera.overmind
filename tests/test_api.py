@@ -1533,6 +1533,21 @@ def test_register_device_refreshes_persistent_state_before_token_lookup(client, 
     assert calls["count"] == 1
 
 
+def test_device_exists_uses_relational_store_with_postgres_url(client, monkeypatch):
+    relational_device = {
+        "id": "device-internal",
+        "device_id": "relational-drone",
+        "device_name": "Relational Drone",
+        "user_id": "user-1",
+        "approval_status": "approved",
+    }
+    monkeypatch.setattr(db_module.postgres_store, "url", "postgresql://example/overmind")
+    monkeypatch.setattr(db_module.postgres_store, "available", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "get_device_by_device_id", lambda device_id: relational_device)
+
+    assert db.device_exists("user-1", "relational-drone") is True
+
+
 def test_reapproving_same_drone_updates_existing_device_instead_of_duplicating(client):
     """Repeated approval with a new authorization token keeps one visible Drone record."""
     client.post("/api/auth/register", json={"email": "dedupe@example.com", "username": "dedupe-at-example.com", "password": "testpass123"})
