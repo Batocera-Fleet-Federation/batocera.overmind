@@ -119,6 +119,10 @@ OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
 OVERMIND_LOG_CAPTURE_LINES = max(100, int(os.getenv("OVERMIND_LOG_CAPTURE_LINES", "1000")))
 _STREAM_LOG_CAPTURE: Optional["StreamLogCapture"] = None
+DRONE_LOG_STREAM_TTL_SECONDS = int(os.getenv("DRONE_LOG_STREAM_TTL_SECONDS", "75"))
+_DRONE_LOG_STREAM_REQUESTS: dict[str, float] = {}
+_DRONE_LOG_STREAM_PAYLOADS: dict[str, dict] = {}
+_DRONE_LOG_STREAM_LOCK = threading.RLock()
 
 admin_user_row = partial(_admin_user_row, data_store=db, super_admin_email=SUPER_ADMIN_EMAIL)
 admin_swarm_row = partial(_admin_swarm_row, data_store=db)
@@ -187,6 +191,37 @@ class StreamLogCapture:
             "captured_at": datetime.utcnow().isoformat() + "Z",
             "capture_active": True,
         }
+
+
+def _drone_log_stream_active(device_id: str) -> bool:
+    now = time.monotonic()
+    with _DRONE_LOG_STREAM_LOCK:
+        expires_at = _DRONE_LOG_STREAM_REQUESTS.get(device_id)
+        if not expires_at or expires_at <= now:
+            _DRONE_LOG_STREAM_REQUESTS.pop(device_id, None)
+            _DRONE_LOG_STREAM_PAYLOADS.pop(device_id, None)
+            return False
+        return True
+
+
+def _request_drone_log_stream(device_id: str) -> None:
+    with _DRONE_LOG_STREAM_LOCK:
+        _DRONE_LOG_STREAM_REQUESTS[device_id] = time.monotonic() + DRONE_LOG_STREAM_TTL_SECONDS
+
+
+def _store_drone_log_stream(device_id: str, payload: dict) -> None:
+    if not _drone_log_stream_active(device_id):
+        return
+    with _DRONE_LOG_STREAM_LOCK:
+        _DRONE_LOG_STREAM_PAYLOADS[device_id] = dict(payload)
+
+
+def _current_drone_log_stream(device_id: str) -> Optional[dict]:
+    if not _drone_log_stream_active(device_id):
+        return None
+    with _DRONE_LOG_STREAM_LOCK:
+        payload = _DRONE_LOG_STREAM_PAYLOADS.get(device_id)
+        return dict(payload) if isinstance(payload, dict) else None
 
 
 class CapturedLoggingHandler(logging.Handler):
@@ -1583,7 +1618,15 @@ async def get_device(device_id: str, authorization: Optional[str] = Header(defau
             detail="Device not found"
         )
     
-    return device_response(device)
+    response = device_response(device)
+    stream_payload = _current_drone_log_stream(device_id)
+    if stream_payload is not None:
+        response["log_sources"] = stream_payload
+        response["log_stream_active"] = True
+    else:
+        response["log_sources"] = {"type": "log_sources", "logs": []}
+        response["log_stream_active"] = False
+    return response
 
 
 @app.get("/api/devices/{device_id}/peer-certificate/{peer_id}")
@@ -1827,11 +1870,10 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
     except Exception:
         logger.exception("Heartbeat swarm response failed device_id=%s", device_id)
         swarm = []
-    log_sources = updated.get("log_sources") if isinstance(updated.get("log_sources"), dict) else {}
     return {
         "actions": actions,
         "swarm": swarm,
-        "log_sources_initialized": bool(log_sources.get("logs")),
+        "log_stream_requested": _drone_log_stream_active(device_id),
     }
 
 
@@ -2710,13 +2752,24 @@ async def upload_device_game_logs(device_id: str, payload: DroneGameLogsUpload, 
 
 @app.post("/api/devices/{device_id}/log-sources")
 async def upload_device_log_sources(device_id: str, payload: DroneLogSourcesUpload, authorization: Optional[str] = Header(default=None)):
-    """Accept changed log source content from a Drone."""
+    """Accept streamed log source content from a Drone while the logs UI is open."""
     device = get_current_drone(device_id, authorization)
     db.update_device_last_seen(device["id"])
     result = payload.model_dump(exclude_none=True)
     result["type"] = "log_sources"
-    db.store_action_result(device, result)
+    _store_drone_log_stream(device_id, result)
     return {"status": "accepted"}
+
+
+@app.post("/api/devices/{device_id}/log-stream/view")
+async def request_device_log_stream(device_id: str, authorization: Optional[str] = Header(default=None)):
+    """Mark a Drone logs view as active so the next heartbeat requests live log streaming."""
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    _request_drone_log_stream(device_id)
+    return {"status": "stream_requested", "ttl_seconds": DRONE_LOG_STREAM_TTL_SECONDS}
 
 
 @app.post("/api/devices/{device_id}/emulator-configs")

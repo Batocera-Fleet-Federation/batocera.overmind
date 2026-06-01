@@ -376,6 +376,7 @@ class DroneGameSession(ExtensibleContractModel):
 
 class DroneGameLogsUpload(StrictContractModel):
     type: Optional[Literal["game_logs"]] = "game_logs"
+    collected_at: Optional[str] = None
     sessions: list[DroneGameSession] = Field(default_factory=list)
 
 
@@ -402,6 +403,8 @@ class DroneEmulatorConfigFile(ExtensibleContractModel):
     relative_path: str
     content: str = ""
     modified_at: Optional[str] = None
+    md5: Optional[str] = None
+    fingerprint: Optional[str] = None
 
 
 class DroneEmulatorConfigsUpload(StrictContractModel):

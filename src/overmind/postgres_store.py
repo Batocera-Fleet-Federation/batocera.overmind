@@ -991,6 +991,8 @@ class PostgresMetadataStore:
     def store_action_result(self, device_id: str, action_id: str, result: dict) -> None:
         if not self.url:
             return
+        if result.get("type") == "log_sources":
+            return
         self.ensure_schema()
         conn = self._connect()
         if conn is None:

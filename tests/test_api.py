@@ -3043,7 +3043,7 @@ def test_device_action_lifecycle(client):
     assert len(action_notifications) == 1
 
 
-def test_action_results_append_logs_and_cap_stored_lines(client):
+def test_action_results_do_not_store_raw_logs(client):
     user_id = db.create_user("logs@example.com", "hash")
     internal_id = db.create_device(user_id, "log-drone", "Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
     device = db.get_device(internal_id)
@@ -3057,39 +3057,22 @@ def test_action_results_append_logs_and_cap_stored_lines(client):
         "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-3"}]}],
     })
 
-    file_info = device["log_sources"]["logs"][0]["files"][0]
-    assert file_info["content"].splitlines() == ["line-1", "line-2", "line-3"]
-
-    db.store_action_result(device, {
-        "type": "log_sources",
-        "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "\n".join(f"line-{i}" for i in range(4, 1105))}]}],
-    })
-
-    stored_lines = device["log_sources"]["logs"][0]["files"][0]["content"].splitlines()
-    assert len(stored_lines) == 1000
-    assert stored_lines[0] == "line-105"
-    assert stored_lines[-1] == "line-1104"
-    assert device["log_sources"]["max_lines"] == 1000
+    assert not device.get("log_sources")
 
 
-def test_log_retention_keeps_emulationstation_content_when_drone_log_is_noisy(client):
+def test_game_log_result_does_not_store_raw_logs(client):
     user_id = db.create_user("es-logs@example.com", "hash")
     internal_id = db.create_device(user_id, "es-log-drone", "ES Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
     device = db.get_device(internal_id)
 
     db.store_action_result(device, {
-        "type": "log_sources",
-        "logs": [
-            {"source": "es_launch_stdout", "files": [{"path": "/userdata/system/logs/es_launch_stdout.log", "content": "launch output\n"}]},
-            {"source": "es_launch_stderr", "files": [{"path": "/userdata/system/logs/es_launch_stderr.log", "content": "launch error\n"}]},
-            {"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "\n".join(f"noise-{i}" for i in range(1500))}]},
-        ],
+        "type": "game_logs",
+        "sessions": [{"system_name": "snes", "game_name": "Game.sfc"}],
+        "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "raw\n"}]}],
     })
 
-    logs = {row["source"]: row["files"][0]["content"] for row in device["log_sources"]["logs"]}
-    assert logs["es_launch_stdout"] == "launch output"
-    assert logs["es_launch_stderr"] == "launch error"
-    assert len(logs["drone_stdout"].splitlines()) == 1000
+    assert not device.get("log_sources")
+    assert device["game_logs"]["sessions"][0]["game_name"] == "Game.sfc"
 
 
 def test_action_results_merge_configs_and_exclude_bak_files(client):
@@ -3162,21 +3145,39 @@ def test_game_log_upload_stores_sessions_for_game_log_list(client):
     assert logs[0]["played_at"] == "2026-05-26T10:15:00+00:00"
 
 
-def test_log_source_upload_appends_changed_content(client):
-    user_id = db.create_user("log-upload@example.com", "hash")
+def test_log_source_upload_streams_only_while_view_requested(client):
+    client.post("/api/auth/register", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"}).json()["access_token"]
+    user_id = db.get_user_by_email("log-upload@example.com")["id"]
     db.create_device(user_id, "log-upload-drone", "Log Upload Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
 
-    for content in ("line-1\n", "line-2\n"):
-        response = client.post(
-            "/api/devices/log-upload-drone/log-sources",
-            headers={"Authorization": "Bearer drone-token"},
-            json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": content}]}]},
-        )
-        assert response.status_code == 200
+    inactive = client.post(
+        "/api/devices/log-upload-drone/log-sources",
+        headers={"Authorization": "Bearer drone-token"},
+        json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "ignored\n"}]}]},
+    )
+    assert inactive.status_code == 200
+    assert not db.get_device_by_device_id("log-upload-drone").get("log_sources")
 
-    device = db.get_device_by_device_id("log-upload-drone")
-    content = device["log_sources"]["logs"][0]["files"][0]["content"]
-    assert content.splitlines() == ["line-1", "line-2"]
+    view = client.post("/api/devices/log-upload-drone/log-stream/view", headers={"Authorization": f"Bearer {token}"})
+    assert view.status_code == 200
+    heartbeat = client.post(
+        "/api/devices/log-upload-drone/heartbeat",
+        headers={"Authorization": "Bearer drone-token"},
+        json={"device_name": "Log Upload Drone"},
+    )
+    assert heartbeat.json()["log_stream_requested"] is True
+    active = client.post(
+        "/api/devices/log-upload-drone/log-sources",
+        headers={"Authorization": "Bearer drone-token"},
+        json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-1\n"}]}]},
+    )
+    assert active.status_code == 200
+    device_response = client.get("/api/devices/log-upload-drone", headers={"Authorization": f"Bearer {token}"})
+    assert device_response.status_code == 200
+    assert device_response.json()["log_stream_active"] is True
+    assert device_response.json()["log_sources"]["logs"][0]["files"][0]["content"] == "line-1\n"
+    assert not db.get_device_by_device_id("log-upload-drone").get("log_sources")
 
 
 def test_log_source_upload_accepts_drone_incremental_fields_and_marks_online(client):
@@ -3210,7 +3211,8 @@ def test_emulator_config_upload_stores_changed_configs(client):
         headers={"Authorization": "Bearer drone-token"},
         json={
             "type": "emulator_configs",
-            "configs": [{"root": "/configs", "relative_path": "retroarch.cfg", "content": "video_driver = vulkan"}],
+            "incremental": True,
+            "configs": [{"root": "/configs", "relative_path": "retroarch.cfg", "content": "video_driver = vulkan", "md5": "abc123", "fingerprint": "abc123"}],
         },
     )
 
@@ -3218,6 +3220,7 @@ def test_emulator_config_upload_stores_changed_configs(client):
     assert response.json() == {"status": "accepted"}
     device = db.get_device_by_device_id("config-upload-drone")
     assert device["emulator_configs"]["configs"][0]["relative_path"] == "retroarch.cfg"
+    assert device["emulator_configs"]["configs"][0]["md5"] == "abc123"
     assert device["emulator_configs"]["configs"][0]["versions"][0]["content"] == "video_driver = vulkan"
 
 
@@ -3898,7 +3901,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         },
     )
     assert heartbeat_response.status_code == 200
-    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_sources_initialized"}
+    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_stream_requested"}
     assert "device" not in heartbeat_response.json()
     swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["drone_id"] == "arcade-cabinet-001")
     assert swarm_peer["reachable_url"] == "https://bff-drone-a:8443"
@@ -3997,7 +4000,7 @@ def test_heartbeat_survives_noncritical_state_update_failure(client, monkeypatch
         json={"device_name": "Resilient Drone"},
     )
     assert response.status_code == 200
-    assert set(response.json()) == {"actions", "swarm", "log_sources_initialized"}
+    assert set(response.json()) == {"actions", "swarm", "log_stream_requested"}
 
 
 def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):

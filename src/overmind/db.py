@@ -2034,12 +2034,10 @@ class OvermindDatabase:
         if result_type == "emulator_configs":
             device["emulator_configs"] = merge_emulator_configs(device.get("emulator_configs"), result)
         if result_type == "log_sources":
-            device["log_sources"] = merge_log_sources(device.get("log_sources"), result)
+            return
         if result_type == "game_logs":
             device["game_logs"] = merge_game_logs(device.get("game_logs"), result)
             self._store_game_log_sessions(device.get("device_id"), result.get("sessions") if isinstance(result.get("sessions"), list) else [])
-            if isinstance(result.get("logs"), list):
-                device["log_sources"] = merge_log_sources(device.get("log_sources"), {"logs": result.get("logs"), "collected_at": result.get("collected_at")})
         if result_type in {"rom_sync", "bios_sync", "artwork_sync"}:
             for activity in result.get("activity") if isinstance(result.get("activity"), list) else []:
                 if isinstance(activity, dict):

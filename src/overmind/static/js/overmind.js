@@ -2058,6 +2058,11 @@
                     return;
                 }
                 try {
+                    const streamResp = await fetch(`/api/devices/${selectedDeviceId}/log-stream/view`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    await handleApiAuthFailure(streamResp);
                     const [logsResp, deviceResp] = await Promise.all([
                         apiGet(`/api/devices/${selectedDeviceId}/gamelogs`),
                         apiGet(`/api/devices/${selectedDeviceId}`)
