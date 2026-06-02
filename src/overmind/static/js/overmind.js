@@ -95,6 +95,7 @@
             let inactivityTimer = null;
             let lastAuthRefreshAt = 0;
             let authRefreshInFlight = false;
+            let logoutNoticeShown = false;
             let pendingInvitationToken = sessionStorage.getItem('pending_invitation_token') || null;
             const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
             const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
@@ -188,6 +189,9 @@
             });
 
             let authToken = localStorage.getItem('auth_token') || null;
+            function markAuthenticatedSession() {
+                logoutNoticeShown = false;
+            }
             function hideLandingShell() {
                 const landing = document.querySelector('.landing-shell');
                 if (landing) {
@@ -600,6 +604,7 @@
                 const token = params.get('oauth_token');
                 if (!token) return;
                 authToken = token;
+                markAuthenticatedSession();
                 localStorage.setItem('auth_token', authToken);
                 pendingInvitationToken = sessionStorage.getItem('pending_invitation_token') || pendingInvitationToken;
 	                window.location.hash = '#/devices';
@@ -705,6 +710,7 @@
 	                    }
 	                    const data = await response.json();
 	                    authToken = data.access_token;
+                        markAuthenticatedSession();
 	                    currentUser = data.user;
 	                    currentSwarms = data.swarms || [];
 	                    selectedSwarmId = selectedSwarmId || (currentSwarms[0] && currentSwarms[0].id) || null;
@@ -884,6 +890,8 @@
             }
 
 	            function logout(message = null, nextHash = '#/home') {
+                const shouldShowLogoutMessage = Boolean(message) && !logoutNoticeShown;
+                if (message) logoutNoticeShown = true;
                 closeAccountMenu();
                 closeNotificationsPanel();
                 authToken = null;
@@ -925,7 +933,7 @@
                 } else {
 	                window.location.href = '/#/home';
                 }
-                if (message) showMessage(message, 'error');
+                if (shouldShowLogoutMessage) showMessage(message, 'error');
 	            }
 
 	            function showDashboard() {
@@ -3908,8 +3916,7 @@
                         body: JSON.stringify({ action: actionName })
                     });
                     if (response.status === 401) {
-                        logout();
-                        showMessage('Session expired. Please log in again.', 'error');
+                        logout('Session expired. Please log in again.', '#/login');
                         throw new Error('Unauthorized');
                     }
                     if (!response.ok) throw new Error('Failed to queue action');

@@ -302,3 +302,12 @@ def test_overmind_ui_contains_inactivity_timeout_hooks():
     assert "resetInactivityTimer()" in js
     assert "/api/auth/refresh" in js
     assert "You were logged out after 30 minutes of inactivity." in js
+
+
+def test_overmind_ui_dedupes_logout_notices():
+    js = (Path(__file__).resolve().parents[1] / "src" / "overmind" / "static" / "js" / "overmind.js").read_text(encoding="utf-8")
+
+    assert "let logoutNoticeShown = false;" in js
+    assert "const shouldShowLogoutMessage = Boolean(message) && !logoutNoticeShown;" in js
+    assert "if (shouldShowLogoutMessage) showMessage(message, 'error');" in js
+    assert "logout();\n                        showMessage('Session expired. Please log in again.', 'error');" not in js
