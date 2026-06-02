@@ -83,6 +83,20 @@ def test_ui_session_refreshes_while_active_and_times_out_after_30_minutes():
     assert "You were logged out after 30 minutes of inactivity." in js
 
 
+def test_overmind_docker_publish_defaults_to_version_tag():
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = root.joinpath("Dockerfile").read_text(encoding="utf-8")
+    publish = root.joinpath("scripts/docker-publish-ecr.sh").read_text(encoding="utf-8")
+    lambda_publish = root.joinpath("scripts/docker-publish-lambda-ecr.sh").read_text(encoding="utf-8")
+    lambda_update = root.joinpath("scripts/update-lambda-functions.sh").read_text(encoding="utf-8")
+
+    assert "COPY VERSION ./VERSION" in dockerfile
+    assert 'DEFAULT_TAG="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null || echo latest)"' in publish
+    assert 'TAG="${TAG:-$DEFAULT_TAG}"' in publish
+    assert 'DEFAULT_TAG="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null || echo lambda-latest)"' in lambda_publish
+    assert 'DEFAULT_TAG="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null || echo lambda-latest)"' in lambda_update
+
+
 def test_ui_notifications_nav_and_polling_hooks():
     root = Path(__file__).resolve().parents[1]
     html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")

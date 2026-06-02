@@ -13,6 +13,7 @@ COPY requirements.txt pyproject.toml ./
 COPY src ./src
 COPY app ./app
 COPY content ./content
+COPY VERSION ./VERSION
 RUN pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8443

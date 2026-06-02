@@ -289,7 +289,7 @@ def get_app_version() -> str:
 
 def get_version_badge_html() -> str:
     """Render an optional runtime deployment label in the application navbar."""
-    version_label = os.getenv("OVERMIND_VERSION", "").strip()
+    version_label = get_app_version().strip()
     if not version_label:
         return ""
     return f'<span class="badge text-bg-secondary" id="overmind-version-badge">{html.escape(version_label)}</span>'

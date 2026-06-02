@@ -136,12 +136,14 @@ def test_health_check(client):
     assert response.json()["version"].startswith("v")
 
 
-def test_ui_header_hides_version_badge_without_environment_value(client, monkeypatch):
+def test_ui_header_shows_version_badge_from_version_file(client, monkeypatch):
     monkeypatch.delenv("OVERMIND_VERSION", raising=False)
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    assert 'id="overmind-version-badge"' not in html
+    version = Path(__file__).resolve().parents[1].joinpath("VERSION").read_text(encoding="utf-8").strip()
+    assert 'id="overmind-version-badge"' in html
+    assert version in html
     assert "__OVERMIND_VERSION_BADGE__" not in html
 
 

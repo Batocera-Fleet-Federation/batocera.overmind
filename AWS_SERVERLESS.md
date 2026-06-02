@@ -26,14 +26,17 @@ scripts/run-scheduled-job.sh device-status
 Build and push the Lambda-compatible image:
 
 ```bash
-TAG=lambda-latest scripts/docker-publish-lambda-ecr.sh
+scripts/docker-publish-lambda-ecr.sh
 ```
 
 After the Lambda functions exist, refresh them to the pushed image:
 
 ```bash
-TAG=lambda-latest scripts/update-lambda-functions.sh
+scripts/update-lambda-functions.sh
 ```
+
+Both scripts default to the version in `VERSION`, for example `v0.1.0`. Set
+`TAG=<version>` only when deploying a specific image tag.
 
 The standard `Dockerfile` remains for local Docker use. `Dockerfile.lambda` uses
 the AWS Lambda Python base image and starts `overmind.lambda_handler.handler`.
