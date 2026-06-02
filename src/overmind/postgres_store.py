@@ -4233,21 +4233,6 @@ class PostgresMetadataStore:
                     (device_internal_id, inventory_id),
                 )
                 cur.execute(
-                    """
-                    SELECT asset_type, payload
-                    FROM overmind_device_asset_staging
-                    WHERE device_internal_id = %s AND inventory_id = %s
-                    """,
-                    (device_internal_id, inventory_id),
-                )
-                rows_by_type: dict[str, list[dict]] = {"rom": [], "bios": [], "artwork": []}
-                for asset_type, payload in cur.fetchall():
-                    decoded = _decode_state(payload)
-                    if isinstance(decoded, dict) and asset_type in rows_by_type:
-                        rows_by_type[asset_type].append(decoded)
-                for asset_type, rows in rows_by_type.items():
-                    self._replace_domain_assets(cur, device_internal_id, asset_type, rows)
-                cur.execute(
                     "DELETE FROM overmind_device_asset_staging WHERE device_internal_id = %s",
                     (device_internal_id,),
                 )
