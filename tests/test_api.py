@@ -2081,9 +2081,15 @@ def test_device_roms_support_server_side_pagination(client):
 def test_device_systems_ui_loads_roms_by_page():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     assert "apiGet(`/api/devices/${selectedDeviceId}/systems`)" in js
-    assert "params.set('page', String(page));" in js
-    assert "params.set('per_page', String(ROMS_PER_PAGE));" in js
-    assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${params.toString()}`)" in js
+    assert "romParams.set('page', String(page));" in js
+    assert "romParams.set('per_page', String(ROMS_PER_PAGE));" in js
+    assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`)" in js
+    assert "apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`)" in js
+    assert "rom-artwork-table" in js
+    assert "const artworkRows = artworkRowsForRom(row, artworkLookup, row.system_name || system || '')" in js
+    assert "toggleMasterRomDetail" in js
+    assert "renderRomDetailPanel(row, artworkRows, sizeText, sources || preferred, statusLabel)" in js
+    assert "document.querySelectorAll('.rom-master-detail-row').forEach" in js
 
 
 def test_background_polling_does_not_pin_global_loading_toast():
@@ -2338,6 +2344,48 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     assert claim.status_code == 200
     action = claim.json()["actions"][0]
     assert action["payload"]["devices"] == [{"device_id": "source-with-rom", "device_name": "Source With ROM"}]
+
+
+def test_sync_rom_queues_associated_artwork_actions(client):
+    client.post("/api/auth/register", json={"email": "rom-artwork@example.com", "username": "rom-artwork-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "rom-artwork@example.com", "username": "rom-artwork-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("rom-artwork@example.com")
+    db.create_device(user["id"], "source-with-assets", "Source Assets", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "target-without-assets", "Target Assets", {"ip_address": "10.0.0.3"}, raw_token="b")
+    mark_source_resolvable("source-with-assets")
+    db.add_roms("source-with-assets", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc"}])
+    db.add_artwork("source-with-assets", [{
+        "system": "snes",
+        "rom_path": "/userdata/roms/snes/Game.zip",
+        "rom_name": "Game.zip",
+        "artwork_types": ["image", "marquee"],
+    }])
+
+    response = client.post(
+        "/api/devices/target-without-assets/sync-rom",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["artwork_action_count"] == 2
+
+    claim = client.post(
+        "/api/devices/target-without-assets/actions/claim",
+        headers={"Authorization": "Bearer b"},
+        json={},
+    )
+    assert claim.status_code == 200
+    actions = claim.json()["actions"]
+    assert [action["action"] for action in actions] == ["sync_rom", "sync_artwork", "sync_artwork"]
+    artwork_payloads = [action["payload"] for action in actions if action["action"] == "sync_artwork"]
+    assert {payload["artwork_type"] for payload in artwork_payloads} == {"image", "marquee"}
+    assert all(payload["rom_path"] == "/userdata/roms/snes/Game.zip" for payload in artwork_payloads)
+    assert all(payload["devices"] == [{"device_id": "source-with-assets", "device_name": "Source Assets"}] for payload in artwork_payloads)
 
 
 def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):

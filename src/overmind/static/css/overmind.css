@@ -760,6 +760,93 @@
                 color: #4e73df;
             }
 
+            .rom-artwork-table {
+                margin-bottom: 0;
+            }
+
+            .rom-artwork-table th {
+                color: var(--admin-muted);
+                font-size: .72rem;
+                font-weight: 700;
+                letter-spacing: 0;
+                text-transform: uppercase;
+            }
+
+            .rom-artwork-assets {
+                display: flex;
+                flex-wrap: wrap;
+                gap: .25rem;
+            }
+
+            .rom-artwork-chip {
+                align-items: center;
+                border: 1px solid rgba(78,115,223,.18);
+                border-radius: 999px;
+                display: inline-flex;
+                font-size: .72rem;
+                gap: .25rem;
+                line-height: 1;
+                padding: .18rem .42rem;
+                white-space: nowrap;
+            }
+
+            .rom-artwork-chip.is-present {
+                background: rgba(52,211,153,.12);
+                border-color: rgba(52,211,153,.26);
+                color: #047857;
+            }
+
+            .rom-artwork-chip.is-available {
+                background: rgba(148,163,184,.12);
+                border-color: rgba(148,163,184,.22);
+                color: #64748b;
+            }
+
+            .rom-master-row {
+                cursor: pointer;
+            }
+
+            .rom-master-row:hover td {
+                background: rgba(78,115,223,.06);
+            }
+
+            .rom-master-row.is-expanded td {
+                background: rgba(78,115,223,.08);
+            }
+
+            .rom-master-detail-row > td {
+                background: rgba(15,23,42,.03);
+                border-top: 0;
+            }
+
+            .rom-detail-panel {
+                border-left: 3px solid rgba(78,115,223,.35);
+                padding: .75rem .9rem;
+            }
+
+            .rom-detail-grid {
+                display: grid;
+                gap: .65rem 1rem;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            }
+
+            .rom-detail-field {
+                min-width: 0;
+            }
+
+            .rom-artwork-detail-list {
+                display: flex;
+                flex-direction: column;
+                gap: .35rem;
+            }
+
+            .rom-artwork-detail-row {
+                align-items: center;
+                display: flex;
+                flex-wrap: wrap;
+                gap: .45rem;
+            }
+
             .tree-view ul {
                 margin: 10px 0 0 20px;
                 padding: 0;

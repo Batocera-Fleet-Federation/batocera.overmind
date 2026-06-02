@@ -64,6 +64,7 @@
             let routeSwarmId = null;
             let currentDeviceSystems = {};
             let currentSystemRomPages = {};
+            let currentSystemArtworkPages = {};
             let deviceRomSearchQuery = '';
             let masterRomPage = 1;
             let biosSearchQuery = '';
@@ -2396,6 +2397,7 @@
                     if (!response.ok) throw new Error('Failed to load device systems');
                     const data = await response.json();
                     currentSystemRomPages = {};
+                    currentSystemArtworkPages = {};
                     currentDeviceSystems = (data.systems || []).reduce((systems, row) => {
                         const name = row.system_name || row.name || '';
                         if (name) systems[name] = row;
@@ -2497,20 +2499,198 @@
                 const page = Math.max(1, systemPageState[systemName] || 1);
                 const key = `${systemName}::${page}`;
                 currentSystemRomPages[key] = { loading: true };
+                currentSystemArtworkPages[key] = { loading: true };
                 renderSystemRomPage(systemName);
                 try {
-                    const params = new URLSearchParams();
-                    params.set('system_name', systemName);
-                    params.set('page', String(page));
-                    params.set('per_page', String(ROMS_PER_PAGE));
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/roms?${params.toString()}`);
-                    if (!response.ok) throw new Error('Failed to load system ROMs');
-                    currentSystemRomPages[key] = await response.json();
+                    const romParams = new URLSearchParams();
+                    romParams.set('system_name', systemName);
+                    romParams.set('page', String(page));
+                    romParams.set('per_page', String(ROMS_PER_PAGE));
+                    const artworkParams = new URLSearchParams();
+                    artworkParams.set('system', systemName);
+                    artworkParams.set('page', '1');
+                    artworkParams.set('per_page', '500');
+                    const [romResponse, artworkResponse] = await Promise.all([
+                        apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`),
+                        apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`),
+                    ]);
+                    if (!romResponse.ok) throw new Error('Failed to load system ROMs');
+                    currentSystemRomPages[key] = await romResponse.json();
+                    currentSystemArtworkPages[key] = artworkResponse.ok ? await artworkResponse.json() : { artwork: [] };
                 } catch (error) {
                     console.error('Error loading system ROMs:', error);
                     currentSystemRomPages[key] = { error: true, roms: [], total: 0, page, per_page: ROMS_PER_PAGE };
+                    currentSystemArtworkPages[key] = { artwork: [] };
                 }
                 renderSystemRomPage(systemName);
+            }
+
+            function normalizeRomAssetKey(value) {
+                return String(value || '')
+                    .replace(/\\/g, '/')
+                    .replace(/^\/userdata\/roms\//i, '')
+                    .replace(/^userdata\/roms\//i, '')
+                    .replace(/^\.\//, '')
+                    .replace(/^\/+/, '')
+                    .trim()
+                    .toLowerCase();
+            }
+
+            function romAssetKeyVariants(value, systemName) {
+                const normalized = normalizeRomAssetKey(value);
+                if (!normalized) return [];
+                const system = String(systemName || '').trim().toLowerCase();
+                const keys = new Set([normalized]);
+                if (system) {
+                    if (normalized.startsWith(`${system}/`)) keys.add(normalized.slice(system.length + 1));
+                    else keys.add(`${system}/${normalized}`);
+                }
+                const parts = normalized.split('/').filter(Boolean);
+                if (parts.length) keys.add(parts[parts.length - 1]);
+                return Array.from(keys).filter(Boolean);
+            }
+
+            function romArtworkKeys(row, systemName) {
+                const values = [
+                    row.file_path,
+                    row.relative_path,
+                    row.rom_path,
+                    row.rom_name,
+                    row.file_name,
+                ].filter(Boolean);
+                const keys = new Set();
+                values.forEach(value => {
+                    romAssetKeyVariants(value, systemName).forEach(key => keys.add(key));
+                });
+                return keys;
+            }
+
+            function buildArtworkLookup(rows, systemName) {
+                const lookup = new Map();
+                (rows || []).forEach(row => {
+                    const keys = new Set(romAssetKeyVariants(
+                        row.rom_path || row.file_path || row.relative_path || row.rom_name || '',
+                        row.system_name || row.system || systemName,
+                    ));
+                    keys.forEach(key => {
+                        if (!lookup.has(key)) lookup.set(key, []);
+                        lookup.get(key).push(row);
+                    });
+                });
+                return lookup;
+            }
+
+            function artworkIconClass(type) {
+                const value = String(type || '').toLowerCase();
+                if (value.includes('video')) return 'bi-play-btn';
+                if (value.includes('marquee')) return 'bi-aspect-ratio';
+                if (value.includes('thumb')) return 'bi-card-image';
+                if (value.includes('fanart')) return 'bi-image';
+                if (value.includes('manual')) return 'bi-file-earmark-text';
+                if (value.includes('wheel')) return 'bi-record-circle';
+                if (value.includes('box')) return 'bi-box';
+                return 'bi-image';
+            }
+
+            function artworkRowsForRom(rom, lookup, systemName) {
+                const seen = new Set();
+                const matches = [];
+                romArtworkKeys(rom, systemName).forEach(key => {
+                    (lookup.get(key) || []).forEach(row => {
+                        const id = [
+                            row.system_name || row.system || '',
+                            row.rom_path || row.file_path || row.rom_name || '',
+                            row.artwork_type || '',
+                        ].join('::').toLowerCase();
+                        if (seen.has(id)) return;
+                        seen.add(id);
+                        matches.push(row);
+                    });
+                });
+                matches.sort((a, b) => String(a.artwork_type || '').localeCompare(String(b.artwork_type || '')));
+                return matches;
+            }
+
+            function renderRomArtworkAssets(rows) {
+                if (!rows.length) return '<span class="text-muted">none</span>';
+                return `<div class="rom-artwork-assets">${rows.map(row => {
+                    const type = row.artwork_type || 'artwork';
+                    const present = !!row.present_on_selected;
+                    const sources = (row.devices || []).map(device => device.device_name || device.device_id).filter(Boolean).join(', ');
+                    const title = present ? `${type} present on this Drone` : `${type} available from ${sources || 'another Drone'}`;
+                    return `<span class="rom-artwork-chip ${present ? 'is-present' : 'is-available'}" title="${escapeHtml(title)}">
+                        <i class="bi ${artworkIconClass(type)}"></i>${escapeHtml(type)}
+                    </span>`;
+                }).join('')}</div>`;
+            }
+
+            function renderRomDetailValue(label, value) {
+                const display = value === null || value === undefined || value === '' ? 'n/a' : String(value);
+                return `<div class="rom-detail-field">
+                    <div class="small text-muted">${escapeHtml(label)}</div>
+                    <div class="small">${escapeHtml(display)}</div>
+                </div>`;
+            }
+
+            function renderRomArtworkDetails(rows) {
+                if (!rows.length) return '<div class="small text-muted">No artwork metadata is associated with this ROM yet.</div>';
+                return `<div class="rom-artwork-detail-list">${rows.map(row => {
+                    const type = row.artwork_type || 'artwork';
+                    const present = !!row.present_on_selected;
+                    const sources = (row.devices || []).map(device => device.device_name || device.device_id).filter(Boolean).join(', ');
+                    const path = row.rom_path || row.file_path || row.relative_path || row.rom_name || '';
+                    return `<div class="rom-artwork-detail-row">
+                        <span class="rom-artwork-chip ${present ? 'is-present' : 'is-available'}"><i class="bi ${artworkIconClass(type)}"></i>${escapeHtml(type)}</span>
+                        <span class="small text-muted">${escapeHtml(present ? 'Present here' : (sources ? `Available from ${sources}` : 'Available elsewhere'))}</span>
+                        ${path ? `<span class="small mono text-muted">${escapeHtml(path)}</span>` : ''}
+                    </div>`;
+                }).join('')}</div>`;
+            }
+
+            function renderRomDetailPanel(row, artworkRows, sizeText, sources, statusLabel) {
+                const fileName = row.file_path || row.rom_name || row.relative_path || row.rom_path || '';
+                const fields = [
+                    ['System', row.system_name || row.system],
+                    ['ROM', row.rom_name || fileName],
+                    ['Path', fileName],
+                    ['MD5', row.rom_md5 || row.md5],
+                    ['Size', sizeText || row.size || row.file_size],
+                    ['Status', statusLabel],
+                    ['Source', sources || row.preferred_source_name || row.preferred_source],
+                    ['Entry type', row.entry_type],
+                    ['Title', row.title],
+                ];
+                const raw = Object.assign({}, row);
+                delete raw.devices;
+                return `<div class="rom-detail-panel">
+                    <div class="rom-detail-grid">
+                        ${fields.map(([label, value]) => renderRomDetailValue(label, value)).join('')}
+                    </div>
+                    <div class="mt-2">
+                        <div class="small fw-semibold mb-1">Artwork</div>
+                        ${renderRomArtworkDetails(artworkRows)}
+                    </div>
+                    <details class="mt-2">
+                        <summary class="small text-muted">Raw ROM metadata</summary>
+                        <pre class="mono small mt-2 mb-0">${escapeHtml(JSON.stringify(raw, null, 2))}</pre>
+                    </details>
+                </div>`;
+            }
+
+            function toggleMasterRomDetail(rowId) {
+                const detail = document.getElementById(rowId);
+                if (!detail) return;
+                const isOpen = detail.style.display !== 'none';
+                document.querySelectorAll('.rom-master-detail-row').forEach(row => {
+                    row.style.display = 'none';
+                });
+                document.querySelectorAll('.rom-master-row.is-expanded').forEach(row => {
+                    row.classList.remove('is-expanded');
+                });
+                if (isOpen) return;
+                detail.style.display = 'table-row';
+                const trigger = document.querySelector(`[data-rom-detail-target="${rowId}"]`);
+                if (trigger) trigger.classList.add('is-expanded');
             }
 
             function renderSystemRomPage(systemName) {
@@ -2519,6 +2699,7 @@
                 const page = Math.max(1, systemPageState[systemName] || 1);
                 const key = `${systemName}::${page}`;
                 const payload = currentSystemRomPages[key];
+                const artworkPayload = currentSystemArtworkPages[key] || {};
                 const summary = currentDeviceSystems[systemName] || {};
                 if (!payload || payload.loading) {
                     target.innerHTML = '<div class="small text-muted ms-3 mt-2">Loading ROMs...</div>';
@@ -2533,17 +2714,32 @@
                 const perPage = Number(payload.per_page || ROMS_PER_PAGE);
                 const pageCount = Math.max(1, Math.ceil(total / perPage));
                 const start = (page - 1) * perPage;
+                const artworkLookup = buildArtworkLookup(artworkPayload.artwork || [], systemName);
                 target.innerHTML = `
-                    <ul class="list-unstyled ms-3 mt-2">
+                    <div class="table-responsive ms-3 mt-2">
+                    <table class="table table-sm align-middle rom-artwork-table">
+                        <thead><tr>
+                            <th>ROM</th>
+                            <th class="text-nowrap">Size</th>
+                            <th>Artwork</th>
+                        </tr></thead>
+                        <tbody>
                         ${roms.map(rom => {
                             const path = rom.file_path || rom.relative_path || rom.rom_name || '';
                             const size = rom.file_size ? ` ${(rom.file_size / 1024 / 1024).toFixed(2)} MB` : '';
-                            return `<li class="py-1 border-bottom small">
-                                <div>${escapeHtml(rom.rom_name || path)}</div>
-                                <div class="text-muted">${escapeHtml(path)}${size ? ` <span>(${size.trim()})</span>` : ''}${rom.rom_md5 ? ` <span class="mono">md5: ${escapeHtml(rom.rom_md5)}</span>` : ''}</div>
-                            </li>`;
-                        }).join('') || '<li class="small text-muted py-1">No ROMs reported for this system.</li>'}
-                    </ul>
+                            const artworkRows = artworkRowsForRom(rom, artworkLookup, systemName);
+                            return `<tr>
+                                <td>
+                                    <div class="fw-semibold">${escapeHtml(rom.rom_name || path)}</div>
+                                    <div class="text-muted small">${escapeHtml(path)}${rom.rom_md5 ? ` <span class="mono">md5: ${escapeHtml(rom.rom_md5)}</span>` : ''}</div>
+                                </td>
+                                <td class="small text-muted text-nowrap">${escapeHtml(size.trim() || 'n/a')}</td>
+                                <td>${renderRomArtworkAssets(artworkRows)}</td>
+                            </tr>`;
+                        }).join('') || '<tr><td colspan="3" class="small text-muted py-2">No ROMs reported for this system.</td></tr>'}
+                        </tbody>
+                    </table>
+                    </div>
                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 ms-3 mt-2 small text-muted">
                         <span>Showing ${total ? start + 1 : 0}-${Math.min(start + perPage, total)} of ${total}</span>
                         <div class="btn-group btn-group-sm" role="group" aria-label="${escapeHtml(systemName)} pages">
@@ -2854,9 +3050,18 @@
                     params.set('page', String(masterRomPage));
                     params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
                     const url = `/api/devices/${selectedDeviceId}/master-roms` + (params.toString() ? `?${params.toString()}` : '');
-                    const response = await apiGet(url);
+                    const artworkParams = new URLSearchParams();
+                    if (q) artworkParams.set('q', q);
+                    if (system) artworkParams.set('system', system);
+                    artworkParams.set('page', '1');
+                    artworkParams.set('per_page', '500');
+                    const [response, artworkResponse] = await Promise.all([
+                        apiGet(url),
+                        apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`),
+                    ]);
                     if (!response.ok) throw new Error('Failed to load swarm ROM availability');
                     const payload = await response.json();
+                    const artworkPayload = artworkResponse.ok ? await artworkResponse.json() : { artwork: [] };
                     const filtered = payload.roms || [];
                     const total = payload.total || filtered.length;
                     const page = payload.page || masterRomPage;
@@ -2880,6 +3085,7 @@
                         if (end < pageCount - 1) paginationButtons.push('<span class="px-2">&hellip;</span>');
                         if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
                     }
+                    const artworkLookup = buildArtworkLookup(artworkPayload.artwork || [], system || '');
 
                     container.innerHTML = `
                         <div class="card"><div class="card-body py-2">
@@ -2904,12 +3110,11 @@
                             <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
                                 <th>System</th>
                                 <th>ROM</th>
-                                <th>Size</th>
                                 <th>Source</th>
                                 <th>Status</th>
                                 <th></th>
                             </tr></thead><tbody>
-                                ${filtered.map(row => {
+                                ${filtered.map((row, rowIndex) => {
                                     const present = !!row.present_on_selected;
                                     const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
                                     const preferred = row.preferred_source_name || (row.devices && row.devices[0] && (row.devices[0].device_name || row.devices[0].device_id)) || '';
@@ -2917,20 +3122,21 @@
                                     const statusLabel = present ? (row.present_label || 'Present') : (row.devices && row.devices.length ? 'Missing' : 'Unavailable');
                                     const showSync = !present && row.devices && row.devices.length;
                                     const rowData = Object.assign({}, row, { preferred_sync_source: row.preferred_source || preferred });
+                                    const artworkRows = artworkRowsForRom(row, artworkLookup, row.system_name || system || '');
+                                    const detailId = `master-rom-detail-${page}-${rowIndex}`;
                                     return `
-                                        <tr>
+                                        <tr class="rom-master-row" data-rom-detail-target="${detailId}" onclick="toggleMasterRomDetail('${detailId}')">
                                             <td>${escapeHtml(row.system_name || '')}</td>
                                             <td style="min-width:240px">
                                                 <div>${escapeHtml(row.file_path || row.rom_name || '')}</div>
-                                                ${row.rom_md5 ? `<div class="small fst-italic text-muted mono">md5: ${escapeHtml(row.rom_md5)}</div>` : ''}
                                             </td>
-                                            <td class="text-muted">${escapeHtml(sizeText)}</td>
                                             <td class="text-muted">${escapeHtml(sources || preferred)}</td>
                                             <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${escapeHtml(statusLabel)}</span></td>
                                             <td>
-                                                ${showSync ? `<button class="btn btn-primary btn-sm" onclick='syncRom(${JSON.stringify(rowData).replace(/'/g, "'")})'>Sync</button>` : ''}
+                                                ${showSync ? `<button class="btn btn-primary btn-sm" onclick='event.stopPropagation(); syncRom(${JSON.stringify(rowData).replace(/'/g, "'")})'>Sync</button>` : '<span class="small text-muted">Details</span>'}
                                             </td>
                                         </tr>
+                                        <tr id="${detailId}" class="rom-master-detail-row" style="display:none;"><td colspan="5">${renderRomDetailPanel(row, artworkRows, sizeText, sources || preferred, statusLabel)}</td></tr>
                                     `;
                                 }).join('')}
                             </tbody></table></div>
@@ -3531,7 +3737,7 @@
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['bios', 'artwork', 'gamelogs', 'configs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
+                currentDeviceView = ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
                 startSelectedDeviceDataAutoRefresh(currentDeviceView);
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
@@ -3546,7 +3752,7 @@
                 const metadataPanel = document.getElementById('device-metadata-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
-                if (artworkPanel) artworkPanel.style.display = currentDeviceView === 'artwork' ? 'block' : 'none';
+                if (artworkPanel) artworkPanel.style.display = 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
                 if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
                 if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
@@ -3554,7 +3760,6 @@
 
                 if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
                 if (currentDeviceView === 'bios') loadDeviceBiosPanel();
-                if (currentDeviceView === 'artwork') loadDeviceArtworkPanel();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
                 if (currentDeviceView === 'configs') loadDeviceConfigs();
                 if (currentDeviceView === 'metadata') {
@@ -3594,16 +3799,16 @@
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[4]) ? parts[4] : 'drones' };
                     }
                     if (parts[3] === 'device') {
-                        return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: ['bios', 'artwork', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[5]) ? parts[5] : 'systems', swarmView: 'drones' };
+                        return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[5]) ? parts[5] : 'systems', swarmView: 'drones' };
                     }
                     const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
                     return { tab, deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[2]) ? parts[2] : 'drones' };
                 }
                 if (tab === 'devices' && parts[1] === 'device') {
-                    return { tab, deviceId: parts[2] ? decodeURIComponent(parts[2]) : null, deviceView: ['bios', 'artwork', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[3]) ? parts[3] : 'systems', swarmView: 'drones' };
+                    return { tab, deviceId: parts[2] ? decodeURIComponent(parts[2]) : null, deviceView: ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[3]) ? parts[3] : 'systems', swarmView: 'drones' };
                 }
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
-                const deviceView = tab === 'devices' && ['bios', 'artwork', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
+                const deviceView = tab === 'devices' && ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
                 return { tab, deviceId, deviceView, swarmView: 'drones' };
             }
 
