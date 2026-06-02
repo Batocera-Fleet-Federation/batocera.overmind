@@ -3078,21 +3078,23 @@ def test_device_action_completion_uses_postgres_store_when_available(client, mon
     assert notifications[-1]["details"]["action_id"] == "action-1"
 
 
-def test_action_results_do_not_store_raw_logs(client):
+def test_action_results_store_raw_logs_for_selected_drone_view(client):
     user_id = db.create_user("logs@example.com", "hash")
     internal_id = db.create_device(user_id, "log-drone", "Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
     device = db.get_device(internal_id)
 
     db.store_action_result(device, {
         "type": "log_sources",
-        "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-1\nline-2"}]}],
-    })
+            "logs": [{"source": "drone_stderr", "files": [{"path": "/tmp/drone.err", "content": "line-1\nline-2"}]}],
+        })
     db.store_action_result(device, {
         "type": "log_sources",
-        "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-3"}]}],
+        "logs": [{"source": "drone_stderr", "files": [{"path": "/tmp/drone.err", "content": "line-3"}]}],
     })
 
-    assert not device.get("log_sources")
+    logs = db.get_device_log_sources("log-drone", line_limit=2)
+    assert logs["logs"][0]["source"] == "drone_stderr"
+    assert logs["logs"][0]["files"][0]["content"] == "line-2\nline-3"
 
 
 def test_game_log_result_does_not_store_raw_logs(client):
@@ -3106,7 +3108,7 @@ def test_game_log_result_does_not_store_raw_logs(client):
         "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "raw\n"}]}],
     })
 
-    assert not device.get("log_sources")
+    assert not db.get_device_log_sources("es-log-drone")["logs"]
     assert device["game_logs"]["sessions"][0]["game_name"] == "Game.sfc"
 
 
@@ -3120,6 +3122,8 @@ def test_action_results_merge_configs_and_exclude_bak_files(client):
         "configs": [
             {"root": "/configs", "relative_path": "retroarch/retroarch.cfg", "content": "video_driver = gl"},
             {"root": "/configs", "relative_path": "retroarch/retroarch.cfg.bak", "content": "old"},
+            {"root": "/configs", "relative_path": "retroarch/log/runtime.cfg", "content": "runtime log"},
+            {"root": "/configs", "relative_path": "retroarch/logs/trace.cfg", "content": "runtime logs"},
         ],
     })
     db.store_action_result(device, {
@@ -3143,6 +3147,8 @@ def test_action_results_merge_configs_and_exclude_bak_files(client):
     assert retroarch["versions"][0]["content"] == "video_driver = driver-11"
     assert retroarch["versions"][-1]["content"] == "video_driver = driver-2"
     assert all(".bak" not in row["relative_path"] for row in device["emulator_configs"]["configs"])
+    assert all("/log/" not in f"/{row['relative_path'].lower()}/" for row in device["emulator_configs"]["configs"])
+    assert all("/logs/" not in f"/{row['relative_path'].lower()}/" for row in device["emulator_configs"]["configs"])
 
 
 def test_postgres_state_encoding_strips_nul_bytes():
@@ -3180,7 +3186,7 @@ def test_game_log_upload_stores_sessions_for_game_log_list(client):
     assert logs[0]["played_at"] == "2026-05-26T10:15:00+00:00"
 
 
-def test_log_source_upload_streams_only_while_view_requested(client):
+def test_log_source_upload_persists_and_streams_while_view_requested(client):
     client.post("/api/auth/register", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"})
     token = client.post("/api/auth/login", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"}).json()["access_token"]
     user_id = db.get_user_by_email("log-upload@example.com")["id"]
@@ -3192,7 +3198,8 @@ def test_log_source_upload_streams_only_while_view_requested(client):
         json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "ignored\n"}]}]},
     )
     assert inactive.status_code == 200
-    assert not db.get_device_by_device_id("log-upload-drone").get("log_sources")
+    stored = db.get_device_log_sources("log-upload-drone")
+    assert stored["logs"][0]["files"][0]["content"] == "ignored"
 
     view = client.post("/api/devices/log-upload-drone/log-stream/view", headers={"Authorization": f"Bearer {token}"})
     assert view.status_code == 200
@@ -3212,7 +3219,8 @@ def test_log_source_upload_streams_only_while_view_requested(client):
     assert device_response.status_code == 200
     assert device_response.json()["log_stream_active"] is True
     assert device_response.json()["log_sources"]["logs"][0]["files"][0]["content"] == "line-1\n"
-    assert not db.get_device_by_device_id("log-upload-drone").get("log_sources")
+    persisted = db.get_device_log_sources("log-upload-drone", line_limit=10)
+    assert persisted["logs"][0]["files"][0]["content"] == "ignored\nline-1"
 
 
 def test_log_source_upload_accepts_drone_incremental_fields_and_marks_online(client):
@@ -3235,6 +3243,7 @@ def test_log_source_upload_accepts_drone_incremental_fields_and_marks_online(cli
     device = db.get_device_by_device_id("log-online-drone")
     assert device["last_known_status"] == "online"
     assert device["last_seen"] >= datetime.utcnow() - timedelta(seconds=5)
+    assert db.get_device_log_sources("log-online-drone")["logs"][0]["source"] == "drone_stdout"
 
 
 def test_emulator_config_upload_stores_changed_configs(client):
@@ -3259,8 +3268,91 @@ def test_emulator_config_upload_stores_changed_configs(client):
     assert device["emulator_configs"]["configs"][0]["versions"][0]["content"] == "video_driver = vulkan"
 
 
+def test_emulator_config_upload_writes_relational_store_when_available(client, monkeypatch):
+    device = {
+        "id": "internal-config-drone",
+        "device_id": "config-pg-drone",
+        "device_name": "Config PG Drone",
+        "user_id": "owner",
+        "swarm_id": "swarm-1",
+        "approval_status": "approved",
+    }
+    calls = []
+
+    monkeypatch.setattr(db_module.postgres_store, "available", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "get_device_by_device_id", lambda device_id: device if device_id == "config-pg-drone" else None)
+    monkeypatch.setattr(db_module.postgres_store, "store_device_emulator_configs", lambda internal_id, payload: calls.append((internal_id, payload)))
+
+    db.store_action_result(
+        device,
+        {
+            "type": "emulator_configs",
+            "incremental": True,
+            "configs": [{"root": "/configs", "relative_path": "retroarch.cfg", "content": "video_driver = gl", "md5": "hash-1"}],
+        },
+    )
+
+    assert calls == [
+        (
+            "internal-config-drone",
+            {
+                "type": "emulator_configs",
+                "incremental": True,
+                "configs": [{"root": "/configs", "relative_path": "retroarch.cfg", "content": "video_driver = gl", "md5": "hash-1"}],
+            },
+        )
+    ]
+
+
+def test_selected_drone_config_view_reads_relational_store(client, monkeypatch):
+    user_id = db.create_user("config-view@example.com", auth_utils.hash_password("testpass123"), verified=True, username="config-view-at-example.com")
+    db.create_device(user_id, "config-view-drone", "Config View Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "config-view@example.com", "username": "config-view-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    relational_payload = {
+        "type": "emulator_configs",
+        "configs": [
+            {
+                "root": "/userdata/system/configs",
+                "relative_path": "retroarch/retroarch.cfg",
+                "content": "video_driver = vulkan",
+                "md5": "hash-2",
+                "fingerprint": "hash-2",
+                "versions": [{"content": "video_driver = vulkan", "fingerprint": "hash-2"}],
+            },
+            {
+                "root": "/userdata/system/configs",
+                "relative_path": "retroarch/log/runtime.cfg",
+                "content": "runtime log",
+                "md5": "hash-log",
+                "fingerprint": "hash-log",
+            },
+            {
+                "root": "/userdata/system/configs",
+                "relative_path": "retroarch/logs/trace.cfg",
+                "content": "runtime logs",
+                "md5": "hash-logs",
+                "fingerprint": "hash-logs",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(db_module.postgres_store, "available", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "get_device_emulator_configs", lambda internal_id: relational_payload)
+
+    response = client.get("/api/devices/config-view-drone", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    configs = response.json()["emulator_configs"]["configs"]
+    assert [row["relative_path"] for row in configs] == ["retroarch/retroarch.cfg"]
+    assert configs[0]["content"] == "video_driver = vulkan"
+
+
 def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    css = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/css/overmind.css").read_text(encoding="utf-8")
     assert "Waiting for Drone to upload" in js
     assert "Waiting for Drone to upload artwork metadata" in js
     assert js.count("renderDroneMetadataWaitingState('System & Roms metadata')") >= 2
@@ -3268,6 +3360,11 @@ def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
     assert "renderDroneMetadataWaitingState('artwork metadata')" in js
     assert "overmindConfigVersion" in js
     assert "downloadSelectedOvermindConfigVersion" in js
+    assert "overmindConfigFilter" in js
+    assert "filterOvermindConfigs" in js
+    assert "config-source-scroll" in js
+    assert ".config-source-scroll" in css
+    assert "max-height: 520px" in css
     assert "update automatically every 30 seconds" in js
     assert "Collect Configs" not in js
 
@@ -3470,6 +3567,8 @@ def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
     assert "const shellExists = Boolean(document.getElementById('overmindLogContent'));" in js
     assert "if (!shellExists) {" in js
     assert "selectOvermindLogSource(selectedIndex, shellExists);" in js
+    assert "[10, 20, 50, 100]" in js
+    assert "log_limit=${encodeURIComponent(logLimit)}" in js
     assert "if (content.textContent !== nextContent) {" in js
     assert "file.content || file.path" not in js
     assert "No log output reported yet." in js
@@ -4311,6 +4410,11 @@ def test_relational_schema_declares_domain_tables():
     assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in source
     assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in source
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in source
+    assert "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint" in source
+    assert "def store_device_emulator_configs" in source
+    assert "def get_device_emulator_configs" in source
+    assert "lower(relative_path) NOT LIKE '%%/log/%%'" in source
+    assert "lower(relative_path) NOT LIKE '%%/logs/%%'" in source
     assert "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending" in source
     assert "if not _persist_json_app_state_enabled():\n            return None" in source
     assert "relational = self._load_relational_state(cur)" not in source

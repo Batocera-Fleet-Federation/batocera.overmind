@@ -2063,9 +2063,10 @@
                         headers: { 'Authorization': `Bearer ${authToken}` }
                     });
                     await handleApiAuthFailure(streamResp);
+                    const logLimit = getOvermindLogLineLimit();
                     const [logsResp, deviceResp] = await Promise.all([
                         apiGet(`/api/devices/${selectedDeviceId}/gamelogs`),
-                        apiGet(`/api/devices/${selectedDeviceId}`)
+                        apiGet(`/api/devices/${selectedDeviceId}?log_limit=${encodeURIComponent(logLimit)}`)
                     ]);
                     if (!logsResp.ok) throw new Error('Failed to load game logs');
                     if (!deviceResp.ok) throw new Error('Failed to load device details');
@@ -2083,19 +2084,19 @@
             }
 
             function getOvermindLogLineLimit() {
-                const stored = Number(localStorage.getItem('overmind_log_line_limit') || 200);
-                if (!Number.isFinite(stored)) return 200;
-                return Math.min(1000, Math.max(1, Math.floor(stored)));
+                const allowed = [10, 20, 50, 100];
+                const stored = Number(localStorage.getItem('overmind_log_line_limit') || 10);
+                return allowed.includes(stored) ? stored : 10;
             }
 
             function setOvermindLogLineLimit(value) {
-                const nextValue = Math.min(1000, Math.max(1, Math.floor(Number(value) || 200)));
+                const allowed = [10, 20, 50, 100];
+                const requested = Number(value);
+                const nextValue = allowed.includes(requested) ? requested : 10;
                 localStorage.setItem('overmind_log_line_limit', String(nextValue));
                 const input = document.getElementById('overmindLogLineLimit');
                 if (input) input.value = String(nextValue);
-                if (Number.isInteger(window.overmindSelectedLogIndex)) {
-                    selectOvermindLogSource(window.overmindSelectedLogIndex);
-                }
+                loadGameLogs();
             }
 
             function renderPassiveUpdateNotice(label) {
@@ -2145,8 +2146,10 @@
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                     <span id="overmindLogTitle">Select a log source</span>
                                     <div class="d-flex flex-wrap align-items-center gap-2">
-                                        <label for="overmindLogLineLimit" class="small text-muted mb-0">Lines</label>
-                                        <input id="overmindLogLineLimit" class="form-control form-control-sm" type="number" min="1" max="1000" value="${getOvermindLogLineLimit()}" style="width:5.5rem;" onchange="setOvermindLogLineLimit(this.value)" oninput="setOvermindLogLineLimit(this.value)">
+                                        <label for="overmindLogLineLimit" class="small text-muted mb-0">Logs</label>
+                                        <select id="overmindLogLineLimit" class="form-select form-select-sm" style="width:6rem;" onchange="setOvermindLogLineLimit(this.value)">
+                                            ${[10, 20, 50, 100].map(value => `<option value="${value}" ${getOvermindLogLineLimit() === value ? 'selected' : ''}>${value}</option>`).join('')}
+                                        </select>
                                         <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs()">Refresh View</button>
                                     </div>
                                 </div>
@@ -2257,13 +2260,17 @@
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
                                     <div class="card-header">Emulators</div>
-                                    <div class="list-group list-group-flush source-selector" id="overmindConfigSources">
+                                    <div class="config-filter-wrap p-2">
+                                        <input id="overmindConfigFilter" class="form-control form-control-sm" type="search" placeholder="Filter configs" autocomplete="off" oninput="filterOvermindConfigs(this.value)">
+                                    </div>
+                                    <div class="list-group list-group-flush source-selector config-source-scroll" id="overmindConfigSources">
                                         ${rows.map((row, index) => `
-                                        <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindConfig(${index})">
+                                        <button type="button" class="list-group-item list-group-item-action text-start" data-config-index="${index}" onclick="selectOvermindConfig(${index})">
                                             <i class="bi bi-file-earmark-code me-2"></i>${escapeHtml(row.label)}
                                         </button>
                                     `).join('')}
                                 </div>
+                                <div id="overmindConfigFilterEmpty" class="small text-muted px-3 py-2" style="display:none;">No configs match.</div>
                             </div>
                         </div>
                         <div class="col-md-9">
@@ -2306,7 +2313,9 @@
                 if (!row) return;
                 window.overmindSelectedConfigIndex = index;
                 window.overmindSelectedConfigVersionIndex = 0;
-                document.querySelectorAll('#overmindConfigSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
+                document.querySelectorAll('#overmindConfigSources .list-group-item').forEach((node) => {
+                    node.classList.toggle('active', Number(node.dataset.configIndex) === index);
+                });
                 const title = document.getElementById('overmindConfigTitle');
                 const path = document.getElementById('overmindConfigPath');
                 const fingerprint = document.getElementById('overmindConfigFingerprint');
@@ -2325,6 +2334,25 @@
                 const version = (row.versions || [])[0] || row;
                 if (fingerprint) fingerprint.textContent = version.fingerprint ? `fingerprint: ${version.fingerprint}` : '';
                 if (content) content.textContent = version.content || row.content || '';
+            }
+
+            function filterOvermindConfigs(value) {
+                const query = String(value || '').trim().toLowerCase();
+                const buttons = Array.from(document.querySelectorAll('#overmindConfigSources .list-group-item'));
+                const visible = [];
+                buttons.forEach((button) => {
+                    const label = button.textContent.toLowerCase();
+                    const matched = !query || label.includes(query);
+                    button.style.display = matched ? '' : 'none';
+                    if (matched) visible.push(button);
+                });
+                const empty = document.getElementById('overmindConfigFilterEmpty');
+                if (empty) empty.style.display = visible.length ? 'none' : 'block';
+                const selectedIndex = Number(window.overmindSelectedConfigIndex);
+                const selectedVisible = visible.some((button) => Number(button.dataset.configIndex) === selectedIndex);
+                if (!selectedVisible && visible.length) {
+                    selectOvermindConfig(Number(visible[0].dataset.configIndex));
+                }
             }
 
             function selectOvermindConfigVersion(value) {

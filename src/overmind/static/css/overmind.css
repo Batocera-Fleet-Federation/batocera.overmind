@@ -1218,6 +1218,14 @@
                 color: #06111f !important;
                 font-weight: 800;
             }
+            .config-source-scroll {
+                max-height: 520px;
+                overflow-y: auto;
+            }
+            .config-filter-wrap {
+                border-bottom: 1px solid var(--admin-border);
+                background: rgba(11, 16, 32, 0.72);
+            }
             .btn-outline-danger {
                 color: #b42318 !important;
                 border-color: #f1b7b2 !important;

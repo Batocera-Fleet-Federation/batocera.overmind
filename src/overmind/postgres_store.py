@@ -13,6 +13,14 @@ from typing import Iterable, Optional
 logger = logging.getLogger("overmind.postgres_store")
 
 
+def _is_excluded_emulator_config_path(value: str) -> bool:
+    label = str(value or "").replace("\\", "/").strip("/")
+    lowered = label.lower()
+    if ".bak" in lowered:
+        return True
+    return bool({"log", "logs"} & {part for part in lowered.split("/") if part})
+
+
 def _is_lambda_runtime() -> bool:
     return (os.getenv("OVERMIND_RUNTIME") or "").strip().lower() == "lambda" or bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
@@ -819,6 +827,11 @@ class PostgresMetadataStore:
                 root TEXT,
                 relative_path TEXT NOT NULL,
                 current_content TEXT NOT NULL,
+                md5 TEXT,
+                fingerprint TEXT,
+                size_bytes BIGINT,
+                truncated BOOLEAN NOT NULL DEFAULT false,
+                error TEXT,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 UNIQUE (drone_id, relative_path)
             )
@@ -828,6 +841,8 @@ class PostgresMetadataStore:
                 id BIGSERIAL PRIMARY KEY,
                 config_id BIGINT NOT NULL REFERENCES drone_emulator_configs(id) ON DELETE CASCADE,
                 content TEXT NOT NULL,
+                md5 TEXT,
+                fingerprint TEXT,
                 received_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             """,
@@ -947,6 +962,13 @@ class PostgresMetadataStore:
             "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version TEXT",
             "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS container BOOLEAN",
             "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+            "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS md5 TEXT",
+            "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint TEXT",
+            "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS size_bytes BIGINT",
+            "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS truncated BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS error TEXT",
+            "ALTER TABLE drone_emulator_config_versions ADD COLUMN IF NOT EXISTS md5 TEXT",
+            "ALTER TABLE drone_emulator_config_versions ADD COLUMN IF NOT EXISTS fingerprint TEXT",
             "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_completed_at TIMESTAMPTZ",
         ]
@@ -1006,6 +1028,242 @@ class PostgresMetadataStore:
                     """,
                     (device_id, action_id, result.get("type"), json.dumps(result, default=str)),
                 )
+
+    def store_device_log_sources(self, internal_device_id: str, payload: dict, max_lines: int = 1000) -> None:
+        if not self.url or not internal_device_id or not isinstance(payload, dict):
+            return
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return
+        logs = payload.get("logs") if isinstance(payload.get("logs"), list) else []
+        append = bool(payload.get("append", True))
+        with conn:
+            with conn.cursor() as cur:
+                for source in logs:
+                    if not isinstance(source, dict):
+                        continue
+                    source_name = str(source.get("source") or "").strip()
+                    if not source_name:
+                        continue
+                    cur.execute(
+                        """
+                        INSERT INTO drone_log_sources (drone_id, source, updated_at)
+                        VALUES (%s, %s, now())
+                        ON CONFLICT (drone_id, source) DO UPDATE SET updated_at = EXCLUDED.updated_at
+                        RETURNING id
+                        """,
+                        (internal_device_id, source_name),
+                    )
+                    source_id = cur.fetchone()[0]
+                    for file_row in source.get("files") if isinstance(source.get("files"), list) else []:
+                        if not isinstance(file_row, dict):
+                            continue
+                        content = str(file_row.get("content") or "")
+                        if not content and not file_row.get("error"):
+                            continue
+                        if file_row.get("error"):
+                            content = f"[Log read error] {file_row.get('error')}"
+                        path = str(file_row.get("path") or source_name)
+                        modified_at = self._dt(file_row.get("modified_at"))
+                        cur.execute(
+                            "SELECT content FROM drone_log_files WHERE source_id = %s AND path = %s",
+                            (source_id, path),
+                        )
+                        existing_row = cur.fetchone()
+                        existing = existing_row[0] if existing_row else ""
+                        combined = f"{existing}{'' if existing.endswith(chr(10)) or not existing else chr(10)}{content}" if append and existing else content
+                        combined = self._tail_text(combined, max_lines=max_lines)
+                        cur.execute(
+                            """
+                            INSERT INTO drone_log_files (source_id, path, content, modified_at, received_at)
+                            VALUES (%s, %s, %s, %s, now())
+                            ON CONFLICT (source_id, path) DO UPDATE SET
+                                content = EXCLUDED.content,
+                                modified_at = EXCLUDED.modified_at,
+                                received_at = EXCLUDED.received_at
+                            """,
+                            (source_id, path, combined, modified_at),
+                        )
+
+    def store_device_emulator_configs(self, internal_device_id: str, payload: dict, max_versions: int = 10) -> None:
+        if not self.url or not internal_device_id or not isinstance(payload, dict):
+            return
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return
+        configs = payload.get("configs") if isinstance(payload.get("configs"), list) else []
+        with conn:
+            with conn.cursor() as cur:
+                for item in configs:
+                    if not isinstance(item, dict):
+                        continue
+                    relative_path = str(item.get("relative_path") or item.get("path") or "").strip()
+                    if not relative_path or _is_excluded_emulator_config_path(relative_path):
+                        continue
+                    content = str(item.get("content") or "")
+                    md5 = str(item.get("md5") or "") or None
+                    fingerprint = str(item.get("fingerprint") or md5 or "") or None
+                    root = str(item.get("root") or "") or None
+                    try:
+                        size_bytes = int(item.get("size")) if item.get("size") is not None else None
+                    except (TypeError, ValueError):
+                        size_bytes = None
+                    cur.execute(
+                        """
+                        INSERT INTO drone_emulator_configs
+                            (drone_id, root, relative_path, current_content, md5, fingerprint, size_bytes, truncated, error, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                        ON CONFLICT (drone_id, relative_path) DO UPDATE SET
+                            root = EXCLUDED.root,
+                            current_content = EXCLUDED.current_content,
+                            md5 = EXCLUDED.md5,
+                            fingerprint = EXCLUDED.fingerprint,
+                            size_bytes = EXCLUDED.size_bytes,
+                            truncated = EXCLUDED.truncated,
+                            error = EXCLUDED.error,
+                            updated_at = EXCLUDED.updated_at
+                        RETURNING id
+                        """,
+                        (
+                            internal_device_id,
+                            root,
+                            relative_path,
+                            content,
+                            md5,
+                            fingerprint,
+                            size_bytes,
+                            bool(item.get("truncated")),
+                            str(item.get("error") or "") or None,
+                        ),
+                    )
+                    config_id = cur.fetchone()[0]
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM drone_emulator_config_versions
+                        WHERE config_id = %s AND COALESCE(fingerprint, '') = COALESCE(%s, '') AND content = %s
+                        LIMIT 1
+                        """,
+                        (config_id, fingerprint, content),
+                    )
+                    if cur.fetchone() is None:
+                        cur.execute(
+                            """
+                            INSERT INTO drone_emulator_config_versions (config_id, content, md5, fingerprint, received_at)
+                            VALUES (%s, %s, %s, %s, now())
+                            """,
+                            (config_id, content, md5, fingerprint),
+                        )
+                    cur.execute(
+                        """
+                        DELETE FROM drone_emulator_config_versions
+                        WHERE config_id = %s
+                          AND id NOT IN (
+                              SELECT id
+                              FROM drone_emulator_config_versions
+                              WHERE config_id = %s
+                              ORDER BY received_at DESC, id DESC
+                              LIMIT %s
+                          )
+                        """,
+                        (config_id, config_id, max(1, int(max_versions or 10))),
+                    )
+
+    def get_device_log_sources(self, internal_device_id: str, line_limit: int = 10) -> dict:
+        payload = {"type": "log_sources", "logs": []}
+        if not self.url or not internal_device_id:
+            return payload
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return payload
+        line_limit = max(1, min(100, int(line_limit or 10)))
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.source, f.path, f.content, f.modified_at, f.received_at
+                    FROM drone_log_sources s
+                    JOIN drone_log_files f ON f.source_id = s.id
+                    WHERE s.drone_id = %s
+                    ORDER BY s.source, f.received_at DESC, f.id DESC
+                    """,
+                    (internal_device_id,),
+                )
+                by_source = {}
+                for source, path, content, modified_at, received_at in cur.fetchall():
+                    entry = by_source.setdefault(str(source), {"source": str(source), "files": []})
+                    entry["files"].append({
+                        "path": path,
+                        "content": self._tail_text(content or "", max_lines=line_limit),
+                        "modified_at": modified_at,
+                        "received_at": received_at,
+                    })
+                payload["logs"] = list(by_source.values())
+        return payload
+
+    def get_device_emulator_configs(self, internal_device_id: str, max_versions: int = 10) -> dict:
+        payload = {"type": "emulator_configs", "configs": []}
+        if not self.url or not internal_device_id:
+            return payload
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return payload
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, root, relative_path, current_content, md5, fingerprint, size_bytes, truncated, error, updated_at
+                    FROM drone_emulator_configs
+                    WHERE drone_id = %s
+                      AND lower(relative_path) <> 'log'
+                      AND lower(relative_path) <> 'logs'
+                      AND lower(relative_path) NOT LIKE 'log/%%'
+                      AND lower(relative_path) NOT LIKE 'logs/%%'
+                      AND lower(relative_path) NOT LIKE '%%/log/%%'
+                      AND lower(relative_path) NOT LIKE '%%/logs/%%'
+                    ORDER BY lower(relative_path)
+                    """,
+                    (internal_device_id,),
+                )
+                for config_id, root, relative_path, content, md5, fingerprint, size_bytes, truncated, error, updated_at in cur.fetchall():
+                    cur.execute(
+                        """
+                        SELECT content, md5, fingerprint, received_at
+                        FROM drone_emulator_config_versions
+                        WHERE config_id = %s
+                        ORDER BY received_at DESC, id DESC
+                        LIMIT %s
+                        """,
+                        (config_id, max(1, int(max_versions or 10))),
+                    )
+                    versions = [
+                        {
+                            "content": version_content,
+                            "md5": version_md5,
+                            "fingerprint": version_fingerprint,
+                            "collected_at": received_at,
+                        }
+                        for version_content, version_md5, version_fingerprint, received_at in cur.fetchall()
+                    ]
+                    payload["configs"].append(
+                        {
+                            "root": root,
+                            "relative_path": relative_path,
+                            "content": content,
+                            "md5": md5,
+                            "fingerprint": fingerprint,
+                            "size": size_bytes,
+                            "truncated": bool(truncated),
+                            "error": error,
+                            "collected_at": updated_at,
+                            "versions": versions,
+                        }
+                    )
+        return payload
 
     def load_app_state(self) -> Optional[dict]:
         if not self.url:
@@ -2991,6 +3249,11 @@ class PostgresMetadataStore:
 
     def _json(self, value) -> str:
         return json.dumps(_encode_state(value), default=str)
+
+    def _tail_text(self, value: str, max_lines: int) -> str:
+        max_lines = max(1, int(max_lines or 1))
+        lines = str(value or "").splitlines()
+        return "\n".join(lines[-max_lines:])
 
     def _dt(self, value):
         if isinstance(value, datetime) or value is None:

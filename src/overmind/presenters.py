@@ -141,6 +141,13 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
             rom_count = len(data_store.get_device_roms(device.get("device_id")))
     except Exception:
         rom_count = 0
+    emulator_configs = device.get("emulator_configs")
+    try:
+        load_configs = getattr(data_store, "get_device_emulator_configs", None)
+        if callable(load_configs):
+            emulator_configs = load_configs(device.get("device_id"))
+    except Exception:
+        pass
     return {
         "id": device["id"],
         "device_id": device["device_id"],
@@ -156,7 +163,7 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
         "rom_count": rom_count,
         "auto_sync_policy": device.get("auto_sync_policy") or {"enabled": False, "systems": []},
         "last_speed_sample": device.get("last_speed_sample"),
-        "emulator_configs": device.get("emulator_configs"),
+        "emulator_configs": emulator_configs,
         "log_sources": device.get("log_sources"),
         "game_logs": device.get("game_logs"),
         "token_rotated_at": device.get("token_rotated_at"),

@@ -1608,7 +1608,7 @@ async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[s
 
 
 @app.get("/api/devices/{device_id}")
-async def get_device(device_id: str, authorization: Optional[str] = Header(default=None)):
+async def get_device(device_id: str, log_limit: int = 10, authorization: Optional[str] = Header(default=None)):
     """Get device details."""
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
@@ -1624,7 +1624,7 @@ async def get_device(device_id: str, authorization: Optional[str] = Header(defau
         response["log_sources"] = stream_payload
         response["log_stream_active"] = True
     else:
-        response["log_sources"] = {"type": "log_sources", "logs": []}
+        response["log_sources"] = db.get_device_log_sources(device_id, line_limit=log_limit)
         response["log_stream_active"] = False
     return response
 
@@ -2752,11 +2752,12 @@ async def upload_device_game_logs(device_id: str, payload: DroneGameLogsUpload, 
 
 @app.post("/api/devices/{device_id}/log-sources")
 async def upload_device_log_sources(device_id: str, payload: DroneLogSourcesUpload, authorization: Optional[str] = Header(default=None)):
-    """Accept streamed log source content from a Drone while the logs UI is open."""
+    """Accept Drone log source content and persist it for selected Drone log views."""
     device = get_current_drone(device_id, authorization)
     db.update_device_last_seen(device["id"])
     result = payload.model_dump(exclude_none=True)
     result["type"] = "log_sources"
+    db.store_action_result(device, result)
     _store_drone_log_stream(device_id, result)
     return {"status": "accepted"}
 
@@ -2776,6 +2777,7 @@ async def request_device_log_stream(device_id: str, authorization: Optional[str]
 async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorConfigsUpload, authorization: Optional[str] = Header(default=None)):
     """Accept changed emulator configs from a Drone."""
     device = get_current_drone(device_id, authorization)
+    db.update_device_last_seen(device["id"])
     result = payload.model_dump(exclude_none=True)
     result["type"] = "emulator_configs"
     db.store_action_result(device, result)

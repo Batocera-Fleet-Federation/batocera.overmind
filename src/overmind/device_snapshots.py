@@ -9,6 +9,14 @@ from datetime import datetime
 from typing import Optional
 
 
+def _is_excluded_emulator_config_path(value: str) -> bool:
+    label = str(value or "").replace("\\", "/").strip("/")
+    lowered = label.lower()
+    if ".bak" in lowered:
+        return True
+    return bool({"log", "logs"} & {part for part in lowered.split("/") if part})
+
+
 def merge_rom_metadata_hash_patch(existing: Optional[dict], incoming: dict) -> dict:
     """Apply ROM hash-only updates to an existing full inventory snapshot."""
     merged = dict(existing or {})
@@ -172,13 +180,16 @@ def merge_emulator_configs(existing: Optional[dict], incoming: dict, max_version
     by_key = {}
     for item in merged.get("configs") or []:
         if isinstance(item, dict):
-            key = f"{item.get('root') or ''}:{item.get('relative_path') or item.get('path') or item.get('name') or ''}"
+            label = str(item.get("relative_path") or item.get("path") or item.get("name") or "")
+            if _is_excluded_emulator_config_path(label):
+                continue
+            key = f"{item.get('root') or ''}:{label}"
             by_key[key] = dict(item)
     for item in incoming.get("configs") if isinstance(incoming.get("configs"), list) else []:
         if not isinstance(item, dict):
             continue
         label = str(item.get("relative_path") or item.get("path") or item.get("name") or "")
-        if ".bak" in label.lower():
+        if _is_excluded_emulator_config_path(label):
             continue
         key = f"{item.get('root') or ''}:{label}"
         incoming_item = dict(item)

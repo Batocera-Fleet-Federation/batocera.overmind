@@ -13,6 +13,7 @@ from overmind import notification_delivery
 from overmind.notification_delivery import DEFAULT_NOTIFICATION_TYPES
 from overmind.models import User, Device, RomMetadata, GamePlay
 from overmind.device_snapshots import (
+    _is_excluded_emulator_config_path,
     append_game_log_sessions,
     merge_emulator_configs,
     merge_game_logs,
@@ -37,6 +38,7 @@ class OvermindDatabase:
         "bios",
         "artwork",
         "gamelogs",
+        "log_sources",
         "device_actions",
         "speed_samples",
         "device_events",
@@ -157,6 +159,7 @@ class OvermindDatabase:
         self.artwork: Dict[str, list] = {}  # device_id -> gamelist artwork availability rows
         self._asset_inventory_staging: Dict[str, dict] = {}
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
+        self.log_sources: Dict[str, dict] = {}  # internal device_id -> persistent Drone logs
         self.device_actions: Dict[str, list] = {}  # internal device_id -> queued actions
         self.speed_samples: Dict[str, list] = {}  # internal device_id -> speed samples
         self.device_events: Dict[str, list] = {}  # internal device_id -> telemetry events
@@ -2042,8 +2045,10 @@ class OvermindDatabase:
         if result_type in {"rom_metadata", "asset_metadata"}:
             self.store_rom_metadata(device.get("device_id"), result)
         if result_type == "emulator_configs":
+            self.store_device_emulator_configs(device.get("device_id"), result)
             device["emulator_configs"] = merge_emulator_configs(device.get("emulator_configs"), result)
         if result_type == "log_sources":
+            self.store_device_log_sources(device.get("device_id"), result)
             return
         if result_type == "game_logs":
             device["game_logs"] = merge_game_logs(device.get("game_logs"), result)
@@ -3206,6 +3211,70 @@ class OvermindDatabase:
         """Get game logs for a device filtered by system."""
         all_logs = self.get_device_gamelogs(device_id)
         return [log for log in all_logs if log.get("system_name") == system_name]
+
+    def store_device_log_sources(self, device_id: str, payload: dict) -> None:
+        device = self.get_device_by_device_id(device_id)
+        if not device or not isinstance(payload, dict):
+            return
+        internal_id = device["id"]
+        postgres_store.store_device_log_sources(internal_id, payload)
+        existing = self.log_sources.get(internal_id)
+        merged = merge_log_sources(existing, payload, max_lines=1000)
+        self.log_sources[internal_id] = merged
+        device["log_sources"] = merged
+
+    def get_device_log_sources(self, device_id: str, line_limit: int = 10) -> dict:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return {"type": "log_sources", "logs": []}
+        internal_id = device["id"]
+        if postgres_store.available():
+            payload = postgres_store.get_device_log_sources(internal_id, line_limit=line_limit)
+            if payload.get("logs"):
+                return payload
+        payload = self.log_sources.get(internal_id) or device.get("log_sources") or {"type": "log_sources", "logs": []}
+        line_limit = max(1, min(100, int(line_limit or 10)))
+        limited = {"type": "log_sources", "logs": []}
+        for source in payload.get("logs") if isinstance(payload.get("logs"), list) else []:
+            if not isinstance(source, dict):
+                continue
+            entry = {**source, "files": []}
+            for file_row in source.get("files") if isinstance(source.get("files"), list) else []:
+                if not isinstance(file_row, dict):
+                    continue
+                lines = str(file_row.get("content") or "").splitlines()
+                entry["files"].append({**file_row, "content": "\n".join(lines[-line_limit:])})
+            limited["logs"].append(entry)
+        return limited
+
+    def store_device_emulator_configs(self, device_id: str, payload: dict) -> None:
+        device = self.get_device_by_device_id(device_id)
+        if not device or not isinstance(payload, dict):
+            return
+        internal_id = device["id"]
+        postgres_store.store_device_emulator_configs(internal_id, payload)
+
+    def get_device_emulator_configs(self, device_id: str) -> dict:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return {"type": "emulator_configs", "configs": []}
+        internal_id = device["id"]
+        def _filter_payload(payload: dict) -> dict:
+            if not isinstance(payload, dict):
+                return {"type": "emulator_configs", "configs": []}
+            source_configs = payload.get("configs") if isinstance(payload.get("configs"), list) else []
+            configs = [
+                row for row in source_configs
+                if isinstance(row, dict)
+                and not _is_excluded_emulator_config_path(str(row.get("relative_path") or row.get("path") or row.get("name") or ""))
+            ]
+            return {**payload, "configs": configs}
+        if postgres_store.available():
+            payload = postgres_store.get_device_emulator_configs(internal_id)
+            if payload.get("configs"):
+                return _filter_payload(payload)
+        payload = device.get("emulator_configs") or {"type": "emulator_configs", "configs": []}
+        return _filter_payload(payload)
     
 
 
