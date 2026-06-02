@@ -2083,6 +2083,7 @@ def test_device_roms_support_server_side_pagination(client):
 def test_device_systems_ui_loads_roms_by_page():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     assert "apiGet(`/api/devices/${selectedDeviceId}/systems`)" in js
+    assert "if (currentDeviceView === 'systems') {\n                    loadDeviceSystems();\n                    loadSwarmRomAvailabilityPanel();\n                }" in js
     assert "romParams.set('page', String(page));" in js
     assert "romParams.set('per_page', String(ROMS_PER_PAGE));" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`)" in js

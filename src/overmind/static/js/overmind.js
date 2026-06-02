@@ -3766,7 +3766,10 @@
                 if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
                 if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
 
-                if (currentDeviceView === 'systems') loadSwarmRomAvailabilityPanel();
+                if (currentDeviceView === 'systems') {
+                    loadDeviceSystems();
+                    loadSwarmRomAvailabilityPanel();
+                }
                 if (currentDeviceView === 'bios') loadDeviceBiosPanel();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
                 if (currentDeviceView === 'configs') loadDeviceConfigs();
