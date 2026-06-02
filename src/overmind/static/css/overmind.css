@@ -1261,6 +1261,18 @@
                 padding: 0.6rem;
                 z-index: 6000;
             }
+            .drone-auto-sync-controls {
+                display: flex;
+                align-items: center;
+                max-width: 22rem;
+            }
+            .drone-auto-sync-dropdown,
+            .drone-auto-sync-dropdown .dropdown-toggle {
+                width: 100%;
+            }
+            .drone-auto-sync-menu {
+                max-height: 18rem;
+            }
             .dropdown-item,
             .app-dropdown-check,
             .app-checkbox-menu .form-check-label {

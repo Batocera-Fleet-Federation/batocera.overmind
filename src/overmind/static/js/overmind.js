@@ -67,6 +67,7 @@
             let currentSystemArtworkPages = {};
             let deviceRomSearchQuery = '';
             let masterRomPage = 1;
+            let selectedMasterRomKey = null;
             let biosSearchQuery = '';
             let biosStatusFilter = '';
             let masterBiosPage = 1;
@@ -2053,6 +2054,7 @@
                 currentSystemRomPages = {};
                 systemPageState = {};
                 deviceRomSearchQuery = '';
+                selectedMasterRomKey = null;
                 displayDevices();
                 updateSelectedDeviceSummary();
                 updateSelectedDeviceWorkspace();
@@ -2397,7 +2399,7 @@
 
             async function loadDeviceSystems() {
                 if (!selectedDeviceId) {
-                    document.getElementById('systems-list').innerHTML = '<div class="empty-state">Select a Drone to view systems.</div>';
+                    renderDroneAutoSyncPanel();
                     return;
                 }
                 try {
@@ -2411,7 +2413,7 @@
                         if (name) systems[name] = row;
                         return systems;
                     }, {});
-                    displaySystemsTree();
+                    renderDroneAutoSyncPanel();
                 } catch (error) {
                     console.error('Error loading systems:', error);
                 }
@@ -2443,6 +2445,7 @@
             function handleDeviceRomFilterChange() {
                 // Trigger server-side reload of the master table when filters change
                 masterRomPage = 1;
+                selectedMasterRomKey = null;
                 loadSwarmRomAvailabilityPanel();
             }
 
@@ -2685,20 +2688,33 @@
                 </div>`;
             }
 
+            function masterRomRowKey(row) {
+                const md5 = String(row.rom_md5 || row.md5 || '').trim().toLowerCase();
+                if (md5) return `md5:${md5}`;
+                const system = String(row.system_name || row.system || '').trim().toLowerCase();
+                const path = String(row.file_path || row.rom_name || row.relative_path || row.rom_path || '').trim().toLowerCase();
+                return `path:${system}:${path}`;
+            }
+
             function toggleMasterRomDetail(rowId) {
                 const detail = document.getElementById(rowId);
                 if (!detail) return;
                 const isOpen = detail.style.display !== 'none';
+                const trigger = document.querySelector(`[data-rom-detail-target="${rowId}"]`);
+                const masterKey = trigger ? trigger.getAttribute('data-rom-master-key') : '';
                 document.querySelectorAll('.rom-master-detail-row').forEach(row => {
                     row.style.display = 'none';
                 });
                 document.querySelectorAll('.rom-master-row.is-expanded').forEach(row => {
                     row.classList.remove('is-expanded');
                 });
-                if (isOpen) return;
+                if (isOpen) {
+                    if (masterKey && selectedMasterRomKey === masterKey) selectedMasterRomKey = null;
+                    return;
+                }
                 detail.style.display = 'table-row';
-                const trigger = document.querySelector(`[data-rom-detail-target="${rowId}"]`);
                 if (trigger) trigger.classList.add('is-expanded');
+                selectedMasterRomKey = masterKey || null;
             }
 
             function renderSystemRomPage(systemName) {
@@ -2765,6 +2781,10 @@
 
             function displaySystemsTree() {
                 const container = document.getElementById('systems-list');
+                if (!container) {
+                    renderDroneAutoSyncPanel();
+                    return;
+                }
                 const entries = filteredSystemEntries();
                 if (!entries.length) {
                     container.innerHTML = deviceRomSearchQuery
@@ -2929,30 +2949,65 @@
                 const device = selectedDrone();
                 if (!container || !device) return;
                 const policy = device.auto_sync_policy || { enabled: false, systems: [] };
+                const selectedSystems = Array.isArray(policy.systems) ? policy.systems : [];
                 const systems = Object.keys(currentDeviceSystems || {}).sort();
+                const selectedCount = systems.filter(system => selectedSystems.includes(system)).length;
+                const dropdownLabel = selectedCount ? `${selectedCount} selected` : 'Select systems';
+                const systemOptions = systems.map(system => `
+                    <label class="dropdown-item app-dropdown-check form-check mb-0">
+                        <input class="form-check-input drone-auto-sync-system" type="checkbox" value="${escapeHtml(system)}" ${selectedSystems.includes(system) ? 'checked' : ''} onchange="updateDroneAutoSyncSystemLabel()">
+                        <span class="form-check-label ms-1">${escapeHtml(system)}</span>
+                    </label>
+                `).join('');
                 container.innerHTML = `
                     <div class="card"><div class="card-body py-2">
                         <label class="d-flex gap-2 align-items-center mb-2">
-                            <input id="drone-auto-sync-enabled" type="checkbox" ${policy.enabled ? 'checked' : ''}>
+                            <input id="drone-auto-sync-enabled" class="form-check-input" type="checkbox" ${policy.enabled ? 'checked' : ''}>
                             <strong>Auto-sync ROM metadata from this Drone</strong>
                         </label>
-                        <div class="d-flex flex-wrap gap-2 mb-2">
-                            ${systems.length ? systems.map(system => `
-                                <label class="badge text-bg-secondary">
-                                    <input class="drone-auto-sync-system me-1" type="checkbox" value="${escapeHtml(system)}" ${policy.systems.includes(system) ? 'checked' : ''}>
-                                    ${escapeHtml(system)}
-                                </label>
-                            `).join('') : '<span class="small text-muted">Queue ROM & System Metadata to populate system checkboxes.</span>'}
-                            ${systems.length ? systems.map(system => `
-                                <label class="badge text-bg-secondary">
-                                    <input class="drone-auto-sync-system me-1" type="checkbox" value="${escapeHtml(system)}" ${policy.systems.includes(system) ? 'checked' : ''}>
-                                    ${escapeHtml(system)}
-                                </label>
-                            `).join('') : '<span class="small text-muted">Device has not reported system metadata yet.</span>'}
+                        <div class="drone-auto-sync-controls mb-2">
+                            ${systems.length ? `
+                                <div class="dropdown app-checkbox-dropdown drone-auto-sync-dropdown">
+                                    <button id="drone-auto-sync-systems-button" class="btn btn-outline-primary dropdown-toggle text-start" type="button" onclick="toggleDroneAutoSyncDropdown(event)" aria-expanded="false">
+                                        <span id="drone-auto-sync-systems-label">${escapeHtml(dropdownLabel)}</span>
+                                    </button>
+                                    <div id="drone-auto-sync-systems-menu" class="dropdown-menu filter-dropdown-menu app-checkbox-menu drone-auto-sync-menu" onclick="event.stopPropagation()">
+                                        ${systemOptions}
+                                    </div>
+                                </div>
+                            ` : '<span class="small text-muted">Device has not reported system metadata yet.</span>'}
                         </div>
                         <button class="btn btn-primary btn-sm" onclick="saveDroneAutoSyncPolicy()">Save Policy</button>
                     </div></div>
                 `;
+            }
+
+            function toggleDroneAutoSyncDropdown(event) {
+                event.preventDefault();
+                event.stopPropagation();
+                const menu = document.getElementById('drone-auto-sync-systems-menu');
+                const button = document.getElementById('drone-auto-sync-systems-button');
+                if (!menu || !button) return;
+                const willOpen = !menu.classList.contains('show');
+                menu.classList.toggle('show', willOpen);
+                button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+            }
+
+            function closeDroneAutoSyncDropdown() {
+                const menu = document.getElementById('drone-auto-sync-systems-menu');
+                const button = document.getElementById('drone-auto-sync-systems-button');
+                if (!menu || !button) return;
+                menu.classList.remove('show');
+                button.setAttribute('aria-expanded', 'false');
+            }
+
+            document.addEventListener('click', closeDroneAutoSyncDropdown);
+
+            function updateDroneAutoSyncSystemLabel() {
+                const label = document.getElementById('drone-auto-sync-systems-label');
+                if (!label) return;
+                const count = document.querySelectorAll('.drone-auto-sync-system:checked').length;
+                label.textContent = count ? `${count} selected` : 'Select systems';
             }
 
             function renderDroneMetadataPanel() {
@@ -3131,9 +3186,11 @@
                                     const showSync = !present && row.devices && row.devices.length;
                                     const rowData = Object.assign({}, row, { preferred_sync_source: row.preferred_source || preferred });
                                     const artworkRows = artworkRowsForRom(row, artworkLookup, row.system_name || system || '');
+                                    const rowKey = masterRomRowKey(row);
                                     const detailId = `master-rom-detail-${page}-${rowIndex}`;
+                                    const expanded = rowKey && rowKey === selectedMasterRomKey;
                                     return `
-                                        <tr class="rom-master-row" data-rom-detail-target="${detailId}" onclick="toggleMasterRomDetail('${detailId}')">
+                                        <tr class="rom-master-row ${expanded ? 'is-expanded' : ''}" data-rom-detail-target="${detailId}" data-rom-master-key="${escapeHtml(rowKey)}" onclick="toggleMasterRomDetail('${detailId}')">
                                             <td>${escapeHtml(row.system_name || '')}</td>
                                             <td style="min-width:240px">
                                                 <div>${escapeHtml(row.file_path || row.rom_name || '')}</div>
@@ -3144,7 +3201,7 @@
                                                 ${showSync ? `<button class="btn btn-primary btn-sm" onclick='event.stopPropagation(); syncRom(${JSON.stringify(rowData).replace(/'/g, "'")})'>Sync</button>` : '<span class="small text-muted">Details</span>'}
                                             </td>
                                         </tr>
-                                        <tr id="${detailId}" class="rom-master-detail-row" style="display:none;"><td colspan="5">${renderRomDetailPanel(row, artworkRows, sizeText, sources || preferred, statusLabel)}</td></tr>
+                                        <tr id="${detailId}" class="rom-master-detail-row" style="display:${expanded ? 'table-row' : 'none'};"><td colspan="5">${renderRomDetailPanel(row, artworkRows, sizeText, sources || preferred, statusLabel)}</td></tr>
                                     `;
                                 }).join('')}
                             </tbody></table></div>

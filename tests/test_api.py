@@ -2269,6 +2269,50 @@ def test_metadata_inventory_endpoints_use_database_paging_when_assets_are_stored
     assert calls[2][1]["artwork_type"] == "image"
 
 
+def test_device_master_rom_presence_survives_grouping_when_selected_row_is_not_first(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "presence@example.com", "username": "presence-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "presence@example.com", "username": "presence-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("presence@example.com")
+    source_id = db.create_device(user["id"], "presence-source", "Presence Source", {"ip_address": "10.0.0.2"}, raw_token="source")
+    target_id = db.create_device(user["id"], "presence-target", "Presence Target", {"ip_address": "10.0.0.3"}, raw_token="target")
+
+    def mock_page_master_assets(device_ids, asset_type, **kwargs):
+        assert asset_type == "rom"
+        return [
+            {
+                "_device_internal_id": source_id,
+                "_master_key": "md5:abc123",
+                "_present_on_selected": False,
+                "system_name": "fbneo",
+                "rom_name": "1942.zip",
+                "file_path": "1942.zip",
+                "rom_md5": "abc123",
+            },
+            {
+                "_device_internal_id": target_id,
+                "_master_key": "md5:abc123",
+                "_present_on_selected": True,
+                "system_name": "fbneo",
+                "rom_name": "1942.zip",
+                "file_path": "1942.zip",
+                "rom_md5": "abc123",
+            },
+        ], 1
+
+    monkeypatch.setattr(db, "_asset_store_enabled", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "page_master_assets", mock_page_master_assets)
+
+    response = client.get("/api/devices/presence-target/master-roms?q=1942", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    row = response.json()["roms"][0]
+    assert row["present_on_selected"] is True
+    assert {device["device_id"] for device in row["devices"]} == {"presence-source", "presence-target"}
+
+
 def test_drone_sync_activity_endpoint_upserts_by_sync_id(client):
     client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     token = client.post(

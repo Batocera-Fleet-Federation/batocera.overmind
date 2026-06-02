@@ -2809,6 +2809,8 @@ class OvermindDatabase:
                     "devices": [],
                     "present_on_selected": bool(item.get("_present_on_selected")),
                 })
+            if include_presence and item.get("_present_on_selected"):
+                row["present_on_selected"] = True
             if source not in row["devices"]:
                 row["devices"].append(source)
         return list(master.values())

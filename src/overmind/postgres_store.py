@@ -2556,6 +2556,18 @@ class PostgresMetadataStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    UPDATE drone_actions
+                    SET status = 'pending',
+                        claimed_at = NULL,
+                        message = COALESCE(message, 'Requeued after stale claim')
+                    WHERE drone_id = %s
+                      AND status = 'claimed'
+                      AND claimed_at < now() - interval '15 minutes'
+                    """,
+                    (device["id"],),
+                )
+                cur.execute(
+                    """
                     WITH selected AS (
                         SELECT id
                         FROM drone_actions
