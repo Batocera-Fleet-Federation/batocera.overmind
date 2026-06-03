@@ -2182,13 +2182,6 @@ class PostgresMetadataStore:
             cache_key = _cache.user_devices_key(user_id, swarm_id)
             cached = _cache.get(cache_key)
             if cached is not None:
-                for d in cached:
-                    d["last_seen"] = self._dt(d.get("last_seen"))
-                    d["registered_at"] = self._dt(d.get("registered_at"))
-                    d["removed_at"] = self._dt(d.get("removed_at"))
-                    pr = d.get("public_reachability")
-                    if isinstance(pr, dict):
-                        pr["checked_at"] = self._dt(pr.get("checked_at"))
                 return cached
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
