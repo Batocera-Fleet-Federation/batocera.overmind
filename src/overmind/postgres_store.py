@@ -991,9 +991,17 @@ class PostgresMetadataStore:
             "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received ON drone_peer_checks(source_drone_id, received_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_notifications_swarm_created ON notifications(swarm_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery ON notifications(delivery_pending, created_at) WHERE delivery_pending IS TRUE AND delivery_completed_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_device_id ON overmind_device_assets (device_id, asset_type)",
         ]
         for statement in indexes:
             cur.execute(statement)
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_payload_trgm
+            ON overmind_device_assets USING GIN (lower(payload::text) gin_trgm_ops)
+            """
+        )
         cur.execute(
             """
             INSERT INTO overmind_schema_versions (id, version, applied_at)
@@ -4758,22 +4766,20 @@ class PostgresMetadataStore:
             )
         """
         base_params = [ids, asset_type, *filters]
+        selected_param = str(selected_internal_id) if selected_internal_id else None
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"WITH normalized AS ({normalized_sql}), {filtered_sql} SELECT count(*) FROM filtered_keys",
-                    base_params,
-                )
-                total = int((cur.fetchone() or [0])[0] or 0)
-                if not total:
-                    return [], 0
-                selected_param = str(selected_internal_id) if selected_internal_id else None
-                cur.execute(
                     f"""
-                    WITH normalized AS ({normalized_sql}), {filtered_sql},
-                    paged_keys AS (
-                        SELECT master_key
+                    WITH normalized AS ({normalized_sql}),
+                    {filtered_sql},
+                    counted_keys AS (
+                        SELECT master_key, sort_key, COUNT(*) OVER () AS total_count
                         FROM filtered_keys
+                    ),
+                    paged_keys AS (
+                        SELECT master_key, total_count
+                        FROM counted_keys
                         ORDER BY sort_key, master_key
                         LIMIT %s OFFSET %s
                     )
@@ -4781,7 +4787,8 @@ class PostgresMetadataStore:
                            CASE WHEN %s::text IS NULL THEN false ELSE EXISTS (
                                SELECT 1 FROM normalized selected
                                WHERE selected.master_key = n.master_key AND selected.device_internal_id = %s
-                           ) END AS present_on_selected
+                           ) END AS present_on_selected,
+                           p.total_count
                     FROM normalized n
                     JOIN paged_keys p ON p.master_key = n.master_key
                     ORDER BY n.sort_key, n.master_key, n.device_internal_id
@@ -4789,8 +4796,11 @@ class PostgresMetadataStore:
                     [*base_params, per_page, offset, selected_param, selected_param],
                 )
                 rows = cur.fetchall()
+        if not rows:
+            return [], 0
+        total = int(rows[0][5] or 0)
         output = []
-        for internal_id, payload, group_key, row_artwork_type, present_on_selected in rows:
+        for internal_id, payload, group_key, row_artwork_type, present_on_selected, _ in rows:
             decoded = _decode_state(payload)
             if isinstance(decoded, dict):
                 decoded["_device_internal_id"] = internal_id
@@ -4824,6 +4834,19 @@ class PostgresMetadataStore:
             {"system_name": row[0], "rom_count": int(row[1]), "device_count": int(row[2])}
             for row in rows
         ]
+
+    def count_device_assets(self, device_id: str, asset_type: str) -> Optional[int]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM overmind_device_assets WHERE device_id = %s AND asset_type = %s",
+                    (device_id, asset_type),
+                )
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
 
     def update_rom_hashes(self, device_internal_id: str, patches: Iterable[dict]) -> None:
         if not self.assets_enabled():

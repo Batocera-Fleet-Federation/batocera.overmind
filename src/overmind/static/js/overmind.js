@@ -67,6 +67,7 @@
             let currentSystemArtworkPages = {};
             let deviceRomSearchQuery = '';
             let masterRomPage = 1;
+            let swarmMasterPage = 1;
             let selectedMasterRomKey = null;
             let biosSearchQuery = '';
             let biosStatusFilter = '';
@@ -1941,7 +1942,8 @@
                 const q = document.getElementById('swarm-master-search')?.value || '';
                 const params = new URLSearchParams();
                 if (q.trim()) params.set('q', q.trim());
-                params.set('per_page', '250');
+                params.set('per_page', '100');
+                params.set('page', String(swarmMasterPage));
                 panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading swarm master list...</div></div>`;
                 try {
                     if (!currentDevices.length) await loadDevices({applyRoute: false});
@@ -1949,6 +1951,11 @@
                     if (!response.ok) throw new Error('Failed to load master list');
                     const payload = await response.json();
                     const rows = payload.roms || [];
+                    const total = payload.total || rows.length;
+                    const page = payload.page || swarmMasterPage;
+                    const perPage = payload.per_page || 100;
+                    const pageCount = Math.max(1, Math.ceil(total / perPage));
+                    swarmMasterPage = page;
                     const systemsResp = await apiGet('/api/systems');
                     const systemsPayload = systemsResp.ok ? await systemsResp.json() : {systems: []};
                     const systemOptions = (systemsPayload.systems || [])
@@ -1958,13 +1965,36 @@
                     const bulkDevices = currentDevices
                         .filter(device => device && device.device_id)
                         .sort((a, b) => String(a.device_name || a.device_id).localeCompare(String(b.device_name || b.device_id)));
+                    const renderPageBtn = (p) =>
+                        `<button class="btn btn-sm ${p === page ? 'btn-primary' : 'btn-outline-secondary'}" onclick="setSwarmMasterPage(${p})">${p}</button>`;
+                    const pageBtns = [];
+                    if (pageCount <= 7) {
+                        for (let i = 1; i <= pageCount; i++) pageBtns.push(renderPageBtn(i));
+                    } else {
+                        const start = Math.max(1, page - 2);
+                        const end = Math.min(pageCount, page + 2);
+                        if (start > 1) pageBtns.push(renderPageBtn(1));
+                        if (start > 2) pageBtns.push('<span class="px-1">&hellip;</span>');
+                        for (let i = start; i <= end; i++) pageBtns.push(renderPageBtn(i));
+                        if (end < pageCount - 1) pageBtns.push('<span class="px-1">&hellip;</span>');
+                        if (end < pageCount) pageBtns.push(renderPageBtn(pageCount));
+                    }
+                    const paginationHtml = pageCount > 1 ? `
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                            <div class="small text-muted">${total} unique ROMs &middot; Page ${page} of ${pageCount}</div>
+                            <div class="d-flex flex-wrap align-items-center gap-1">
+                                <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setSwarmMasterPage(${Math.max(1, page - 1)})">Previous</button>
+                                ${pageBtns.join('')}
+                                <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setSwarmMasterPage(${Math.min(pageCount, page + 1)})">Next</button>
+                            </div>
+                        </div>` : `<div class="small text-muted mb-2">${total} unique ROMs across approved Drones</div>`;
                     panel.innerHTML = `<div class="card"><div class="card-body py-2">
                         <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
                             <div style="flex:1;min-width:240px">
                                 <label class="form-label" for="swarm-master-search">Search Master List</label>
                                 <input id="swarm-master-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="System, ROM, md5, Drone">
                             </div>
-                            <button class="btn btn-primary" onclick="showSwarmMasterList(false)">Search</button>
+                            <button class="btn btn-primary" onclick="submitSwarmMasterSearch()">Search</button>
                         </div>
                         <div class="border rounded p-3 mb-3" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.35)">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
@@ -1999,7 +2029,7 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="small text-muted mb-2">${payload.total || rows.length} unique ROMs across approved Drones</div>
+                        ${paginationHtml}
                         <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
                             <th>System</th><th>ROM</th><th>Size</th><th>Drones</th>
                         </tr></thead><tbody>
@@ -2018,11 +2048,21 @@
                         ${rows.length ? '' : '<div class="small text-muted">No ROMs matched.</div>'}
                     </div></div>`;
                     document.getElementById('swarm-master-search')?.addEventListener('keydown', event => {
-                        if (event.key === 'Enter') showSwarmMasterList(false);
+                        if (event.key === 'Enter') submitSwarmMasterSearch();
                     });
                 } catch (error) {
                     panel.innerHTML = '<div class="empty-state">Unable to load swarm master list.</div>';
                 }
+            }
+
+            function setSwarmMasterPage(page) {
+                swarmMasterPage = Math.max(1, page);
+                showSwarmMasterList(false);
+            }
+
+            function submitSwarmMasterSearch() {
+                swarmMasterPage = 1;
+                showSwarmMasterList(false);
             }
 
             async function queueBulkSwarmSync() {
@@ -2524,7 +2564,7 @@
                     const artworkParams = new URLSearchParams();
                     artworkParams.set('system', systemName);
                     artworkParams.set('page', '1');
-                    artworkParams.set('per_page', '500');
+                    artworkParams.set('per_page', '100');
                     const [romResponse, artworkResponse] = await Promise.all([
                         apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`),
                         apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`),
@@ -3095,7 +3135,7 @@
                     if (q) artworkParams.set('q', q);
                     if (system) artworkParams.set('system', system);
                     artworkParams.set('page', '1');
-                    artworkParams.set('per_page', '500');
+                    artworkParams.set('per_page', '100');
                     const [response, artworkResponse] = await Promise.all([
                         apiGet(url),
                         apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`),

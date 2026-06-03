@@ -2313,15 +2313,17 @@ class OvermindDatabase:
         return False
 
     def count_device_roms(self, device_id: str) -> int:
+        if postgres_store.assets_enabled():
+            result = postgres_store.count_device_assets(device_id, "rom")
+            if result is not None:
+                return result
         if postgres_store.available():
-            relational = postgres_store.count_device_roms(device_id)
-            if relational is not None:
-                return relational
+            result = postgres_store.count_device_roms(device_id)
+            if result is not None:
+                return result
         device = self.get_device_by_device_id(device_id)
         if not device:
             return 0
-        if self._asset_store_enabled():
-            return len(postgres_store.list_device_assets(device["id"], "rom"))
         return len(self.roms.get(device["id"], []))
     
     # ROM operations
@@ -2903,6 +2905,35 @@ class OvermindDatabase:
                 "per_page": per_page,
             }
         rows = self._filter_master_rows(self.get_swarm_master_roms(user_id), asset_type="rom", query=query, system_name=system_name)
+        start = (page - 1) * per_page
+        return {"rows": rows[start:start + per_page], "total": len(rows), "page": page, "per_page": per_page}
+
+    def get_swarm_master_bios_page(
+        self,
+        user_id: str,
+        *,
+        query: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> dict:
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 500))
+        if self._asset_store_enabled():
+            devices = self.get_user_devices(user_id)
+            raw_rows, total = postgres_store.page_master_assets(
+                [device["id"] for device in devices],
+                "bios",
+                query=query,
+                page=page,
+                per_page=per_page,
+            )
+            return {
+                "rows": self._master_page_from_asset_rows("bios", raw_rows, user_id, include_presence=False),
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            }
+        rows = self._filter_master_rows(self.get_swarm_master_bios(user_id), asset_type="bios", query=query)
         start = (page - 1) * per_page
         return {"rows": rows[start:start + per_page], "total": len(rows), "page": page, "per_page": per_page}
 
