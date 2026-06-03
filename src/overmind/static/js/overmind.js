@@ -2828,6 +2828,21 @@
                 return currentDevices.find(d => d.device_id === selectedDeviceId) || null;
             }
 
+            async function refreshSelectedDroneDetails() {
+                if (!selectedDeviceId) return null;
+                const response = await apiGet(`/api/devices/${selectedDeviceId}`, { showLoader: false });
+                if (!response.ok) throw new Error('Failed to load device details');
+                const device = await response.json();
+                const index = currentDevices.findIndex(item => item.device_id === device.device_id);
+                if (index >= 0) {
+                    currentDevices[index] = { ...currentDevices[index], ...device };
+                } else {
+                    currentDevices.push(device);
+                }
+                updateSelectedDeviceSummary();
+                return device;
+            }
+
             function renderDroneNetworkPanel() {
                 const container = document.getElementById('drone-network-panel');
                 const device = selectedDrone();
@@ -3042,9 +3057,6 @@
                         ${systemRows.length ? `<div class="row g-2 mt-1">${systemRows.map(([label, value]) => `
                             <div class="col-12 col-md-6"><div class="small text-muted">${escapeHtml(label)}</div><div class="small">${escapeHtml(String(value || ''))}</div></div>
                         `).join('')}</div>` : '<div class="small text-muted mt-1">No system information reported yet.</div>'}
-                        <hr>
-                        <strong>Performance Metrics</strong>
-                        <div class="mt-2">${renderMetricsGrid(info.performance || {})}</div>
                         <hr>
                         <strong>Speed Sample</strong>
                         ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
@@ -3798,6 +3810,9 @@
                 if (currentDeviceView === 'configs') loadDeviceConfigs();
                 if (currentDeviceView === 'metadata') {
                     renderDroneMetadataPanel();
+                    refreshSelectedDroneDetails()
+                        .then(() => renderDroneMetadataPanel())
+                        .catch(error => console.error('Error refreshing selected Drone details:', error));
                 }
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
                 actionRefreshTimer = null;

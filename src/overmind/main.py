@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import json
 from collections import deque
 from functools import partial
@@ -2382,7 +2383,9 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
     source_devices = resolvable_asset_sources(source_devices, device_id)
     if not source_devices:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has this ROM")
+    sync_id = str(uuid.uuid4())
     action = db.create_device_action(device["user_id"], device_id, "sync_rom", {
+        "sync_id": sync_id,
         "system_name": system_name,
         "rom_name": payload.get("rom_name") or rom_path,
         "file_path": rom_path,
@@ -2394,7 +2397,7 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     db.add_rom_sync_activity(device_id, {
-        "sync_id": action["id"],
+        "sync_id": sync_id,
         "target_drone_id": device_id,
         "system": system_name,
         "rom_name": rom_path,
@@ -2631,13 +2634,15 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
     missing = [row for row in missing if row["devices"]]
     if not missing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has missing ROMs for this system")
+    for row in missing:
+        row["sync_id"] = str(uuid.uuid4())
     action = db.create_device_action(device["user_id"], device_id, "sync_system", {"system_name": system_name, "roms": missing})
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     for index, row in enumerate(missing, start=1):
         source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
         db.add_rom_sync_activity(device_id, {
-            "sync_id": f"{action['id']}:{index}",
+            "sync_id": row["sync_id"],
             "source_action_id": action["id"],
             "source_drone_id": source_devices[0].get("device_id") if source_devices else None,
             "target_drone_id": device_id,
@@ -2729,6 +2734,8 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
                 continue
             missing_by_system.setdefault(system_name, []).append({**row, "devices": source_devices})
         for system_name, missing in sorted(missing_by_system.items()):
+            for row in missing:
+                row["sync_id"] = str(uuid.uuid4())
             action = db.create_device_action(
                 devices[target_id]["user_id"],
                 target_id,
@@ -2741,7 +2748,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
                 for index, row in enumerate(missing, start=1):
                     source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                     db.add_rom_sync_activity(target_id, {
-                        "sync_id": f"{action['id']}:{index}",
+                        "sync_id": row["sync_id"],
                         "source_action_id": action["id"],
                         "source_drone_id": source_devices[0].get("device_id") if source_devices else None,
                         "target_drone_id": target_id,

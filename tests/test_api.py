@@ -3055,6 +3055,7 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     assert [action["action"] for action in claim_a_actions] == ["sync_system"]
     assert claim_a_actions[0]["payload"]["roms"][0]["file_path"] == "B.zip"
     assert claim_a_actions[0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-b", "device_name": "Drone B"}]
+    assert claim_a_actions[0]["payload"]["roms"][0]["sync_id"]
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "A.zip"
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
     activity_a = client.get("/api/devices/drone-a/sync-activity", headers={"Authorization": f"Bearer {token}"}).json()["activity"]
@@ -3062,6 +3063,7 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     assert target_activity["rom_name"] == "B.zip"
     assert target_activity["source_drone_id"] == "drone-b"
     assert target_activity["status"] == "pending"
+    assert target_activity["id"] == claim_a_actions[0]["payload"]["roms"][0]["sync_id"]
 
 
 def test_sync_system_queues_only_roms_from_resolvable_sources(client):
@@ -3809,8 +3811,12 @@ def test_drone_metadata_shows_resolvable_public_ip_state():
 
     assert "const publicIpStatus = device.public_resolvable ? ' (resolvable)' : '';" in js
     assert "Public IP: ${escapeHtml(publicIp)}${publicIpStatus}" in js
-    assert "Performance Metrics" in js
+    metadata_start = js.index("function renderDroneMetadataPanel()")
+    metadata_end = js.index("async function saveDroneAutoSyncPolicy()", metadata_start)
+    metadata_source = js[metadata_start:metadata_end]
+    assert "Performance Metrics" not in metadata_source
     assert "renderMetricsGrid(info.performance || {})" in js
+    assert "async function refreshSelectedDroneDetails()" in js
     assert "<strong>Asset Cache</strong>" not in js
 
 
@@ -4084,6 +4090,8 @@ def test_public_peer_poll_discovers_forwarded_public_port(client, monkeypatch):
 
 
 def test_public_peer_poll_only_checks_fixed_ports(client, monkeypatch):
+    assert overmind_main.PUBLIC_PEER_PROBE_PORTS == (8443, 443, 8080, 5000)
+
     client.post("/api/auth/register", json={"email": "fixed-ports@example.com", "username": "fixed-ports-at-example.com", "password": "testpass123"})
     owner = db.get_user_by_email("fixed-ports@example.com")
     db.create_device(
