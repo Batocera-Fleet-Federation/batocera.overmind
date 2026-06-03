@@ -268,6 +268,8 @@ class OvermindDatabase:
             "event_type": event_type,
             "title": title,
             "message": message,
+            "short_description": title,
+            "full_description": message,
             "details": details if isinstance(details, dict) else {},
             "actor_user_id": actor_user_id,
             "created_at": datetime.utcnow(),
@@ -343,6 +345,8 @@ class OvermindDatabase:
                 rows.append({
                     **entry,
                     "swarm_name": swarm.get("name"),
+                    "short_description": entry.get("short_description") or entry.get("title") or "",
+                    "full_description": entry.get("full_description") or entry.get("message") or "",
                     "read": bool(read_by.get(user_id)),
                 })
         rows.sort(key=lambda row: row.get("created_at") or datetime.min, reverse=True)

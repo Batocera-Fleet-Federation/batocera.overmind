@@ -109,6 +109,9 @@ def test_ui_notifications_nav_and_polling_hooks():
     assert 'id="notifications-tab"' in html
     assert "/api/notifications" in js
     assert "/api/notifications/dismiss" in js
+    assert "row.short_description || row.title" in js
+    assert "row.full_description || row.message" in js
+    assert "function toggleElement(elementId)" in js
     assert "99+" in js
     assert "setupNotificationMenu();" in js
     assert "closeNotificationsPanel()" in js

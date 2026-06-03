@@ -432,6 +432,18 @@ def poll_public_drone_reachability_once() -> None:
         db.update_device_public_reachability(device["id"], probe_device_public_endpoint(device))
 
 
+def refresh_device_public_reachability(device: dict, *, force: bool = False) -> dict:
+    """Refresh and return a device's public reachability when it is useful to do so."""
+    if not isinstance(device, dict):
+        return {}
+    if not force and public_reachability_already_resolved(device):
+        return device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
+    result = probe_device_public_endpoint(device)
+    db.update_device_public_reachability(device["id"], result)
+    device.update(db.devices.get(device["id"], {}))
+    return result
+
+
 def start_public_drone_reachability_poller() -> None:
     """Start periodic public endpoint probes unless disabled by configuration."""
     global _PUBLIC_PEER_PROBE_THREAD
@@ -828,12 +840,18 @@ def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = No
         network = source_device.get("network") if isinstance(source_device.get("network"), dict) else {}
         public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
         reachability = source_device.get("public_reachability") if isinstance(source_device.get("public_reachability"), dict) else {}
+        if not public_ip:
+            continue
         if (
-            not public_ip
-            or not reachability.get("resolvable")
+            not reachability.get("resolvable")
             or str(reachability.get("public_ip") or "").strip() != public_ip
         ):
-            continue
+            reachability = refresh_device_public_reachability(source_device, force=True)
+            if (
+                not reachability.get("resolvable")
+                or str(reachability.get("public_ip") or "").strip() != public_ip
+            ):
+                continue
         eligible.append({
             "device_id": source_id,
             "device_name": source.get("device_name") or source_device.get("device_name") or source_id,
@@ -1703,6 +1721,7 @@ async def get_device(device_id: str, log_limit: int = 10, authorization: Optiona
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
+    refresh_device_public_reachability(device)
     
     response = device_response(device)
     stream_payload = _current_drone_log_stream(device_id)
@@ -2615,14 +2634,22 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
     action = db.create_device_action(device["user_id"], device_id, "sync_system", {"system_name": system_name, "roms": missing})
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    db.add_rom_sync_activity(device_id, {
-        "sync_id": action["id"],
-        "target_drone_id": device_id,
-        "system": system_name,
-        "rom_name": "*",
-        "action": "download",
-        "status": "pending",
-    })
+    for index, row in enumerate(missing, start=1):
+        source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+        db.add_rom_sync_activity(device_id, {
+            "sync_id": f"{action['id']}:{index}",
+            "source_action_id": action["id"],
+            "source_drone_id": source_devices[0].get("device_id") if source_devices else None,
+            "target_drone_id": device_id,
+            "system": system_name,
+            "rom_name": row.get("rom_name") or row.get("file_path"),
+            "relative_path": row.get("file_path"),
+            "entry_type": row.get("entry_type") or "file",
+            "action": "download",
+            "status": "pending",
+            "file_size": row.get("file_size"),
+            "rom_md5": row.get("rom_md5"),
+        })
     notify_sync_triggered(user, device, "System", f"{system_name} system sync ({len(missing)} ROM item(s))", [device], [source for row in missing for source in (row.get("devices") or [])], action)
     return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
 
@@ -2711,14 +2738,22 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
             if action:
                 actions.append(action)
                 queued_roms += len(missing)
-                db.add_rom_sync_activity(target_id, {
-                    "sync_id": action["id"],
-                    "target_drone_id": target_id,
-                    "system": system_name,
-                    "rom_name": "*",
-                    "action": "download",
-                    "status": "pending",
-                })
+                for index, row in enumerate(missing, start=1):
+                    source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                    db.add_rom_sync_activity(target_id, {
+                        "sync_id": f"{action['id']}:{index}",
+                        "source_action_id": action["id"],
+                        "source_drone_id": source_devices[0].get("device_id") if source_devices else None,
+                        "target_drone_id": target_id,
+                        "system": system_name,
+                        "rom_name": row.get("rom_name") or row.get("file_path"),
+                        "relative_path": row.get("file_path"),
+                        "entry_type": row.get("entry_type") or "file",
+                        "action": "download",
+                        "status": "pending",
+                        "file_size": row.get("file_size"),
+                        "rom_md5": row.get("rom_md5"),
+                    })
                 notify_sync_triggered(
                     user,
                     devices[target_id],

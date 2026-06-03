@@ -311,6 +311,8 @@ def test_notifications_capture_master_list_add_and_read(client):
     assert "master_bios_added" in event_types
     assert "master_artwork_added" in event_types
     assert any("Notify Drone" in row["message"] and "Chrono Trigger.zip" in row["message"] for row in notifications)
+    assert all("short_description" in row and "full_description" in row for row in notifications)
+    assert any(row["short_description"] == row["title"] and row["full_description"] == row["message"] for row in notifications)
 
     read = client.post("/api/notifications/read", headers={"Authorization": f"Bearer {token}"}, json={})
     assert read.status_code == 200
@@ -3055,6 +3057,11 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     assert claim_a_actions[0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-b", "device_name": "Drone B"}]
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "A.zip"
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
+    activity_a = client.get("/api/devices/drone-a/sync-activity", headers={"Authorization": f"Bearer {token}"}).json()["activity"]
+    target_activity = next(row for row in activity_a if row["target_drone_id"] == "drone-a")
+    assert target_activity["rom_name"] == "B.zip"
+    assert target_activity["source_drone_id"] == "drone-b"
+    assert target_activity["status"] == "pending"
 
 
 def test_sync_system_queues_only_roms_from_resolvable_sources(client):
@@ -3081,6 +3088,39 @@ def test_sync_system_queues_only_roms_from_resolvable_sources(client):
     roms = response.json()["action"]["payload"]["roms"]
     assert [row["file_path"] for row in roms] == ["Good.zip"]
     assert roms[0]["devices"] == [{"device_id": "good-source", "device_name": "Good Source"}]
+
+
+def test_sync_system_probes_newly_forwarded_public_source(client, monkeypatch):
+    client.post("/api/auth/register", json={"email": "probe-sync@example.com", "username": "probe-sync-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "probe-sync@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("probe-sync@example.com")
+    db.create_device(user["id"], "fresh-source", "Fresh Source", {"network": {"public_ip": "8.8.8.8"}, "api_port": 8443, "scheme": "https"}, raw_token="a")
+    db.create_device(user["id"], "fresh-target", "Fresh Target", {"ip_address": "10.0.0.4"}, raw_token="b")
+    db.add_roms("fresh-source", "fbneo", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "good"}])
+
+    class FakeConnection:
+        def close(self):
+            return None
+
+    def connect(address, timeout):
+        assert address == ("8.8.8.8", 8443)
+        return FakeConnection()
+
+    monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
+
+    response = client.post(
+        "/api/devices/fresh-target/sync-system",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "fbneo"},
+    )
+
+    assert response.status_code == 200
+    roms = response.json()["action"]["payload"]["roms"]
+    assert roms[0]["devices"] == [{"device_id": "fresh-source", "device_name": "Fresh Source"}]
+    assert db.get_device_by_device_id("fresh-source")["public_reachability"]["resolvable"] is True
 
 
 def test_device_action_lifecycle(client):
@@ -3771,6 +3811,7 @@ def test_drone_metadata_shows_resolvable_public_ip_state():
     assert "Public IP: ${escapeHtml(publicIp)}${publicIpStatus}" in js
     assert "Performance Metrics" in js
     assert "renderMetricsGrid(info.performance || {})" in js
+    assert "<strong>Asset Cache</strong>" not in js
 
 
 def test_super_admin_runtime_metrics_ui_refreshes_when_viewed():

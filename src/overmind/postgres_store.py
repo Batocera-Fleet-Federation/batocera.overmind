@@ -2264,6 +2264,8 @@ class PostgresMetadataStore:
                         "event_type": event_type,
                         "title": title,
                         "message": message,
+                        "short_description": title or "",
+                        "full_description": message or "",
                         "actor_user_id": actor_user_id,
                         "created_at": created_at,
                         "details": details.get(notification_id, {}),
