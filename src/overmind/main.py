@@ -451,21 +451,31 @@ def public_reachability_already_resolved(device: dict) -> bool:
 
 
 def poll_public_drone_reachability_once() -> None:
-    """Probe public peer endpoints for all approved Drones."""
-    db.refresh_persistent_state()
-    devices = [
-        device for device in list(db.devices.values())
-        if device.get("approval_status", "approved") == "approved"
-    ]
-    devices.sort(key=lambda item: str((item.get("public_reachability") or {}).get("checked_at") or ""))
-    if PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN:
-        devices = devices[:PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN]
+    """Probe peer endpoints for all approved Drones."""
+    if postgres_store.available():
+        devices = postgres_store.list_all_approved_devices(
+            limit=PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN,
+            oldest_checked_first=True,
+        ) or []
+    else:
+        db.refresh_persistent_state()
+        devices = [
+            d for d in list(db.devices.values())
+            if d.get("approval_status", "approved") == "approved"
+        ]
+        devices.sort(key=lambda d: str((d.get("public_reachability") or {}).get("checked_at") or ""))
+        if PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN:
+            devices = devices[:PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN]
     for device in devices:
         if device.get("approval_status", "approved") != "approved":
             continue
         if public_reachability_already_resolved(device):
             continue
-        db.update_device_public_reachability(device["id"], probe_device_public_endpoint(device))
+        result = probe_device_public_endpoint(device)
+        if postgres_store.available():
+            postgres_store.update_device_reachability(device["id"], result)
+        else:
+            db.update_device_public_reachability(device["id"], result)
 
 
 def refresh_device_public_reachability(device: dict, *, force: bool = False) -> dict:

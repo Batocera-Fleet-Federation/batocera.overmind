@@ -20,6 +20,10 @@ from overmind.device_snapshots import (
     merge_log_sources,
     merge_rom_metadata_hash_patch,
 )
+try:
+    from overmind import cache as _cache
+except Exception:
+    _cache = None  # type: ignore[assignment]
 
 class OvermindDatabase:
     """Application repository backed by PostgreSQL as the source of truth.
@@ -1404,6 +1408,8 @@ class OvermindDatabase:
         if raw_token:
             device["raw_token_once"] = raw_token
             self.approved_drone_tokens[device_id] = raw_token
+        if _cache:
+            _cache.invalidate_user_devices(user_id)
         return device
 
     def deny_pending_drone_connection(self, user_id: str, device_id: str) -> bool:
@@ -1843,6 +1849,8 @@ class OvermindDatabase:
         self.approved_drone_tokens.pop(device_id, None)
         if owner_id in self.user_devices:
             self.user_devices[owner_id] = [row for row in self.user_devices.get(owner_id, []) if row != internal_id]
+        if _cache and owner_id:
+            _cache.invalidate_user_devices(owner_id)
         return True
 
     def admin_delete_swarm(self, swarm_id: str) -> bool:

@@ -12,6 +12,11 @@ from typing import Iterable, Optional
 
 logger = logging.getLogger("overmind.postgres_store")
 
+try:
+    from overmind import cache as _cache
+except Exception:
+    _cache = None  # type: ignore[assignment]
+
 
 def _is_excluded_emulator_config_path(value: str) -> bool:
     label = str(value or "").replace("\\", "/").strip("/")
@@ -2173,6 +2178,11 @@ class PostgresMetadataStore:
                 return row[0] if row else None
 
     def list_user_devices(self, user_id: str, swarm_id: Optional[str] = None) -> Optional[list[dict]]:
+        if _cache:
+            cache_key = _cache.user_devices_key(user_id, swarm_id)
+            cached = _cache.get(cache_key)
+            if cached is not None:
+                return cached
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
@@ -2196,7 +2206,56 @@ class PostgresMetadataStore:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(self._select_device_sql(where) + " ORDER BY d.device_name ASC, d.device_id ASC", tuple(params))
-                return [device for device in (self._device_from_row(row) for row in cur.fetchall()) if device]
+                result = [device for device in (self._device_from_row(row) for row in cur.fetchall()) if device]
+        if _cache:
+            _cache.set(cache_key, result, ttl=15)
+        return result
+
+    def list_all_approved_devices(
+        self,
+        limit: int = 0,
+        oldest_checked_first: bool = True,
+    ) -> Optional[list[dict]]:
+        """Return all approved Drones, ordered for round-robin reachability polling."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        order = "n.checked_at ASC NULLS FIRST, d.registered_at ASC" if oldest_checked_first else "d.registered_at ASC"
+        limit_clause = f"LIMIT {max(1, int(limit))}" if limit else ""
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    self._select_device_sql("d.approval_status = 'approved' AND d.removed_at IS NULL")
+                    + f" ORDER BY {order} {limit_clause}"
+                )
+                return [d for d in (self._device_from_row(row) for row in cur.fetchall()) if d]
+
+    def update_device_reachability(self, drone_id: str, result: dict) -> bool:
+        """Write a probe result directly to drone_network_state without in-memory state."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        resolvable = bool(result.get("resolvable"))
+        probed_ip = str(result.get("public_ip") or "") or None
+        api_port = int(result["api_port"]) if resolvable and result.get("api_port") else None
+        checked_at = self._dt(result.get("checked_at"))
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO drone_network_state
+                        (drone_id, public_resolvable, public_ip, api_port, checked_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, now())
+                    ON CONFLICT (drone_id) DO UPDATE SET
+                        public_resolvable = EXCLUDED.public_resolvable,
+                        public_ip         = COALESCE(EXCLUDED.public_ip, drone_network_state.public_ip),
+                        api_port          = COALESCE(EXCLUDED.api_port,  drone_network_state.api_port),
+                        checked_at        = EXCLUDED.checked_at,
+                        updated_at        = now()
+                    """,
+                    (drone_id, resolvable, probed_ip, api_port, checked_at),
+                )
+        return True
 
     def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
         conn = self._core_connection(ensure_schema=False)
@@ -4277,6 +4336,9 @@ class PostgresMetadataStore:
                     "DELETE FROM overmind_device_asset_staging WHERE device_internal_id = %s",
                     (device_internal_id,),
                 )
+        if _cache:
+            _cache.invalidate_master_assets()
+            _cache.invalidate_asset_counts(device_internal_id)
 
     def delete_device_asset_rows(self, device_internal_id: str, asset_type: str, rows: Iterable[dict]) -> None:
         if not self.assets_enabled():
@@ -4445,6 +4507,9 @@ class PostgresMetadataStore:
                         prepared,
                     )
                     self._upsert_domain_assets(cur, device_internal_id, asset_type, [row for row in rows if isinstance(row, dict)])
+        if _cache and prepared:
+            _cache.invalidate_master_assets()
+            _cache.invalidate_asset_counts(device_id)
         return row_ids
 
     def _ensure_system(self, cur, system_name: Optional[str]) -> Optional[int]:
@@ -4681,12 +4746,21 @@ class PostgresMetadataStore:
         ids = [str(value) for value in device_internal_ids if value]
         if not ids or not self.assets_enabled():
             return [], 0
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 500))
+        if _cache:
+            cache_key = _cache.master_assets_key(
+                ids, asset_type,
+                selected=selected_internal_id, q=query, sys=system_name,
+                st=status, art=artwork_type, pg=page, pp=per_page,
+            )
+            cached = _cache.get(cache_key)
+            if cached is not None:
+                return cached["rows"], cached["total"]
         self.ensure_schema()
         conn = self._connect()
         if conn is None:
             return [], 0
-        page = max(1, int(page))
-        per_page = max(1, min(int(per_page), 500))
         offset = (page - 1) * per_page
         if asset_type == "rom":
             master_key = """
@@ -4808,12 +4882,19 @@ class PostgresMetadataStore:
                 decoded["_artwork_type"] = row_artwork_type
                 decoded["_present_on_selected"] = bool(present_on_selected)
                 output.append(decoded)
+        if _cache:
+            _cache.set(cache_key, {"rows": output, "total": total}, ttl=30)
         return output, total
 
     def summarize_rom_systems(self, device_internal_ids: Iterable[str]) -> list[dict]:
         ids = [str(value) for value in device_internal_ids if value]
         if not ids or not self.assets_enabled():
             return []
+        if _cache:
+            cache_key = _cache.rom_systems_key(ids)
+            cached = _cache.get(cache_key)
+            if cached is not None:
+                return cached
         conn = self._connect()
         if conn is None:
             return []
@@ -4830,12 +4911,20 @@ class PostgresMetadataStore:
                     (ids,),
                 )
                 rows = cur.fetchall()
-        return [
+        result = [
             {"system_name": row[0], "rom_count": int(row[1]), "device_count": int(row[2])}
             for row in rows
         ]
+        if _cache:
+            _cache.set(cache_key, result, ttl=60)
+        return result
 
     def count_device_assets(self, device_id: str, asset_type: str) -> Optional[int]:
+        if _cache:
+            cache_key = _cache.count_assets_key(device_id, asset_type)
+            cached = _cache.get(cache_key)
+            if cached is not None:
+                return int(cached)
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
@@ -4846,7 +4935,10 @@ class PostgresMetadataStore:
                     (device_id, asset_type),
                 )
                 row = cur.fetchone()
-                return int(row[0] or 0) if row else 0
+                result = int(row[0] or 0) if row else 0
+        if _cache:
+            _cache.set(cache_key, result, ttl=60)
+        return result
 
     def update_rom_hashes(self, device_internal_id: str, patches: Iterable[dict]) -> None:
         if not self.assets_enabled():
