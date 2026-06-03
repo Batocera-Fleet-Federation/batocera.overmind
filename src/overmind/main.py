@@ -340,66 +340,88 @@ def run_https_app() -> None:
 
 
 def probe_device_public_endpoint(device: dict) -> dict:
-    """Check whether a Drone's globally routed peer endpoint accepts connections."""
+    """Check whether a Drone's reported endpoint accepts connections on any known port."""
     checked_at = datetime.utcnow()
     network = device.get("network") if isinstance(device.get("network"), dict) else {}
-    value = str(network.get("public_ip") or network.get("public") or "").strip()
+
+    # Build ordered candidate list: public IP first, then reported IPv4/IPv6 addresses.
+    candidates: list[str] = []
+    public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
+    if public_ip:
+        candidates.append(public_ip)
+    for ip in (network.get("ipv4") if isinstance(network.get("ipv4"), list) else []):
+        ip = str(ip or "").strip()
+        if ip and ip not in candidates:
+            candidates.append(ip)
+    for ip in (network.get("ipv6") if isinstance(network.get("ipv6"), list) else []):
+        ip = str(ip or "").strip()
+        if ip and ip not in candidates:
+            candidates.append(ip)
+
     try:
         port = int(device.get("api_port") or 8443)
     except (TypeError, ValueError):
         port = 0
     result = {
         "resolvable": False,
-        "public_ip": value or None,
+        "public_ip": public_ip or None,
         "api_port": port if 1 <= port <= 65535 else None,
         "checked_at": checked_at,
         "latency_ms": None,
         "failure_reason": None,
     }
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        result["failure_reason"] = "No valid public IP reported"
+
+    valid_candidates = []
+    for raw in candidates:
+        try:
+            ipaddress.ip_address(raw.strip("[]"))
+            valid_candidates.append(raw)
+        except ValueError:
+            continue
+
+    if not valid_candidates:
+        result["failure_reason"] = "No valid IP addresses reported"
         return result
-    if not address.is_global:
-        result["failure_reason"] = "Reported IP is not globally routable"
-        return result
+
     failures = []
     started = time.monotonic()
     timeout = max(0.05, min(PUBLIC_PEER_PROBE_TIMEOUT_SECONDS, PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS))
 
-    def try_port(candidate_port: int):
+    def try_port(candidate_ip: str, candidate_port: int):
         attempt_started = time.monotonic()
         try:
-            connection = socket.create_connection((str(address), candidate_port), timeout=timeout)
+            connection = socket.create_connection((candidate_ip, candidate_port), timeout=timeout)
             connection.close()
         except OSError as error:
-            return None, f"{candidate_port}: {str(error) or error.__class__.__name__}"
+            return None, f"{candidate_ip}:{candidate_port}: {str(error) or error.__class__.__name__}"
         return {
+            "ip": candidate_ip,
             "port": candidate_port,
             "latency_ms": int((time.monotonic() - attempt_started) * 1000),
         }, None
 
-    for candidate_port in PUBLIC_PEER_PROBE_PORTS:
-        found, failure = try_port(candidate_port)
-        if failure and len(failures) < 3:
-            failures.append(failure)
-        if not found:
-            continue
-        candidate_port = found["port"]
-        result["resolvable"] = True
-        result["api_port"] = candidate_port
-        result["discovered_port"] = candidate_port
-        result["latency_ms"] = found["latency_ms"]
-        result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
-        return result
-    result["failure_reason"] = "; ".join(failures) if failures else "No reachable public Drone API port found"
+    for candidate_ip in valid_candidates:
+        for candidate_port in PUBLIC_PEER_PROBE_PORTS:
+            found, failure = try_port(candidate_ip, candidate_port)
+            if failure and len(failures) < 4:
+                failures.append(failure)
+            if not found:
+                continue
+            result["resolvable"] = True
+            result["public_ip"] = found["ip"]
+            result["api_port"] = found["port"]
+            result["discovered_port"] = found["port"]
+            result["latency_ms"] = found["latency_ms"]
+            result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
+            return result
+
+    result["failure_reason"] = "; ".join(failures) if failures else "No reachable Drone API port found"
     result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
     return result
 
 
 def public_reachability_already_resolved(device: dict) -> bool:
-    """Return whether a Drone already has a stored successful public endpoint."""
+    """Return whether a Drone already has a stored successful endpoint that matches its current reported IPs."""
     reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
     if not reachability.get("resolvable"):
         return False
@@ -409,10 +431,23 @@ def public_reachability_already_resolved(device: dict) -> bool:
         return False
     if port not in PUBLIC_PEER_PROBE_PORTS:
         return False
-    network = device.get("network") if isinstance(device.get("network"), dict) else {}
-    reported_ip = str(network.get("public_ip") or network.get("public") or "").strip()
     resolved_ip = str(reachability.get("public_ip") or "").strip()
-    return bool(reported_ip and resolved_ip and reported_ip == resolved_ip)
+    if not resolved_ip:
+        return False
+    network = device.get("network") if isinstance(device.get("network"), dict) else {}
+    candidate_ips: set[str] = set()
+    public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
+    if public_ip:
+        candidate_ips.add(public_ip)
+    for ip in (network.get("ipv4") if isinstance(network.get("ipv4"), list) else []):
+        ip = str(ip or "").strip()
+        if ip:
+            candidate_ips.add(ip)
+    for ip in (network.get("ipv6") if isinstance(network.get("ipv6"), list) else []):
+        ip = str(ip or "").strip()
+        if ip:
+            candidate_ips.add(ip)
+    return resolved_ip in candidate_ips
 
 
 def poll_public_drone_reachability_once() -> None:

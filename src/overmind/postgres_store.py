@@ -1492,6 +1492,25 @@ class PostgresMetadataStore:
         action_limit = _env_int("OVERMIND_RELATIONAL_ACTION_ROWS_PER_DRONE", 100)
         notification_limit = _env_int("OVERMIND_RELATIONAL_NOTIFICATIONS_PER_SWARM", 500)
 
+        if active_drone_ids:
+            cur.execute(
+                """
+                SELECT drone_id, address_type, address
+                FROM drone_network_addresses
+                WHERE drone_id = ANY(%s) AND address_type IN ('ipv4', 'ipv6')
+                ORDER BY drone_id, address_type, observed_at
+                """,
+                (active_drone_ids,),
+            )
+            for drone_id, address_type, address in cur.fetchall():
+                device = state["devices"].get(drone_id)
+                if not device:
+                    continue
+                network = device.setdefault("network", {})
+                addr_list = network.setdefault(address_type, [])
+                if address not in addr_list:
+                    addr_list.append(address)
+
         cur.execute(
             """
             SELECT c.drone_id, c.status, c.fingerprint, c.sha256_fingerprint, c.public_certificate,
