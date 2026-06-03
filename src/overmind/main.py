@@ -1345,6 +1345,17 @@ async def admin_runtime_logs(authorization: Optional[str] = Header(default=None)
     return {"logs": stream_log_snapshot()}
 
 
+@app.post("/api/admin/run-job")
+async def admin_run_scheduled_job(job: str, authorization: Optional[str] = Header(default=None)):
+    """Trigger a scheduled maintenance job on demand (super admin only)."""
+    require_super_admin(authorization)
+    try:
+        result = run_scheduled_job(job)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return result
+
+
 @app.delete("/api/admin/users/{user_id}")
 async def admin_delete_user(user_id: str, authorization: Optional[str] = Header(default=None)):
     user = require_super_admin(authorization)
