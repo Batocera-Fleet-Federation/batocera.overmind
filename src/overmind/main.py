@@ -469,8 +469,6 @@ def poll_public_drone_reachability_once() -> None:
     for device in devices:
         if device.get("approval_status", "approved") != "approved":
             continue
-        if public_reachability_already_resolved(device):
-            continue
         result = probe_device_public_endpoint(device)
         if postgres_store.available():
             postgres_store.update_device_reachability(device["id"], result)

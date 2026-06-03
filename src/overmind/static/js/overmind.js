@@ -2442,10 +2442,7 @@
             }
 
             async function loadDeviceSystems() {
-                if (!selectedDeviceId) {
-                    renderDroneAutoSyncPanel();
-                    return;
-                }
+                if (!selectedDeviceId) return;
                 try {
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/systems`);
                     if (!response.ok) throw new Error('Failed to load device systems');
@@ -2457,7 +2454,6 @@
                         if (name) systems[name] = row;
                         return systems;
                     }, {});
-                    renderDroneAutoSyncPanel();
                 } catch (error) {
                     console.error('Error loading systems:', error);
                 }
@@ -2825,10 +2821,7 @@
 
             function displaySystemsTree() {
                 const container = document.getElementById('systems-list');
-                if (!container) {
-                    renderDroneAutoSyncPanel();
-                    return;
-                }
+                if (!container) return;
                 const entries = filteredSystemEntries();
                 if (!entries.length) {
                     container.innerHTML = deviceRomSearchQuery
@@ -2852,7 +2845,6 @@
                         }).join('')}
                     </div>
                 `;
-                renderDroneAutoSyncPanel();
             }
 
             function renderDroneMetadataWaitingState(label) {
@@ -2984,72 +2976,6 @@
                 `;
             }
 
-            function renderDroneAutoSyncPanel() {
-                const container = document.getElementById('drone-auto-sync-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                const policy = device.auto_sync_policy || { enabled: false, systems: [] };
-                const selectedSystems = Array.isArray(policy.systems) ? policy.systems : [];
-                const systems = Object.keys(currentDeviceSystems || {}).sort();
-                const selectedCount = systems.filter(system => selectedSystems.includes(system)).length;
-                const dropdownLabel = selectedCount ? `${selectedCount} selected` : 'Select systems';
-                const systemOptions = systems.map(system => `
-                    <label class="dropdown-item app-dropdown-check form-check mb-0">
-                        <input class="form-check-input drone-auto-sync-system" type="checkbox" value="${escapeHtml(system)}" ${selectedSystems.includes(system) ? 'checked' : ''} onchange="updateDroneAutoSyncSystemLabel()">
-                        <span class="form-check-label ms-1">${escapeHtml(system)}</span>
-                    </label>
-                `).join('');
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2">
-                        <label class="d-flex gap-2 align-items-center mb-2">
-                            <input id="drone-auto-sync-enabled" class="form-check-input" type="checkbox" ${policy.enabled ? 'checked' : ''}>
-                            <strong>Auto-sync ROM metadata from this Drone</strong>
-                        </label>
-                        <div class="drone-auto-sync-controls mb-2">
-                            ${systems.length ? `
-                                <div class="dropdown app-checkbox-dropdown drone-auto-sync-dropdown">
-                                    <button id="drone-auto-sync-systems-button" class="btn btn-outline-primary dropdown-toggle text-start" type="button" onclick="toggleDroneAutoSyncDropdown(event)" aria-expanded="false">
-                                        <span id="drone-auto-sync-systems-label">${escapeHtml(dropdownLabel)}</span>
-                                    </button>
-                                    <div id="drone-auto-sync-systems-menu" class="dropdown-menu filter-dropdown-menu app-checkbox-menu drone-auto-sync-menu" onclick="event.stopPropagation()">
-                                        ${systemOptions}
-                                    </div>
-                                </div>
-                            ` : '<span class="small text-muted">Device has not reported system metadata yet.</span>'}
-                        </div>
-                        <button class="btn btn-primary btn-sm" onclick="saveDroneAutoSyncPolicy()">Save Policy</button>
-                    </div></div>
-                `;
-            }
-
-            function toggleDroneAutoSyncDropdown(event) {
-                event.preventDefault();
-                event.stopPropagation();
-                const menu = document.getElementById('drone-auto-sync-systems-menu');
-                const button = document.getElementById('drone-auto-sync-systems-button');
-                if (!menu || !button) return;
-                const willOpen = !menu.classList.contains('show');
-                menu.classList.toggle('show', willOpen);
-                button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
-            }
-
-            function closeDroneAutoSyncDropdown() {
-                const menu = document.getElementById('drone-auto-sync-systems-menu');
-                const button = document.getElementById('drone-auto-sync-systems-button');
-                if (!menu || !button) return;
-                menu.classList.remove('show');
-                button.setAttribute('aria-expanded', 'false');
-            }
-
-            document.addEventListener('click', closeDroneAutoSyncDropdown);
-
-            function updateDroneAutoSyncSystemLabel() {
-                const label = document.getElementById('drone-auto-sync-systems-label');
-                if (!label) return;
-                const count = document.querySelectorAll('.drone-auto-sync-system:checked').length;
-                label.textContent = count ? `${count} selected` : 'Select systems';
-            }
-
             function renderDroneMetadataPanel() {
                 const container = document.getElementById('device-metadata-panel');
                 const device = selectedDrone();
@@ -3102,16 +3028,6 @@
                         ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
                     </div></div>
                 `;
-            }
-
-            async function saveDroneAutoSyncPolicy() {
-                if (!selectedDeviceId) return;
-                const systems = Array.from(document.querySelectorAll('.drone-auto-sync-system:checked')).map(input => input.value);
-                const enabled = !!document.getElementById('drone-auto-sync-enabled')?.checked;
-                const response = await apiPatch(`/api/devices/${selectedDeviceId}/auto-sync`, { enabled, systems });
-                if (!response.ok) throw new Error('Failed to save policy');
-                await loadDevices();
-                showMessage('Drone sync policy saved.', 'success');
             }
 
             async function loadSwarmRomAvailabilityPanel() {
