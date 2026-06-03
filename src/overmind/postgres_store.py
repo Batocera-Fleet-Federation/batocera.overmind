@@ -4295,33 +4295,68 @@ class PostgresMetadataStore:
                         (device_internal_id, [_domain_path(row, "bios") for row in source_rows]),
                     )
                 else:
-                    for row in source_rows:
-                        key = _asset_key(asset_type, row)
-                        system = str(row.get("system_name") or row.get("system") or "").strip().lower()
-                        path = str(row.get("rom_path") or row.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower()
+                    asset_systems = [
+                        str(row.get("system_name") or row.get("system") or "").strip().lower()
+                        for row in source_rows
+                    ]
+                    asset_paths = [
+                        str(row.get("rom_path") or row.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower()
+                        for row in source_rows
+                    ]
+                    asset_pairs = [(system, path) for system, path in zip(asset_systems, asset_paths) if system and path]
+                    if keys or asset_pairs:
                         cur.execute(
                             """
                             DELETE FROM overmind_device_assets
                             WHERE device_internal_id = %s AND asset_type = %s
                               AND (
-                                  item_key = %s
-                                  OR (lower(coalesce(system_name, payload->>'system', '')) = %s
-                                      AND lower(coalesce(payload->>'rom_path', payload->>'file_path', '')) = %s)
+                                  item_key = ANY(%s)
+                                  OR (
+                                      lower(coalesce(system_name, payload->>'system', '')),
+                                      lower(coalesce(payload->>'rom_path', payload->>'file_path', ''))
+                                  ) IN (
+                                      SELECT system_name, rom_path
+                                      FROM unnest(%s::text[], %s::text[]) AS deleted(system_name, rom_path)
+                                  )
                               )
                             """,
-                            (device_internal_id, asset_type, key, system, path),
+                            (
+                                device_internal_id,
+                                asset_type,
+                                keys,
+                                [item[0] for item in asset_pairs],
+                                [item[1] for item in asset_pairs],
+                            ),
                         )
+                    artwork_delete_rows = []
+                    for row in source_rows:
+                        system = str(row.get("system_name") or row.get("system") or "").strip().lower()
+                        path = str(row.get("rom_path") or row.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower()
+                        if not system or not path:
+                            continue
                         for artwork_type in _artwork_types(row):
-                            cur.execute(
-                                """
-                                DELETE FROM drone_artwork
-                                WHERE drone_id = %s
-                                  AND lower(system_name) = %s
-                                  AND normalized_rom_path = %s
-                                  AND lower(artwork_type) = %s
-                                """,
-                                (device_internal_id, system, path, artwork_type.lower()),
-                            )
+                            artwork_delete_rows.append((system, path, artwork_type.lower()))
+                    if artwork_delete_rows:
+                        cur.execute(
+                            """
+                            DELETE FROM drone_artwork
+                            WHERE drone_id = %s
+                              AND (
+                                  lower(system_name),
+                                  normalized_rom_path,
+                                  lower(artwork_type)
+                              ) IN (
+                                  SELECT system_name, rom_path, artwork_type
+                                  FROM unnest(%s::text[], %s::text[], %s::text[]) AS deleted(system_name, rom_path, artwork_type)
+                              )
+                            """,
+                            (
+                                device_internal_id,
+                                [item[0] for item in artwork_delete_rows],
+                                [item[1] for item in artwork_delete_rows],
+                                [item[2] for item in artwork_delete_rows],
+                            ),
+                        )
 
     def upsert_device_assets(
         self,

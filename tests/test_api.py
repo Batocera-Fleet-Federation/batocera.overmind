@@ -4652,6 +4652,52 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
         assert table_name in sql
 
 
+def test_postgres_store_batches_artwork_asset_deletes(monkeypatch):
+    from overmind.postgres_store import PostgresMetadataStore
+
+    class RecordingCursor:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql, params=None):
+            self.statements.append((sql, params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class RecordingConnection:
+        def __init__(self):
+            self.cursor_obj = RecordingCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    store = PostgresMetadataStore()
+    conn = RecordingConnection()
+    monkeypatch.setattr(store, "assets_enabled", lambda: True)
+    monkeypatch.setattr(store, "_connect", lambda: conn)
+
+    store.delete_device_asset_rows("d1", "artwork", [
+        {"system_name": "snes", "rom_path": "Game One.zip", "artwork_types": ["image", "marquee"]},
+        {"system_name": "snes", "rom_path": "Game Two.zip", "artwork_type": "thumbnail"},
+    ])
+
+    assert len(conn.cursor_obj.statements) == 2
+    sql = "\n".join(statement for statement, _ in conn.cursor_obj.statements)
+    assert "FROM unnest(%s::text[], %s::text[])" in sql
+    assert "FROM unnest(%s::text[], %s::text[], %s::text[])" in sql
+    assert len(conn.cursor_obj.statements[1][1][1]) == 3
+
+
 def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
     from overmind.postgres_store import PostgresMetadataStore
 
