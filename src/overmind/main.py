@@ -887,7 +887,13 @@ def queue_associated_artwork_syncs(user: dict, device: dict, system_name: str, r
             continue
         artwork_type = str(row.get("artwork_type") or "").strip()
         row_path = str(row.get("rom_path") or row.get("file_path") or row.get("relative_path") or row.get("rom_name") or rom_path).strip()
-        if not artwork_type or not _rom_artwork_matches(system_name, rom_path, row):
+        target_rom_path = str(rom_path or row_path).replace("\\", "/").strip()
+        if target_rom_path.startswith("/userdata/roms/"):
+            prefix = f"/userdata/roms/{str(system_name or '').strip()}/"
+            if target_rom_path.lower().startswith(prefix.lower()):
+                target_rom_path = target_rom_path[len(prefix):]
+        target_rom_path = target_rom_path.lstrip("./")
+        if not artwork_type or not target_rom_path or not _rom_artwork_matches(system_name, rom_path, row):
             continue
         source_devices = resolvable_asset_sources(row.get("devices") if isinstance(row.get("devices"), list) else [], device.get("device_id"))
         if not source_devices:
@@ -896,9 +902,9 @@ def queue_associated_artwork_syncs(user: dict, device: dict, system_name: str, r
             "asset_type": "artwork",
             "system_name": system_name,
             "system": system_name,
-            "rom_name": rom_name or row.get("rom_name") or row_path,
-            "rom_path": row_path,
-            "file_path": row_path,
+            "rom_name": rom_name or row.get("rom_name") or target_rom_path,
+            "rom_path": target_rom_path,
+            "file_path": target_rom_path,
             "artwork_type": artwork_type,
             "devices": source_devices,
             "triggered_by": "sync_rom",
@@ -911,9 +917,9 @@ def queue_associated_artwork_syncs(user: dict, device: dict, system_name: str, r
             "asset_type": "artwork",
             "target_drone_id": device["device_id"],
             "system": system_name,
-            "rom_name": rom_name or row.get("rom_name") or row_path,
-            "rom_path": row_path,
-            "relative_path": row_path,
+            "rom_name": rom_name or row.get("rom_name") or target_rom_path,
+            "rom_path": target_rom_path,
+            "relative_path": target_rom_path,
             "artwork_type": artwork_type,
             "action": "download",
             "status": "pending",
@@ -2379,9 +2385,8 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
         "rom_md5": payload.get("rom_md5"),
         "entry_type": payload.get("entry_type") or "file",
     })
-    artwork_actions = queue_associated_artwork_syncs(user, device, system_name, rom_path, payload.get("rom_name") or rom_path)
     notify_sync_triggered(user, device, "ROM", f"ROM sync for {system_name}/{rom_path}", [device], source_devices, action)
-    return {"action": action, "artwork_actions": artwork_actions, "artwork_action_count": len(artwork_actions)}
+    return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
 
 
 @app.post("/api/devices/{device_id}/sync-bios")
@@ -2618,19 +2623,8 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
         "action": "download",
         "status": "pending",
     })
-    artwork_actions = [
-        artwork_action
-        for row in missing
-        for artwork_action in queue_associated_artwork_syncs(
-            user,
-            device,
-            system_name,
-            str(row.get("file_path") or row.get("rom_path") or row.get("rom_name") or ""),
-            row.get("rom_name") or row.get("file_path"),
-        )
-    ]
     notify_sync_triggered(user, device, "System", f"{system_name} system sync ({len(missing)} ROM item(s))", [device], [source for row in missing for source in (row.get("devices") or [])], action)
-    return {"action": action, "artwork_actions": artwork_actions, "artwork_action_count": len(artwork_actions)}
+    return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
 
 
 @app.post("/api/bulk-sync")
@@ -2741,7 +2735,9 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
         "systems": systems,
         "action_count": len(actions),
         "queued_rom_count": queued_roms,
+        "artwork_action_count": 0,
         "actions": actions,
+        "artwork_actions": [],
     }
 
 

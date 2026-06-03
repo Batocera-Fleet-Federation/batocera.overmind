@@ -2013,6 +2013,8 @@ class OvermindDatabase:
         return None
 
     def _notify_device_action_completion(self, device: dict, device_id: str, action: dict, status: str, message: Optional[str]) -> None:
+        if str(action.get("action") or "") in {"sync_rom", "sync_system", "sync_bios", "sync_artwork", "cancel_download"}:
+            return
         action_label = {
             "restart": "Remote Restart",
             "enable_kiosk": "Enable Kiosk Mode",

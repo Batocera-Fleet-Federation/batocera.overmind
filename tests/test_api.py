@@ -2393,7 +2393,7 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     assert action["payload"]["devices"] == [{"device_id": "source-with-rom", "device_name": "Source With ROM"}]
 
 
-def test_sync_rom_queues_associated_artwork_actions(client):
+def test_sync_rom_does_not_queue_associated_artwork_by_default(client):
     client.post("/api/auth/register", json={"email": "rom-artwork@example.com", "username": "rom-artwork-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
@@ -2419,7 +2419,8 @@ def test_sync_rom_queues_associated_artwork_actions(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["artwork_action_count"] == 2
+    assert payload["artwork_action_count"] == 0
+    assert payload["artwork_actions"] == []
 
     claim = client.post(
         "/api/devices/target-without-assets/actions/claim",
@@ -2428,11 +2429,7 @@ def test_sync_rom_queues_associated_artwork_actions(client):
     )
     assert claim.status_code == 200
     actions = claim.json()["actions"]
-    assert [action["action"] for action in actions] == ["sync_rom", "sync_artwork", "sync_artwork"]
-    artwork_payloads = [action["payload"] for action in actions if action["action"] == "sync_artwork"]
-    assert {payload["artwork_type"] for payload in artwork_payloads} == {"image", "marquee"}
-    assert all(payload["rom_path"] == "/userdata/roms/snes/Game.zip" for payload in artwork_payloads)
-    assert all(payload["devices"] == [{"device_id": "source-with-assets", "device_name": "Source Assets"}] for payload in artwork_payloads)
+    assert [action["action"] for action in actions] == ["sync_rom"]
 
 
 def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):
@@ -3029,6 +3026,12 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     db.add_roms("drone-a", "snes", [{"rom_name": "A.zip", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 8}])
     db.add_roms("drone-b", "snes", [{"rom_name": "B.zip", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 9}])
     db.add_roms("drone-c", "snes", [{"rom_name": "C.zip", "file_path": "C.zip", "rom_md5": "ccc", "file_size": 10}])
+    db.add_artwork("drone-b", [{
+        "system": "snes",
+        "rom_path": "B.zip",
+        "rom_name": "B.zip",
+        "artwork_types": ["image"],
+    }])
 
     response = client.post(
         "/api/bulk-sync",
@@ -3039,13 +3042,17 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     payload = response.json()
     assert payload["action_count"] == 2
     assert payload["queued_rom_count"] == 2
+    assert payload["artwork_action_count"] == 0
+    assert payload["artwork_actions"] == []
 
     claim_a = client.post("/api/devices/drone-a/actions/claim", headers={"Authorization": "Bearer a"}, json={})
     claim_b = client.post("/api/devices/drone-b/actions/claim", headers={"Authorization": "Bearer b"}, json={})
     assert claim_a.status_code == 200
     assert claim_b.status_code == 200
-    assert claim_a.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "B.zip"
-    assert claim_a.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-b", "device_name": "Drone B"}]
+    claim_a_actions = claim_a.json()["actions"]
+    assert [action["action"] for action in claim_a_actions] == ["sync_system"]
+    assert claim_a_actions[0]["payload"]["roms"][0]["file_path"] == "B.zip"
+    assert claim_a_actions[0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-b", "device_name": "Drone B"}]
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "A.zip"
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
 
@@ -3171,6 +3178,28 @@ def test_device_action_completion_uses_postgres_store_when_available(client, mon
     notifications = db.notifications["swarm-1"]
     assert notifications[-1]["event_type"] == "device_action_completed"
     assert notifications[-1]["details"]["action_id"] == "action-1"
+
+
+def test_sync_action_completion_does_not_create_per_artwork_notifications(client):
+    user_id = db.create_user("sync-actions@example.com", "hash")
+    internal_id = db.create_device(user_id, "sync-drone", "Sync Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
+    device = db.devices[internal_id]
+    before = len(db.notifications.get(device["swarm_id"], []))
+    actions = [
+        db.create_device_action(user_id, "sync-drone", "sync_rom", {"system_name": "fbneo", "file_path": "1943.zip"}),
+        db.create_device_action(user_id, "sync-drone", "sync_artwork", {"system_name": "fbneo", "rom_path": "1943.zip", "artwork_type": "image"}),
+        db.create_device_action(user_id, "sync-drone", "sync_artwork", {"system_name": "fbneo", "rom_path": "1943.zip", "artwork_type": "marquee"}),
+    ]
+
+    for action in actions:
+        db.complete_device_action("sync-drone", action["id"], "completed", "queued", {"type": action["action"]})
+
+    notifications = db.notifications.get(device["swarm_id"], [])
+    assert len(notifications) == before
+    assert not any(
+        row["event_type"] == "device_action_completed" and row["details"].get("action") in {"sync_rom", "sync_artwork"}
+        for row in notifications
+    )
 
 
 def test_action_results_store_raw_logs_for_selected_drone_view(client):
