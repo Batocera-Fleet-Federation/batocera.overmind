@@ -1778,8 +1778,6 @@ async def get_device(device_id: str, log_limit: int = 10, authorization: Optiona
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    refresh_device_public_reachability(device)
-    
     response = device_response(device)
     stream_payload = _current_drone_log_stream(device_id)
     if stream_payload is not None:
