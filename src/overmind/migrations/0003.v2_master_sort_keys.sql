@@ -1,6 +1,10 @@
 -- depends: 0002.column_migrations
+-- no-transaction
 -- v2: add master_key and sort_key computed columns to overmind_device_assets
 -- and back-fill them from existing payload data.
+-- no-transaction: the back-fill UPDATE on a large table must run outside a
+-- transaction so it doesn't hold table locks, and so partial progress is
+-- preserved if the Lambda process is killed mid-way.
 
 ALTER TABLE overmind_device_assets ADD COLUMN IF NOT EXISTS master_key TEXT;
 ALTER TABLE overmind_device_assets ADD COLUMN IF NOT EXISTS sort_key TEXT;

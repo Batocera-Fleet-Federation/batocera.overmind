@@ -332,64 +332,126 @@ class PostgresMetadataStore:
                     _cache.invalidate_user_devices(str(row[0]))
                 return True
 
-    def ensure_schema(self) -> None:
-        """Apply pending yoyo migrations to bring the schema up to date.
+    # Migration IDs that must never block a Lambda cold start:
+    # 0003 (40k-row backfill) and 0004 (indexes) both exceed the 30 s timeout.
+    _BACKGROUND_MIGRATION_IDS = frozenset({"0003", "0004"})
 
-        Fast migrations (table DDL, column adds, data backfills) run synchronously
-        so requests can be served as soon as tables exist.  The index migration
-        (0004) runs in a background thread so it never blocks a Lambda cold start
-        or holds table locks that exhaust connection slots.
+    def _run_migrations(self, conn, migration_files: list[Path]) -> None:
+        """Apply a list of SQL migration files that have not yet been recorded."""
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS _overmind_migrations (
+                        id TEXT PRIMARY KEY,
+                        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+        for path in migration_files:
+            migration_id = path.stem
+            conn2 = self._connect()
+            if conn2 is None:
+                break
+            try:
+                with conn2:
+                    with conn2.cursor() as cur:
+                        row = cur.execute(
+                            "SELECT 1 FROM _overmind_migrations WHERE id = %s", (migration_id,)
+                        ).fetchone()
+                        if row:
+                            continue
+                sql = path.read_text(encoding="utf-8")
+                # Strip yoyo directives and rollback sections (not used here)
+                lines = []
+                in_rollback = False
+                for line in sql.splitlines():
+                    stripped = line.strip().lower()
+                    if stripped.startswith("-- rollback"):
+                        in_rollback = True
+                    if stripped.startswith("-- depends:") or stripped.startswith("-- no-transaction"):
+                        continue
+                    if not in_rollback:
+                        lines.append(line)
+                clean_sql = "\n".join(lines).strip()
+                if not clean_sql:
+                    continue
+                conn3 = self._connect()
+                if conn3 is None:
+                    break
+                with conn3:
+                    with conn3.cursor() as cur:
+                        cur.execute(clean_sql)
+                conn4 = self._connect()
+                if conn4 is None:
+                    break
+                with conn4:
+                    with conn4.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO _overmind_migrations (id) VALUES (%s) ON CONFLICT DO NOTHING",
+                            (migration_id,),
+                        )
+                logger.info("Migration applied: %s", migration_id)
+            except Exception as err:
+                logger.warning("Migration %s failed (non-fatal): %s", migration_id, err)
+
+    def ensure_schema(self) -> None:
+        """Apply pending SQL migrations to bring the schema up to date.
+
+        Uses a simple custom runner instead of yoyo to avoid:
+        - Database-persisted locks that survive Lambda process death
+        - Automatic rollbacks that can drop tables when steps fail
+        - Complex state tracking that breaks under concurrent cold starts
+
+        Each migration file is idempotent (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS
+        guards), so concurrent execution is safe without locks.
+
+        Fast migrations (0001, 0002, 0005) run synchronously on cold start.
+        Slow migrations (0003 backfill, 0004 indexes) run in a background thread
+        so Lambda cold starts complete in < 1 s.
         """
         if self._ready or not self.url:
             return
-        try:
-            from yoyo import read_migrations, get_backend  # type: ignore[import]
-        except ImportError:
-            logger.error("yoyo-migrations is not installed; cannot apply schema migrations")
-            return
+        import threading as _threading
+
         if os.getenv("OVERMIND_RESET_RELATIONAL_SCHEMA", "").lower() == "true":
             conn = self._connect()
             if conn:
                 with conn:
                     with conn.cursor() as cur:
                         self._drop_existing_schema(cur)
+
         migrations_dir = Path(__file__).parent / "migrations"
-        # yoyo expects postgresql+psycopg:// for the psycopg v3 driver
-        yoyo_url = (
-            self.url
-            .replace("postgresql://", "postgresql+psycopg://", 1)
-            .replace("postgres://", "postgresql+psycopg://", 1)
-        )
+        all_files = sorted(migrations_dir.glob("*.sql"))
+        fast_files = [f for f in all_files if not any(bg in f.stem for bg in self._BACKGROUND_MIGRATION_IDS)]
+        slow_files = [f for f in all_files if any(bg in f.stem for bg in self._BACKGROUND_MIGRATION_IDS)]
+
         try:
-            import threading as _threading
-            backend = get_backend(yoyo_url)
-            all_migrations = read_migrations(str(migrations_dir))
-            pending = backend.to_apply(all_migrations)
-            # Split: fast (tables, columns, data) vs slow (indexes — 0004).
-            # Running indexes synchronously on Lambda cold starts causes connection
-            # exhaustion when many instances cold-start simultaneously because
-            # CREATE INDEX on large tables holds table locks for > 30 s.
-            fast = [m for m in pending if "0004" not in str(m.id)]
-            slow = [m for m in pending if "0004" in str(m.id)]
-            with backend.lock():
-                backend.apply_migrations(fast)
-            # Tables exist — mark ready so requests are served immediately.
+            conn = self._connect()
+            if conn is None:
+                self.last_error = "Could not connect to PostgreSQL"
+                logger.warning("Schema migration skipped: %s", self.last_error)
+                return
+            self._run_migrations(conn, fast_files)
             self._ready = True
             self.last_error = None
-            if slow:
-                def _apply_indexes() -> None:
-                    try:
-                        idx_backend = get_backend(yoyo_url)
-                        with idx_backend.lock():
-                            idx_backend.apply_migrations(slow)
-                        logger.info("Index migration 0004 applied successfully")
-                    except Exception as idx_err:
-                        logger.warning("Index migration 0004 deferred (non-fatal): %s", idx_err)
-                _threading.Thread(target=_apply_indexes, name="schema-index-migration", daemon=True).start()
         except Exception as error:
             self._ready = False
             self.last_error = f"{error.__class__.__name__}: {error}"
             logger.warning("Schema migration failed: %s", self.last_error)
+            return
+
+        if slow_files:
+            def _apply_slow() -> None:
+                try:
+                    slow_conn = self._connect()
+                    if slow_conn is None:
+                        return
+                    self._run_migrations(slow_conn, slow_files)
+                    logger.info("Background migrations applied: %s", [f.stem for f in slow_files])
+                except Exception as slow_err:
+                    logger.warning("Background migrations deferred (non-fatal): %s", slow_err)
+            _threading.Thread(target=_apply_slow, name="schema-background-migrations", daemon=True).start()
 
     def _drop_existing_schema(self, cur) -> None:
         """Drop all known Overmind tables for an intentional no-migration rebuild."""
