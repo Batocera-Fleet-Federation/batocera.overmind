@@ -23,7 +23,6 @@ from overmind.postgres_store import _encode_state
 def client(monkeypatch):
     """Create a test client."""
     monkeypatch.setenv("OVERMIND_AUTO_VERIFY_REGISTRATION", "1")
-    monkeypatch.setenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "0")
     db.users.clear()
     db.user_by_email.clear()
     db.devices.clear()
@@ -57,10 +56,17 @@ def mark_source_resolvable(device_id: str, public_ip: str = "8.8.8.8"):
     device = db.get_device_by_device_id(device_id)
     assert device is not None
     device["network"] = {**(device.get("network") or {}), "public_ip": public_ip}
-    db.update_device_public_reachability(
-        device["id"],
-        {"resolvable": True, "public_ip": public_ip, "checked_at": datetime.utcnow()},
-    )
+    # Resolvability is now determined by peer checks, not server-side probes.
+    # Inject a synthetic passing peer check directly into the peer_checks store.
+    sentinel_bucket = db.peer_checks.setdefault("__test_sentinel__", [])
+    sentinel_bucket.append({
+        "source_drone_id": "__test_sentinel__",
+        "target_drone_id": device_id,
+        "target_address": f"https://{public_ip}",
+        "status": "pass",
+        "latency_ms": 1,
+        "checked_at": datetime.utcnow(),
+    })
 
 
 def seed_test_fleet():
@@ -3092,7 +3098,7 @@ def test_sync_system_queues_only_roms_from_resolvable_sources(client):
     assert roms[0]["devices"] == [{"device_id": "good-source", "device_name": "Good Source"}]
 
 
-def test_sync_system_probes_newly_forwarded_public_source(client, monkeypatch):
+def test_sync_system_uses_peer_check_resolvability_for_sources(client):
     client.post("/api/auth/register", json={"email": "probe-sync@example.com", "username": "probe-sync-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
@@ -3103,35 +3109,25 @@ def test_sync_system_probes_newly_forwarded_public_source(client, monkeypatch):
     db.create_device(user["id"], "fresh-target", "Fresh Target", {"ip_address": "10.0.0.4"}, raw_token="b")
     db.add_roms("fresh-source", "fbneo", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "good"}])
 
-    class FakeResponse:
-        status = 200
-
-        def getcode(self):
-            return 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-    def open_url(request, timeout, context):
-        assert request.full_url == "https://8.8.8.8:443/health"
-        assert timeout == 1
-        return FakeResponse()
-
-    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
-
-    response = client.post(
+    # Without a peer check, the source should not be offered
+    response_before = client.post(
         "/api/devices/fresh-target/sync-system",
         headers={"Authorization": f"Bearer {token}"},
         json={"system_name": "fbneo"},
     )
+    assert response_before.status_code == 400
 
-    assert response.status_code == 200
-    roms = response.json()["action"]["payload"]["roms"]
+    # After a passing peer check, the source becomes available
+    mark_source_resolvable("fresh-source", "8.8.8.8")
+    response_after = client.post(
+        "/api/devices/fresh-target/sync-system",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "fbneo"},
+    )
+    assert response_after.status_code == 200
+    roms = response_after.json()["action"]["payload"]["roms"]
     assert roms[0]["devices"] == [{"device_id": "fresh-source", "device_name": "Fresh Source"}]
-    assert db.get_device_by_device_id("fresh-source")["public_reachability"]["resolvable"] is True
+    assert db.is_drone_peer_resolvable("fresh-source") is True
 
 
 def test_device_action_lifecycle(client):
@@ -3784,7 +3780,7 @@ def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
     assert "Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}" in tile_renderer
     assert "ROMs: ${Number(device.rom_count || 0).toLocaleString()}" in tile_renderer
     assert "'Resolvable'" in tile_renderer
-    assert "'Resolution Pending'" in tile_renderer
+    assert "'Not Resolvable'" in tile_renderer
     assert "text-bg-warning" in tile_renderer
 
 
@@ -3818,7 +3814,7 @@ def test_profile_swarm_access_exposes_pending_invite_remove_action():
 def test_drone_metadata_shows_resolvable_public_ip_state():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
 
-    assert "const publicIpStatus = device.public_resolvable ? ' (resolvable)' : '';" in js
+    assert "const publicIpStatus = device.peer_resolvable ? ' (peer-resolvable)' : '';" in js
     assert "Public IP: ${escapeHtml(publicIp)}${publicIpStatus}" in js
     metadata_start = js.index("function renderDroneMetadataPanel()")
     metadata_end = js.index("async function saveDroneAutoSyncPolicy()", metadata_start)
@@ -4034,169 +4030,80 @@ def test_device_list_marks_postgres_timezone_aware_last_seen_online(client):
     assert device["status"] == "online"
 
 
-def test_public_peer_poll_marks_public_endpoint_resolvable_for_swarm_transfer(client, monkeypatch):
+def test_peer_check_upload_marks_drone_resolvable(client):
     client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
     token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
     owner = db.get_user_by_email("owner@example.com")
-    db.create_device(
-        owner["id"],
-        "public-drone",
-        "Public Drone",
-        {"network": {"public_ip": "8.8.8.8"}, "api_port": 443, "scheme": "https"},
-        raw_token="drone-token",
+    db.create_device(owner["id"], "drone-a", "Drone A", {"network": {"public_ip": "8.8.8.8"}}, raw_token="token-a")
+    db.create_device(owner["id"], "drone-b", "Drone B", {"network": {"public_ip": "8.8.4.4"}}, raw_token="token-b")
+
+    # drone-a reports it can reach drone-b
+    resp = client.post(
+        "/api/devices/drone-a/peer-checks",
+        json={"results": [{"target_drone_id": "drone-b", "status": "pass", "target_address": "https://8.8.4.4", "latency_ms": 42}]},
+        headers={"Authorization": "Bearer token-a"},
     )
-    calls = []
+    assert resp.status_code == 200
 
-    class FakeResponse:
-        status = 200
-
-        def getcode(self):
-            return 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-    def open_url(request, timeout, context):
-        calls.append((request.full_url, timeout))
-        return FakeResponse()
-
-    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
-    overmind_main.poll_public_drone_reachability_once()
-
-    response = client.get("/api/devices/public-drone", headers={"Authorization": f"Bearer {token}"})
+    response = client.get("/api/devices/drone-b", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
-    assert response.json()["public_resolvable"] is True
-    assert response.json()["public_reachability"]["public_ip"] == "8.8.8.8"
-    swarm_peer = db.get_swarm_for_device("public-drone")[0]
-    assert swarm_peer["public_resolvable"] is True
-    assert swarm_peer["public_reachable_url"] == "https://8.8.8.8"
-    assert calls and calls[0] == ("https://8.8.8.8:443/health", 1)
+    data = response.json()
+    assert data["public_resolvable"] is True
+    assert data["peer_resolvable"] is True
+    assert any(r["source_drone_id"] == "drone-a" for r in data["peer_resolved_by"])
 
 
-def test_public_peer_poll_marks_non_200_public_endpoint_offline(client, monkeypatch):
+def test_peer_check_upload_does_not_mark_drone_resolvable_on_fail(client):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(owner["id"], "drone-a", "Drone A", {"network": {"public_ip": "8.8.8.8"}}, raw_token="token-a")
+    db.create_device(owner["id"], "drone-b", "Drone B", {"network": {"public_ip": "8.8.4.4"}}, raw_token="token-b")
+
+    client.post(
+        "/api/devices/drone-a/peer-checks",
+        json={"results": [{"target_drone_id": "drone-b", "status": "fail", "failure_reason": "connection refused"}]},
+        headers={"Authorization": "Bearer token-a"},
+    )
+
+    response = client.get("/api/devices/drone-b", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["public_resolvable"] is False
+    assert data["peer_resolvable"] is False
+    assert data["peer_resolved_by"] == []
+
+
+def test_peer_check_resolvability_reflected_in_swarm_list(client):
     client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
     owner = db.get_user_by_email("owner@example.com")
-    db.create_device(
-        owner["id"],
-        "offline-drone",
-        "Offline Drone",
-        {"network": {"public_ip": "8.8.4.4"}, "api_port": 443, "scheme": "https"},
-        raw_token="drone-token",
+    db.create_device(owner["id"], "drone-a", "Drone A", {"network": {"public_ip": "8.8.8.8"}}, raw_token="token-a")
+    db.create_device(owner["id"], "drone-b", "Drone B", {"network": {"public_ip": "8.8.4.4"}}, raw_token="token-b")
+
+    client.post(
+        "/api/devices/drone-a/peer-checks",
+        json={"results": [{"target_drone_id": "drone-b", "status": "pass", "target_address": "https://8.8.4.4"}]},
+        headers={"Authorization": "Bearer token-a"},
     )
 
-    def open_url(request, timeout, context):
-        raise overmind_main.urllib.error.HTTPError(request.full_url, 503, "unavailable", hdrs=None, fp=None)
-
-    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
-    overmind_main.poll_public_drone_reachability_once()
-
-    device = db.get_device_by_device_id("offline-drone")
-    assert device["public_reachability"]["resolvable"] is False
-    assert device["public_reachability"]["status_code"] == 503
-    swarm_peer = db.get_swarm_for_device("offline-drone")[0]
-    assert swarm_peer["online"] is False
-    assert swarm_peer["public_reachable_url"] is None
+    swarm = db.get_swarm_for_device("drone-a")
+    drone_b_peer = next(p for p in swarm if p["drone_id"] == "drone-b")
+    assert drone_b_peer["public_resolvable"] is True
+    assert drone_b_peer["public_reachable_url"] == "https://8.8.4.4"
 
 
-def test_public_peer_poll_only_checks_https_health_on_port_443(client, monkeypatch):
-    assert overmind_main.PUBLIC_PEER_PROBE_PORTS == (443,)
-
-    client.post("/api/auth/register", json={"email": "fixed-ports@example.com", "username": "fixed-ports-at-example.com", "password": "testpass123"})
-    owner = db.get_user_by_email("fixed-ports@example.com")
-    db.create_device(
-        owner["id"],
-        "fixed-ports-drone",
-        "Fixed Ports Drone",
-        {"network": {"public_ip": "8.8.4.4"}, "api_port": 443, "scheme": "https"},
-        raw_token="drone-token",
-    )
-    calls = []
-
-    def open_url(request, timeout, context):
-        calls.append((request.full_url, timeout))
-        raise overmind_main.urllib.error.URLError("closed")
-
-    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
-
-    overmind_main.poll_public_drone_reachability_once()
-
-    assert calls == [("https://8.8.4.4:443/health", 1)]
-
-
-def test_public_peer_poll_rechecks_already_resolved_public_endpoint(client, monkeypatch):
-    client.post("/api/auth/register", json={"email": "skip-probe@example.com", "username": "skip-probe-at-example.com", "password": "testpass123"})
-    owner = db.get_user_by_email("skip-probe@example.com")
-    db.create_device(
-        owner["id"],
-        "recheck-probe-drone",
-        "Recheck Probe Drone",
-        {"network": {"public_ip": "8.8.4.4"}, "api_port": 443, "scheme": "https"},
-        raw_token="drone-token",
-    )
-    device = db.get_device_by_device_id("recheck-probe-drone")
-    db.update_device_public_reachability(
-        device["id"],
-        {"resolvable": True, "public_ip": "8.8.4.4", "api_port": 443, "checked_at": datetime.utcnow()},
-    )
-    calls = []
-
-    def open_url(request, timeout, context):
-        calls.append(request.full_url)
-        raise overmind_main.urllib.error.URLError("closed")
-
-    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
-
-    overmind_main.poll_public_drone_reachability_once()
-
-    assert calls == ["https://8.8.4.4:443/health"]
-    assert db.get_device_by_device_id("recheck-probe-drone")["public_reachability"]["resolvable"] is False
-
-
-def test_public_peer_poll_limits_devices_per_scheduled_run(client, monkeypatch):
-    client.post("/api/auth/register", json={"email": "probe-limit@example.com", "username": "probe-limit-at-example.com", "password": "testpass123"})
-    owner = db.get_user_by_email("probe-limit@example.com")
-    for index in range(3):
-        db.create_device(
-            owner["id"],
-            f"probe-limit-{index}",
-            f"Probe Limit {index}",
-            {"network": {"public_ip": f"8.8.4.{index + 1}"}, "api_port": 443, "scheme": "https"},
-            raw_token=f"drone-token-{index}",
-        )
-    probed = []
-
-    def probe(device):
-        probed.append(device["device_id"])
-        return {"resolvable": False, "public_ip": (device.get("network") or {}).get("public_ip")}
-
-    monkeypatch.setattr(overmind_main, "PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN", 2)
-    monkeypatch.setattr(overmind_main, "probe_device_public_endpoint", probe)
-
-    overmind_main.poll_public_drone_reachability_once()
-
-    assert len(probed) == 2
-
-
-def test_public_peer_poll_rejects_private_reported_addresses_without_connecting(client, monkeypatch):
+def test_drone_without_peer_checks_not_resolvable(client):
     client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "owner@example.com", "password": "testpass123"}).json()["access_token"]
     owner = db.get_user_by_email("owner@example.com")
-    db.create_device(
-        owner["id"],
-        "private-drone",
-        "Private Drone",
-        {"network": {"public_ip": "192.168.0.206"}, "api_port": 443, "scheme": "https"},
-        raw_token="drone-token",
-    )
-    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", lambda *args, **kwargs: pytest.fail("private IP must not be probed"))
-    overmind_main.poll_public_drone_reachability_once()
+    db.create_device(owner["id"], "lone-drone", "Lone Drone", {"network": {"public_ip": "8.8.8.8"}}, raw_token="token-lone")
 
-    swarm_peer = db.get_swarm_for_device("private-drone")[0]
-    assert swarm_peer["public_resolvable"] is False
-    assert swarm_peer["public_reachable_url"] is None
-    assert "not globally routable" in db.get_device_by_device_id("private-drone")["public_reachability"]["failure_reason"]
+    response = client.get("/api/devices/lone-drone", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["public_resolvable"] is False
+    assert data["peer_resolvable"] is False
+    assert data["peer_resolved_by"] == []
 
 
 def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(client):
