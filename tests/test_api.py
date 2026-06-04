@@ -2948,7 +2948,7 @@ def test_heartbeat_queues_metadata_rebuild_when_rom_inventory_fingerprint_differ
     assert response.status_code == 200
     actions = response.json()["actions"]
     assert len(actions) == 1
-    assert actions[0]["action"] == "rebuild_asset_metadata"
+    assert actions[0]["action"] == "purge_asset_cache"
     assert actions[0]["payload"]["reason"] == "rom_inventory_fingerprint_mismatch"
 
     second = client.post(

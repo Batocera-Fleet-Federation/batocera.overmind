@@ -78,6 +78,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "disable_kiosk",
     "collect_rom_metadata",
     "rebuild_asset_metadata",
+    "purge_asset_cache",
     "collect_game_logs",
     "collect_emulator_configs",
     "collect_log_sources",
@@ -1856,7 +1857,7 @@ async def create_device_action(
         action_type = "restart"
     if action_type not in SUPPORTED_DEVICE_ACTIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported action")
-    if action_type == "rebuild_asset_metadata":
+    if action_type in {"rebuild_asset_metadata", "purge_asset_cache"}:
         db.clear_device_asset_metadata(device["user_id"], device_id)
     action = db.create_device_action(device["user_id"], device_id, action_type, payload.get("payload") if isinstance(payload.get("payload"), dict) else {})
     if not action:

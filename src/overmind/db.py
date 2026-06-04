@@ -1835,12 +1835,15 @@ class OvermindDatabase:
             return None
         active_actions = self.get_device_actions(device.get("user_id"), device_id) or []
         for action in active_actions:
-            if action.get("action") in {"rebuild_asset_metadata", "collect_rom_metadata"}:
+            if action.get("action") in {"purge_asset_cache", "rebuild_asset_metadata", "collect_rom_metadata"}:
                 return None
+        # Use purge_asset_cache (not rebuild_asset_metadata): it forces the same
+        # full re-scan and full Overmind re-upload but keeps the Drone's cached
+        # md5 values, so a routine fingerprint mismatch does not re-hash every ROM.
         return self.create_device_action(
             device.get("user_id"),
             device_id,
-            "rebuild_asset_metadata",
+            "purge_asset_cache",
             {
                 "reason": "rom_inventory_fingerprint_mismatch",
                 "drone_rom_inventory_fingerprint": drone_fingerprint,
