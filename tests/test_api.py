@@ -4470,6 +4470,49 @@ def test_integration_token_claim_prefers_direct_relational_store(monkeypatch):
     assert db.integration_tokens["token-user"][0]["id"] == "tok-1"
 
 
+def test_pending_drone_connections_prefer_direct_relational_store(monkeypatch):
+    pending_rows = {}
+
+    def upsert(device_id, device_name, batocera_info, *, user_id, swarm_id=None, authorization_token_id=None):
+        row = {
+            "id": device_id,
+            "user_id": user_id,
+            "swarm_id": swarm_id or "swarm-1",
+            "device_id": device_id,
+            "device_name": device_name,
+            "batocera_info": batocera_info,
+            "authorization_token_id": authorization_token_id,
+            "detected_at": datetime.utcnow(),
+            "last_seen": datetime.utcnow(),
+            "status": "pending",
+        }
+        pending_rows[device_id] = row
+        return row
+
+    monkeypatch.setattr(db_module.postgres_store, "available", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "store_app_state", lambda state: None)
+    monkeypatch.setattr(db_module.postgres_store, "upsert_pending_drone_connection", upsert)
+    monkeypatch.setattr(db_module.postgres_store, "get_pending_drone_connections", lambda user_id: list(pending_rows.values()))
+    monkeypatch.setattr(db_module.postgres_store, "delete_pending_drone_connection", lambda user_id, device_id, status=None: pending_rows.pop(device_id, None) is not None)
+
+    created = db.create_pending_drone_connection(
+        "relational-drone",
+        "Relational Drone",
+        {"network": {"ipv4": ["10.0.0.12"]}},
+        user_id="user-1",
+        authorization_token_id="token-1",
+    )
+    assert created["device_id"] == "relational-drone"
+
+    db.pending_drone_connections.clear()
+    listed = db.get_pending_drone_connections("user-1")
+    assert [row["device_id"] for row in listed] == ["relational-drone"]
+
+    db.pending_drone_connections.clear()
+    assert db.deny_pending_drone_connection("user-1", "relational-drone") is True
+    assert pending_rows == {}
+
+
 def test_relational_schema_declares_domain_tables():
     migrations_dir = Path(__file__).resolve().parents[1].joinpath("src/overmind/migrations")
     migration_sql = "\n".join(

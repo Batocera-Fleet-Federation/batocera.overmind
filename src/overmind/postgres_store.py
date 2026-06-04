@@ -429,7 +429,7 @@ class PostgresMetadataStore:
         try:
             conn = self._connect()
             if conn is None:
-                self.last_error = "Could not connect to PostgreSQL"
+                self.last_error = self.last_error or "Could not connect to PostgreSQL"
                 logger.warning("Schema migration skipped: %s", self.last_error)
                 return
             self._run_migrations(conn, fast_files)
@@ -2777,6 +2777,169 @@ class PostgresMetadataStore:
             for row in rows
         ]
 
+    def _pending_drone_connection_from_row(self, row) -> Optional[dict]:
+        if not row:
+            return None
+        device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status = row
+        decoded_info = _decode_state(batocera_info) if isinstance(batocera_info, dict) else batocera_info
+        return {
+            "id": device_id,
+            "user_id": user_id,
+            "swarm_id": swarm_id,
+            "device_id": device_id,
+            "device_name": device_name,
+            "batocera_info": decoded_info if isinstance(decoded_info, dict) else {},
+            "authorization_token_id": authorization_token_id,
+            "detected_at": requested_at,
+            "last_seen": requested_at,
+            "status": status or "pending",
+        }
+
+    def upsert_pending_drone_connection(
+        self,
+        device_id: str,
+        device_name: str,
+        batocera_info: dict,
+        *,
+        user_id: Optional[str],
+        swarm_id: Optional[str] = None,
+        authorization_token_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        selected_swarm_id = swarm_id
+        if user_id and not selected_swarm_id:
+            selected_swarm_id = self.default_swarm_id(user_id)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO pending_drone_connections
+                        (device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s, now(), 'pending')
+                    ON CONFLICT (device_id) DO UPDATE SET
+                        user_id = EXCLUDED.user_id,
+                        swarm_id = COALESCE(EXCLUDED.swarm_id, pending_drone_connections.swarm_id),
+                        device_name = EXCLUDED.device_name,
+                        batocera_info = EXCLUDED.batocera_info,
+                        authorization_token_id = COALESCE(EXCLUDED.authorization_token_id, pending_drone_connections.authorization_token_id),
+                        requested_at = now(),
+                        status = 'pending'
+                    RETURNING device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status
+                    """,
+                    (
+                        device_id,
+                        user_id,
+                        selected_swarm_id,
+                        device_name or device_id,
+                        self._json(batocera_info if isinstance(batocera_info, dict) else {}),
+                        authorization_token_id,
+                    ),
+                )
+                return self._pending_drone_connection_from_row(cur.fetchone())
+
+    def get_pending_drone_connections(self, user_id: str) -> Optional[list[dict]]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.device_id, p.user_id, p.swarm_id, p.device_name, p.batocera_info,
+                           p.authorization_token_id, p.requested_at, p.status
+                    FROM pending_drone_connections p
+                    WHERE p.status = 'pending'
+                      AND (
+                          p.user_id = %s
+                          OR p.user_id IS NULL
+                          OR EXISTS (
+                              SELECT 1
+                              FROM swarm_memberships m
+                              WHERE m.swarm_id = p.swarm_id AND m.user_id = %s
+                          )
+                      )
+                    ORDER BY p.requested_at DESC
+                    """,
+                    (user_id, user_id),
+                )
+                return [
+                    conn_row
+                    for conn_row in (self._pending_drone_connection_from_row(row) for row in cur.fetchall())
+                    if conn_row
+                ]
+
+    def get_pending_drone_connection(self, user_id: str, device_id: str) -> Optional[dict]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.device_id, p.user_id, p.swarm_id, p.device_name, p.batocera_info,
+                           p.authorization_token_id, p.requested_at, p.status
+                    FROM pending_drone_connections p
+                    WHERE p.device_id = %s
+                      AND p.status = 'pending'
+                      AND (
+                          p.user_id = %s
+                          OR p.user_id IS NULL
+                          OR EXISTS (
+                              SELECT 1
+                              FROM swarm_memberships m
+                              WHERE m.swarm_id = p.swarm_id AND m.user_id = %s
+                          )
+                      )
+                    """,
+                    (device_id, user_id, user_id),
+                )
+                return self._pending_drone_connection_from_row(cur.fetchone())
+
+    def delete_pending_drone_connection(self, user_id: str, device_id: str, *, status: Optional[str] = None) -> Optional[bool]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                if status:
+                    cur.execute(
+                        """
+                        UPDATE pending_drone_connections p
+                        SET status = %s
+                        WHERE p.device_id = %s
+                          AND (
+                              p.user_id = %s
+                              OR p.user_id IS NULL
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM swarm_memberships m
+                                  WHERE m.swarm_id = p.swarm_id AND m.user_id = %s
+                              )
+                          )
+                        """,
+                        (status, device_id, user_id, user_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        DELETE FROM pending_drone_connections p
+                        WHERE p.device_id = %s
+                          AND (
+                              p.user_id = %s
+                              OR p.user_id IS NULL
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM swarm_memberships m
+                                  WHERE m.swarm_id = p.swarm_id AND m.user_id = %s
+                              )
+                          )
+                        """,
+                        (device_id, user_id, user_id),
+                    )
+                return cur.rowcount > 0
+
     def claim_integration_token(self, email: Optional[str], token: Optional[str], device_id: Optional[str], device_fingerprint: Optional[str] = None) -> Optional[dict]:
         if not token:
             return None
@@ -3263,15 +3426,6 @@ class PostgresMetadataStore:
                 (str(device_id), str(token)),
             )
         pending = state.get("pending_drone_connections") if isinstance(state.get("pending_drone_connections"), dict) else {}
-        pending_device_ids = [
-            str(conn.get("device_id"))
-            for conn in pending.values()
-            if isinstance(conn, dict) and conn.get("device_id")
-        ]
-        if pending_device_ids:
-            cur.execute("DELETE FROM pending_drone_connections WHERE NOT (device_id = ANY(%s))", (pending_device_ids,))
-        else:
-            cur.execute("DELETE FROM pending_drone_connections")
         for conn in pending.values():
             if not isinstance(conn, dict) or not conn.get("device_id") or not conn.get("user_id"):
                 continue

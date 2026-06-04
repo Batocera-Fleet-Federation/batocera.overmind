@@ -1313,6 +1313,17 @@ class OvermindDatabase:
         authorization_token_id: Optional[str] = None,
     ) -> dict:
         """Record that a drone is attempting to connect to Overmind."""
+        if postgres_store.available():
+            relational = postgres_store.upsert_pending_drone_connection(
+                device_id,
+                device_name,
+                batocera_info,
+                user_id=user_id,
+                authorization_token_id=authorization_token_id,
+            )
+            if relational is not None:
+                self.pending_drone_connections[device_id] = relational
+                return relational
         now = datetime.utcnow()
         existing = self.pending_drone_connections.get(device_id)
         if existing:
@@ -1342,6 +1353,11 @@ class OvermindDatabase:
 
     def get_pending_drone_connections(self, user_id: str) -> List[dict]:
         """Return pending drone connections visible to this user."""
+        if postgres_store.available():
+            relational = postgres_store.get_pending_drone_connections(user_id)
+            if relational is not None:
+                self.pending_drone_connections.update({row["device_id"]: row for row in relational})
+                return relational
         visible = [
             conn for conn in self.pending_drone_connections.values()
             if conn.get("status") == "pending" and conn.get("user_id") in (None, user_id)
@@ -1352,6 +1368,11 @@ class OvermindDatabase:
     def accept_pending_drone_connection(self, user_id: str, device_id: str) -> Optional[dict]:
         """Accept a pending drone connection and register it to the Overlord."""
         connection = self.pending_drone_connections.get(device_id)
+        if postgres_store.available():
+            relational = postgres_store.get_pending_drone_connection(user_id, device_id)
+            if relational is not None:
+                connection = relational
+                self.pending_drone_connections[device_id] = relational
         if not connection or connection.get("status") != "pending":
             return None
         if connection.get("user_id") not in (None, user_id):
@@ -1381,9 +1402,13 @@ class OvermindDatabase:
             if existing["id"] not in self.user_devices.get(user_id, []):
                 self.user_devices.setdefault(user_id, []).append(existing["id"])
             self.pending_drone_connections.pop(device_id, None)
+            if postgres_store.available():
+                postgres_store.delete_pending_drone_connection(user_id, device_id)
             return existing
         if self.device_exists(user_id, device_id):
             self.pending_drone_connections.pop(device_id, None)
+            if postgres_store.available():
+                postgres_store.delete_pending_drone_connection(user_id, device_id)
             return self.get_device_by_device_id(device_id)
 
         raw_token = None
@@ -1404,6 +1429,8 @@ class OvermindDatabase:
             authorization_token_id=authorization_token_id,
         )
         self.pending_drone_connections.pop(device_id, None)
+        if postgres_store.available():
+            postgres_store.delete_pending_drone_connection(user_id, device_id)
         device = self.get_device(internal_id)
         if raw_token:
             device["raw_token_once"] = raw_token
@@ -1415,6 +1442,11 @@ class OvermindDatabase:
     def deny_pending_drone_connection(self, user_id: str, device_id: str) -> bool:
         """Deny a pending drone connection."""
         connection = self.pending_drone_connections.get(device_id)
+        if postgres_store.available():
+            relational_deleted = postgres_store.delete_pending_drone_connection(user_id, device_id, status="denied")
+            if relational_deleted is not None:
+                self.pending_drone_connections.pop(device_id, None)
+                return relational_deleted
         if not connection or connection.get("user_id") not in (None, user_id):
             return False
         self.pending_drone_connections.pop(device_id, None)
