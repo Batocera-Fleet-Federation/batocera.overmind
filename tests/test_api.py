@@ -4471,7 +4471,11 @@ def test_integration_token_claim_prefers_direct_relational_store(monkeypatch):
 
 
 def test_relational_schema_declares_domain_tables():
-    source = Path(__file__).resolve().parents[1].joinpath("src/overmind/postgres_store.py").read_text(encoding="utf-8")
+    migrations_dir = Path(__file__).resolve().parents[1].joinpath("src/overmind/migrations")
+    migration_sql = "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(migrations_dir.glob("*.sql"))
+    )
+    store_source = Path(__file__).resolve().parents[1].joinpath("src/overmind/postgres_store.py").read_text(encoding="utf-8")
 
     for table_name in [
         "user_profiles",
@@ -4492,36 +4496,37 @@ def test_relational_schema_declares_domain_tables():
         "sync_activity",
         "notifications",
     ]:
-        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in source
-    assert "OVERMIND_RESET_RELATIONAL_SCHEMA" in source
-    assert "REFERENCES users(id) ON DELETE CASCADE" in source
-    assert "REFERENCES drones(id) ON DELETE CASCADE" in source
-    assert "CREATE INDEX IF NOT EXISTS idx_roms_drone_system" in source
-    assert "CREATE INDEX IF NOT EXISTS idx_actions_drone_status" in source
-    assert "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery" in source
-    assert "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received" in source
-    assert "CREATE INDEX IF NOT EXISTS idx_events_drone_received" in source
-    assert "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received" in source
-    assert "class _TimedCursor" in source
-    assert "PostgreSQL query operation=%s duration_ms=%.2f" in source
-    assert "OVERMIND_POSTGRES_QUERY_LOG_PARAMS" in source
-    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected" in source
-    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in source
-    assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in source
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in source
-    assert "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint" in source
-    assert "def store_device_emulator_configs" in source
-    assert "def get_device_emulator_configs" in source
-    assert "lower(relative_path) NOT LIKE '%%/log/%%'" in source
-    assert "lower(relative_path) NOT LIKE '%%/logs/%%'" in source
-    assert "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending" in source
-    assert "if not _persist_json_app_state_enabled():\n            return None" in source
-    assert "relational = self._load_relational_state(cur)" not in source
-    assert "def list_user_notifications" in source
-    assert "def list_user_devices" in source
-    assert "WHERE g.drone_id = ANY(%s)" in source
-    assert "WHERE n.swarm_id = ANY(%s)" in source
-    assert "WHERE user_id = ANY(%s) OR swarm_id = ANY(%s)" in source
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in migration_sql, f"Missing table: {table_name}"
+    assert "REFERENCES users(id) ON DELETE CASCADE" in migration_sql
+    assert "REFERENCES drones(id) ON DELETE CASCADE" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_roms_drone_system" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_actions_drone_status" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received" in migration_sql
+    assert "OVERMIND_RESET_RELATIONAL_SCHEMA" in store_source
+    assert "yoyo" in store_source
+    assert "CREATE INDEX IF NOT EXISTS idx_events_drone_received" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received" in migration_sql
+    assert "class _TimedCursor" in store_source
+    assert "PostgreSQL query operation=%s duration_ms=%.2f" in store_source
+    assert "OVERMIND_POSTGRES_QUERY_LOG_PARAMS" in store_source
+    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected" in migration_sql
+    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in migration_sql
+    assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in migration_sql
+    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in migration_sql
+    assert "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint" in migration_sql
+    assert "def store_device_emulator_configs" in store_source
+    assert "def get_device_emulator_configs" in store_source
+    assert "lower(relative_path) NOT LIKE '%%/log/%%'" in store_source
+    assert "lower(relative_path) NOT LIKE '%%/logs/%%'" in store_source
+    assert "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending" in migration_sql
+    assert "if not _persist_json_app_state_enabled():\n            return None" in store_source
+    assert "relational = self._load_relational_state(cur)" not in store_source
+    assert "def list_user_notifications" in store_source
+    assert "def list_user_devices" in store_source
+    assert "WHERE g.drone_id = ANY(%s)" in store_source
+    assert "WHERE n.swarm_id = ANY(%s)" in store_source
+    assert "WHERE user_id = ANY(%s) OR swarm_id = ANY(%s)" in store_source
 
 
 def test_postgres_store_materializes_state_and_assets_into_relational_tables():
