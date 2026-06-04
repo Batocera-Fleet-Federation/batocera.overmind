@@ -142,13 +142,16 @@ class CapturedStream:
         self.encoding = getattr(wrapped, "encoding", "utf-8")
         self.errors = getattr(wrapped, "errors", "replace")
 
-    def write(self, data: object) -> int:
+    def write(self, data: object, capture: bool = True) -> int:
         text = str(data)
-        with self._lock:
-            self._pending += text
-            while "\n" in self._pending:
-                line, self._pending = self._pending.split("\n", 1)
-                self.lines.append(line)
+        # ``capture=False`` still forwards to the real stream (so the line reaches
+        # CloudWatch) but keeps it out of the bounded tail shown in the admin UI.
+        if capture:
+            with self._lock:
+                self._pending += text
+                while "\n" in self._pending:
+                    line, self._pending = self._pending.split("\n", 1)
+                    self.lines.append(line)
         return self.wrapped.write(text)
 
     def flush(self) -> None:
@@ -228,11 +231,12 @@ class CapturedLoggingHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if _STREAM_LOG_CAPTURE is None:
             return
-        if _is_db_query_log_record(record):
-            return
         try:
             message = self.format(record)
-            _STREAM_LOG_CAPTURE.stderr.write(message + "\n")
+            # All log records are written to stderr (never stdout). Per-query
+            # PostgreSQL timing noise still reaches CloudWatch but is excluded
+            # from the bounded tail shown in the admin UI.
+            _STREAM_LOG_CAPTURE.stderr.write(message + "\n", capture=not _is_db_query_log_record(record))
         except Exception:
             pass
 
@@ -252,10 +256,20 @@ def install_stream_log_capture() -> None:
         return
     _STREAM_LOG_CAPTURE = StreamLogCapture(OVERMIND_LOG_CAPTURE_LINES)
     _STREAM_LOG_CAPTURE.install()
+    root = logging.getLogger()
+    # The AWS Lambda runtime attaches a root handler that emits log records to
+    # stdout. Drop pre-existing handlers so application logs (warnings, errors,
+    # and tracebacks) flow only through CapturedLoggingHandler -> stderr, leaving
+    # stdout for ordinary operational output. Records still reach CloudWatch
+    # because the captured stderr forwards to the real stderr file descriptor.
+    for existing in list(root.handlers):
+        root.removeHandler(existing)
     handler = CapturedLoggingHandler()
     handler.setLevel(logging.INFO)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-    logging.getLogger().addHandler(handler)
+    root.addHandler(handler)
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
 
 
 def stream_log_snapshot() -> dict:
