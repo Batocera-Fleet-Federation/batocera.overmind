@@ -163,6 +163,19 @@ def _format_params_for_log(params) -> str:
         return "unavailable"
 
 
+def _is_missing_column_error(error: BaseException) -> bool:
+    """Detect a PostgreSQL "undefined column" error (SQLSTATE 42703).
+
+    Raised when deployed code SELECTs a column the database does not yet have —
+    i.e. schema drift after a deploy whose migration has not landed. Matched by
+    SQLSTATE so it works without importing psycopg at module load time.
+    """
+    sqlstate = getattr(error, "sqlstate", None) or getattr(error, "pgcode", None)
+    if sqlstate == "42703":
+        return True
+    return error.__class__.__name__ == "UndefinedColumn"
+
+
 def database_url() -> Optional[str]:
     value = os.getenv("OVERMIND_DATABASE_URL") or os.getenv("DATABASE_URL")
     if value:
@@ -1667,6 +1680,36 @@ class PostgresMetadataStore:
             "last_speed_sample": _decode_state(last_speed_sample) if isinstance(last_speed_sample, dict) else last_speed_sample,
         }
 
+    def _force_schema_recheck(self) -> None:
+        """Re-run pending migrations after schema drift is detected at read time."""
+        self._ready = False
+        try:
+            self.ensure_schema()
+        except Exception:
+            logger.warning("Schema re-check after drift failed", exc_info=True)
+
+    def _with_schema_self_heal(self, operation: str, fn):
+        """Run a read query, recovering once from post-deploy schema drift.
+
+        If ``fn`` fails only because the database is missing a column the code
+        expects, re-run migrations and retry a single time. This prevents one
+        column that has not migrated yet from blanking the entire fleet view —
+        the read recovers automatically once the corrected migration lands.
+        Any other error (and a still-failing retry) propagates unchanged.
+        """
+        try:
+            return fn()
+        except Exception as error:
+            if not _is_missing_column_error(error):
+                raise
+            logger.warning(
+                "Schema drift detected during %s (%s); re-running migrations and retrying once",
+                operation,
+                error,
+            )
+            self._force_schema_recheck()
+            return fn()
+
     def _select_device_sql(self, where_clause: str) -> str:
         return f"""
             SELECT d.id, d.device_id, d.device_name, d.user_id, d.swarm_id, d.approval_status,
@@ -1729,22 +1772,26 @@ class PostgresMetadataStore:
         """
 
     def get_device(self, internal_id: str) -> Optional[dict]:
-        conn = self._core_connection(ensure_schema=False)
-        if conn is None:
-            return None
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(self._select_device_sql("d.id = %s"), (internal_id,))
-                return self._device_from_row(cur.fetchone())
+        def _query():
+            conn = self._core_connection(ensure_schema=False)
+            if conn is None:
+                return None
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(self._select_device_sql("d.id = %s"), (internal_id,))
+                    return self._device_from_row(cur.fetchone())
+        return self._with_schema_self_heal("get_device", _query)
 
     def get_device_by_device_id(self, device_id: str) -> Optional[dict]:
-        conn = self._core_connection(ensure_schema=False)
-        if conn is None:
-            return None
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(self._select_device_sql("d.device_id = %s"), (device_id,))
-                return self._device_from_row(cur.fetchone())
+        def _query():
+            conn = self._core_connection(ensure_schema=False)
+            if conn is None:
+                return None
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(self._select_device_sql("d.device_id = %s"), (device_id,))
+                    return self._device_from_row(cur.fetchone())
+        return self._with_schema_self_heal("get_device_by_device_id", _query)
 
     def update_device_authorization(
         self,
@@ -1901,9 +1948,6 @@ class PostgresMetadataStore:
                     if isinstance(pr, dict):
                         pr["checked_at"] = self._dt(pr.get("checked_at"))
                 return cached
-        conn = self._core_connection(ensure_schema=False)
-        if conn is None:
-            return None
         where = """
             d.approval_status = 'approved'
             AND (
@@ -1921,11 +1965,18 @@ class PostgresMetadataStore:
         if swarm_id:
             where += " AND d.swarm_id = %s"
             params.append(swarm_id)
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(self._select_device_sql(where) + " ORDER BY d.device_name ASC, d.device_id ASC", tuple(params))
-                result = [device for device in (self._device_from_row(row) for row in cur.fetchall()) if device]
-        if _cache:
+
+        def _query():
+            conn = self._core_connection(ensure_schema=False)
+            if conn is None:
+                return None
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(self._select_device_sql(where) + " ORDER BY d.device_name ASC, d.device_id ASC", tuple(params))
+                    return [device for device in (self._device_from_row(row) for row in cur.fetchall()) if device]
+
+        result = self._with_schema_self_heal("list_user_devices", _query)
+        if _cache and result is not None:
             _cache.set(cache_key, result, ttl=15)
         return result
 
@@ -1935,18 +1986,21 @@ class PostgresMetadataStore:
         oldest_checked_first: bool = True,
     ) -> Optional[list[dict]]:
         """Return all approved Drones, ordered for round-robin reachability polling."""
-        conn = self._core_connection(ensure_schema=False)
-        if conn is None:
-            return None
         order = "n.checked_at ASC NULLS FIRST, d.registered_at ASC" if oldest_checked_first else "d.registered_at ASC"
         limit_clause = f"LIMIT {max(1, int(limit))}" if limit else ""
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    self._select_device_sql("d.approval_status = 'approved' AND d.removed_at IS NULL")
-                    + f" ORDER BY {order} {limit_clause}"
-                )
-                return [d for d in (self._device_from_row(row) for row in cur.fetchall()) if d]
+
+        def _query():
+            conn = self._core_connection(ensure_schema=False)
+            if conn is None:
+                return None
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        self._select_device_sql("d.approval_status = 'approved' AND d.removed_at IS NULL")
+                        + f" ORDER BY {order} {limit_clause}"
+                    )
+                    return [d for d in (self._device_from_row(row) for row in cur.fetchall()) if d]
+        return self._with_schema_self_heal("list_all_approved_devices", _query)
 
     def update_device_reachability(self, drone_id: str, result: dict) -> bool:
         """Write a probe result directly to drone_network_state without in-memory state."""
@@ -1984,9 +2038,6 @@ class PostgresMetadataStore:
         return True
 
     def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
-        conn = self._core_connection(ensure_schema=False)
-        if conn is None:
-            return None
         where = """
             d.device_id = %s
             AND d.approval_status = 'approved'
@@ -2005,10 +2056,16 @@ class PostgresMetadataStore:
         if swarm_id:
             where += " AND d.swarm_id = %s"
             params.append(swarm_id)
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(self._select_device_sql(where), tuple(params))
-                return self._device_from_row(cur.fetchone())
+
+        def _query():
+            conn = self._core_connection(ensure_schema=False)
+            if conn is None:
+                return None
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(self._select_device_sql(where), tuple(params))
+                    return self._device_from_row(cur.fetchone())
+        return self._with_schema_self_heal("user_can_access_device", _query)
 
     def count_device_roms(self, device_id: str) -> Optional[int]:
         conn = self._core_connection(ensure_schema=False)
