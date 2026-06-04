@@ -866,12 +866,7 @@ def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = No
             not reachability.get("resolvable")
             or str(reachability.get("public_ip") or "").strip() != public_ip
         ):
-            reachability = refresh_device_public_reachability(source_device, force=True)
-            if (
-                not reachability.get("resolvable")
-                or str(reachability.get("public_ip") or "").strip() != public_ip
-            ):
-                continue
+            continue
         eligible.append({
             "device_id": source_id,
             "device_name": source.get("device_name") or source_device.get("device_name") or source_id,
