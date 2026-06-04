@@ -227,11 +227,22 @@ class CapturedLoggingHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if _STREAM_LOG_CAPTURE is None:
             return
+        if _is_db_query_log_record(record):
+            return
         try:
             message = self.format(record)
             _STREAM_LOG_CAPTURE.stderr.write(message + "\n")
         except Exception:
             pass
+
+
+def _is_db_query_log_record(record: logging.LogRecord) -> bool:
+    """Exclude per-query PostgreSQL timing logs from the captured runtime logs."""
+    if record.name == "overmind.postgres_store":
+        message = str(record.msg or "")
+        if message.startswith("PostgreSQL query"):
+            return True
+    return False
 
 
 def install_stream_log_capture() -> None:

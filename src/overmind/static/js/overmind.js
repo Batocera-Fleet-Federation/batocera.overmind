@@ -4211,6 +4211,19 @@
                 }
             }
 
+            // Update a log <pre> in place so refreshes don't reset the scroll
+            // position. If the user was scrolled to the bottom we keep it pinned
+            // to the bottom; otherwise we preserve their exact scroll offset.
+            function updateLogPane(pre, text) {
+                if (!pre) return;
+                const wasAtBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+                const previousScrollTop = pre.scrollTop;
+                if (pre.textContent !== text) {
+                    pre.textContent = text;
+                }
+                pre.scrollTop = wasAtBottom ? pre.scrollHeight : previousScrollTop;
+            }
+
             async function loadSuperAdminLogs() {
                 const container = document.getElementById('super-admin-logs');
                 if (!container || !isSuperAdmin()) return;
@@ -4219,23 +4232,31 @@
                     if (!response.ok) throw new Error('Failed to load runtime logs');
                     const payload = await response.json();
                     const logs = payload.logs || {};
-                    container.innerHTML = `
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                            <h4 class="h5 mb-0">Overmind Runtime Logs</h4>
-                            <span class="badge text-bg-secondary">last ${Number(logs.max_lines || 0)} lines</span>
-                        </div>
-                        <div class="row g-3">
-                            <div class="col-12 col-xl-6">
+                    // Build the static structure once; subsequent refreshes only
+                    // update the text content of the panes (see updateLogPane).
+                    if (!document.getElementById('super-admin-log-stdout')) {
+                        container.innerHTML = `
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <h4 class="h5 mb-0">Overmind Runtime Logs</h4>
+                                <span class="badge text-bg-secondary" id="super-admin-log-maxlines"></span>
+                            </div>
+                            <div class="mb-3">
                                 <div class="small text-muted mb-1">stdout</div>
-                                <pre class="mono bg-dark text-light p-3 rounded mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;">${escapeHtml(logs.stdout || 'No stdout captured yet.')}</pre>
+                                <pre id="super-admin-log-stdout" class="mono bg-dark text-light p-3 rounded mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;"></pre>
                             </div>
-                            <div class="col-12 col-xl-6">
+                            <div>
                                 <div class="small text-muted mb-1">stderr</div>
-                                <pre class="mono bg-dark text-light p-3 rounded mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;">${escapeHtml(logs.stderr || 'No stderr captured yet.')}</pre>
+                                <pre id="super-admin-log-stderr" class="mono bg-dark text-light p-3 rounded mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;"></pre>
                             </div>
-                        </div>
-                        <div class="small text-muted mt-2">Captured: ${logs.captured_at ? new Date(logs.captured_at).toLocaleString() : 'n/a'}</div>
-                    `;
+                            <div class="small text-muted mt-2" id="super-admin-log-captured"></div>
+                        `;
+                    }
+                    const maxLinesBadge = document.getElementById('super-admin-log-maxlines');
+                    if (maxLinesBadge) maxLinesBadge.textContent = `last ${Number(logs.max_lines || 0)} lines`;
+                    updateLogPane(document.getElementById('super-admin-log-stdout'), logs.stdout || 'No stdout captured yet.');
+                    updateLogPane(document.getElementById('super-admin-log-stderr'), logs.stderr || 'No stderr captured yet.');
+                    const capturedEl = document.getElementById('super-admin-log-captured');
+                    if (capturedEl) capturedEl.textContent = `Captured: ${logs.captured_at ? new Date(logs.captured_at).toLocaleString() : 'n/a'}`;
                 } catch (error) {
                     console.error('Error loading runtime logs:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load runtime logs.</div>';

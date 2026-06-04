@@ -805,9 +805,10 @@ class PostgresMetadataStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, email, password_hash, email_verified, is_active, auth_provider,
-                           username, full_name, avatar_data_url, created_at
-                    FROM users
+                    SELECT u.id, u.email, u.password_hash, u.email_verified, u.is_active, u.auth_provider,
+                           p.username, p.full_name, p.avatar_data_url, u.created_at
+                    FROM users u
+                    LEFT JOIN user_profiles p ON p.user_id = u.id
                     """
                 )
                 for user_id, email, password_hash, email_verified, is_active, auth_provider, username, full_name, avatar_data_url, created_at in cur.fetchall():
