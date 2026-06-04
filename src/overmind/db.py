@@ -1637,6 +1637,15 @@ class OvermindDatabase:
                 clean_info = dict(system_info)
                 clean_info["last_system_info_update"] = datetime.utcnow()
                 device["system_info"] = clean_info
+        if postgres_store.available() and any([system_info, network, api_port, scheme, reachable_url]):
+            postgres_store.update_device_heartbeat_data(
+                internal_id,
+                system_info=system_info,
+                network=network,
+                api_port=api_port,
+                scheme=scheme,
+                reachable_url=reachable_url,
+            )
 
     def update_device_status_notifications(self, offline_seconds: int, limit: int = 0) -> None:
         cutoff = datetime.utcnow() - timedelta(seconds=max(1, int(offline_seconds)))

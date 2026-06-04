@@ -54,9 +54,9 @@ def _postgres_query_logging_enabled() -> bool:
 
 def _postgres_query_log_min_ms() -> float:
     try:
-        return max(0.0, float(os.getenv("OVERMIND_POSTGRES_QUERY_LOG_MIN_MS", "0")))
+        return max(0.0, float(os.getenv("OVERMIND_POSTGRES_QUERY_LOG_MIN_MS", "2000")))
     except (TypeError, ValueError):
-        return 0.0
+        return 2000.0
 
 
 def _postgres_query_log_sql_chars() -> int:
@@ -206,6 +206,96 @@ class PostgresMetadataStore:
         elif not self.url:
             return None
         return self._connect()
+
+    def update_device_heartbeat_data(
+        self,
+        internal_id: str,
+        *,
+        system_info: Optional[dict] = None,
+        network: Optional[dict] = None,
+        api_port: Optional[int] = None,
+        scheme: Optional[str] = None,
+        reachable_url: Optional[str] = None,
+    ) -> bool:
+        """Persist heartbeat payload fields (system info, network addresses, port/scheme) to DB."""
+        if not internal_id or not any([system_info, network, api_port, scheme, reachable_url]):
+            return False
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                if system_info and isinstance(system_info, dict):
+                    info = system_info
+                    cur.execute(
+                        """
+                        INSERT INTO drone_system_info
+                            (drone_id, hostname, model, system_name, architecture, cpu_model, cpu_cores,
+                             cpu_threads, cpu_max_frequency, memory_available, memory_total,
+                             batocera_version, container, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                        ON CONFLICT (drone_id) DO UPDATE SET
+                            hostname          = COALESCE(EXCLUDED.hostname,          drone_system_info.hostname),
+                            model             = COALESCE(EXCLUDED.model,             drone_system_info.model),
+                            system_name       = COALESCE(EXCLUDED.system_name,       drone_system_info.system_name),
+                            architecture      = COALESCE(EXCLUDED.architecture,      drone_system_info.architecture),
+                            cpu_model         = COALESCE(EXCLUDED.cpu_model,         drone_system_info.cpu_model),
+                            cpu_cores         = COALESCE(EXCLUDED.cpu_cores,         drone_system_info.cpu_cores),
+                            cpu_threads       = COALESCE(EXCLUDED.cpu_threads,       drone_system_info.cpu_threads),
+                            cpu_max_frequency = COALESCE(EXCLUDED.cpu_max_frequency, drone_system_info.cpu_max_frequency),
+                            memory_available  = COALESCE(EXCLUDED.memory_available,  drone_system_info.memory_available),
+                            memory_total      = COALESCE(EXCLUDED.memory_total,      drone_system_info.memory_total),
+                            batocera_version  = COALESCE(EXCLUDED.batocera_version,  drone_system_info.batocera_version),
+                            container         = COALESCE(EXCLUDED.container,         drone_system_info.container),
+                            updated_at        = now()
+                        """,
+                        (
+                            internal_id,
+                            info.get("hostname"),
+                            info.get("model"),
+                            info.get("system") or info.get("system_name"),
+                            info.get("architecture"),
+                            info.get("cpu_model"),
+                            info.get("cpu_cores"),
+                            info.get("cpu_threads"),
+                            info.get("cpu_max_frequency"),
+                            info.get("memory_available"),
+                            info.get("memory_total"),
+                            info.get("batocera_version"),
+                            info.get("container"),
+                        ),
+                    )
+                if network and isinstance(network, dict):
+                    for addr_type in ("ipv4", "ipv6"):
+                        for addr in (network.get(addr_type) or []):
+                            if addr:
+                                cur.execute(
+                                    "INSERT INTO drone_network_addresses (drone_id, address_type, address)"
+                                    " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                                    (internal_id, addr_type, str(addr)),
+                                )
+                    for addr_type, key in (("hostname", "hostname"), ("mac", "mac_address")):
+                        val = network.get(key)
+                        if val:
+                            cur.execute(
+                                "INSERT INTO drone_network_addresses (drone_id, address_type, address)"
+                                " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                                (internal_id, addr_type, str(val)),
+                            )
+                if any([api_port, scheme, reachable_url]):
+                    cur.execute(
+                        """
+                        INSERT INTO drone_network_state (drone_id, api_port, scheme, reachable_url, updated_at)
+                        VALUES (%s, %s, %s, %s, now())
+                        ON CONFLICT (drone_id) DO UPDATE SET
+                            api_port     = COALESCE(EXCLUDED.api_port,     drone_network_state.api_port),
+                            scheme       = COALESCE(EXCLUDED.scheme,       drone_network_state.scheme),
+                            reachable_url = COALESCE(EXCLUDED.reachable_url, drone_network_state.reachable_url),
+                            updated_at   = now()
+                        """,
+                        (internal_id, api_port, scheme or None, reachable_url or None),
+                    )
+        return True
 
     def touch_device_last_seen(self, internal_id: str) -> bool:
         """Update a Drone's liveness timestamp with a minimal write path."""
