@@ -1083,10 +1083,16 @@ class OvermindDatabase:
         return user
 
     def update_swarm_name(self, swarm_id: str, name: str) -> Optional[dict]:
+        cleaned = name.strip()
+        if postgres_store.available():
+            relational = postgres_store.update_swarm_name(swarm_id, cleaned)
+            if relational:
+                self.swarms[swarm_id] = relational
+                return relational
         swarm = self.swarms.get(swarm_id)
         if not swarm:
             return None
-        swarm["name"] = name.strip()
+        swarm["name"] = cleaned
         return swarm
 
     def update_user_fleet_settings(self, user_id: str, fleet_settings: dict) -> Optional[dict]:
@@ -1820,14 +1826,36 @@ class OvermindDatabase:
         device["token_rotated_at"] = datetime.utcnow()
         return {"device": device, "token": raw_token}
 
-    def set_device_authorization_token(self, user_id: str, device_id: str, token_id: Optional[str]) -> bool:
+    def set_device_authorization_token(
+        self,
+        user_id: str,
+        device_id: str,
+        token_id: Optional[str],
+        token_hash: Optional[str] = None,
+        device_name: Optional[str] = None,
+    ) -> bool:
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
             return False
         previous = device.get("authorization_token_id")
         if previous and previous != token_id:
             self.revoke_integration_token(user_id, previous)
+        if postgres_store.available():
+            relational = postgres_store.update_device_authorization(
+                user_id,
+                device_id,
+                authorization_token_id=token_id,
+                drone_token_hash=token_hash,
+                device_name=device_name,
+            )
+            if relational:
+                self.devices[relational["id"]] = relational
+                return True
         device["authorization_token_id"] = token_id
+        if token_hash:
+            device["drone_token_hash"] = token_hash
+        if device_name:
+            device["device_name"] = device_name
         return True
 
     def update_device_auto_sync_policy(self, user_id: str, device_id: str, enabled: bool, systems: list) -> Optional[dict]:

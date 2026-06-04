@@ -1420,10 +1420,14 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
         device = db.get_device_by_device_id(device_data.device_id)
         if not device:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-        if device.get("authorization_token_id") != integration_token.get("id"):
-            device["drone_token_hash"] = hash_drone_token(raw_auth_token)
-        db.set_device_authorization_token(user["id"], device_data.device_id, integration_token.get("id"))
-        device["device_name"] = device_data.device_name
+        token_hash = hash_drone_token(raw_auth_token)
+        db.set_device_authorization_token(
+            user["id"],
+            device_data.device_id,
+            integration_token.get("id"),
+            token_hash=token_hash,
+            device_name=device_data.device_name,
+        )
         db.update_device_last_seen(
             device["id"],
             network=batocera_info.get("network") if isinstance(batocera_info.get("network"), dict) else None,

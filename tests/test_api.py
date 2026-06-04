@@ -4448,6 +4448,62 @@ def test_profile_update_writes_through_direct_relational_store(monkeypatch):
     assert db.users["profile-user"]["username"] == "new-name"
 
 
+def test_swarm_name_update_writes_through_direct_relational_store(monkeypatch):
+    calls = []
+
+    def update_swarm_name(swarm_id, name):
+        calls.append((swarm_id, name))
+        return {"id": swarm_id, "owner_id": "user-1", "name": name, "is_public": False, "created_at": datetime.utcnow()}
+
+    monkeypatch.setattr(db_module.postgres_store, "available", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "store_app_state", lambda state: None)
+    monkeypatch.setattr(db_module.postgres_store, "update_swarm_name", update_swarm_name)
+
+    result = db.update_swarm_name("swarm-1", "  Arcade Fleet  ")
+
+    assert result["name"] == "Arcade Fleet"
+    assert calls == [("swarm-1", "Arcade Fleet")]
+    assert db.swarms["swarm-1"]["name"] == "Arcade Fleet"
+
+
+def test_device_authorization_update_writes_hash_through_direct_relational_store(monkeypatch):
+    existing = {
+        "id": "device-internal-1",
+        "device_id": "drone-a",
+        "device_name": "Drone A",
+        "user_id": "user-1",
+        "authorization_token_id": "old-token",
+        "drone_token_hash": "old-hash",
+    }
+    calls = []
+
+    def update_device_authorization(user_id, device_id, *, authorization_token_id, drone_token_hash=None, device_name=None):
+        calls.append((user_id, device_id, authorization_token_id, drone_token_hash, device_name))
+        return {
+            **existing,
+            "authorization_token_id": authorization_token_id,
+            "drone_token_hash": drone_token_hash,
+            "device_name": device_name,
+        }
+
+    monkeypatch.setattr(db_module.postgres_store, "available", lambda: True)
+    monkeypatch.setattr(db_module.postgres_store, "store_app_state", lambda state: None)
+    monkeypatch.setattr(db_module.postgres_store, "get_device_by_device_id", lambda device_id: existing)
+    monkeypatch.setattr(db_module.postgres_store, "update_device_authorization", update_device_authorization)
+    monkeypatch.setattr(db_module.postgres_store, "revoke_integration_token", lambda user_id, token_id: True)
+
+    assert db.set_device_authorization_token(
+        "user-1",
+        "drone-a",
+        "new-token",
+        token_hash="new-hash",
+        device_name="Renamed Drone",
+    ) is True
+
+    assert calls == [("user-1", "drone-a", "new-token", "new-hash", "Renamed Drone")]
+    assert db.devices["device-internal-1"]["drone_token_hash"] == "new-hash"
+
+
 def test_integration_token_claim_prefers_direct_relational_store(monkeypatch):
     user = {
         "id": "token-user",

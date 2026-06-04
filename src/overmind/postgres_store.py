@@ -1607,6 +1607,38 @@ class PostgresMetadataStore:
                 cur.execute(self._select_device_sql("d.device_id = %s"), (device_id,))
                 return self._device_from_row(cur.fetchone())
 
+    def update_device_authorization(
+        self,
+        user_id: str,
+        device_id: str,
+        *,
+        authorization_token_id: Optional[str],
+        drone_token_hash: Optional[str] = None,
+        device_name: Optional[str] = None,
+    ) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE drones
+                    SET authorization_token_id = %s,
+                        drone_token_hash = COALESCE(%s, drone_token_hash),
+                        device_name = COALESCE(%s, device_name)
+                    WHERE user_id = %s AND device_id = %s
+                    RETURNING id
+                    """,
+                    (authorization_token_id, drone_token_hash, device_name, user_id, device_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+        if _cache:
+            _cache.invalidate_user_devices(user_id)
+        return self.get_device_by_device_id(device_id)
+
     def list_user_swarms(self, user_id: str) -> Optional[list[dict]]:
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
@@ -1649,6 +1681,32 @@ class PostgresMetadataStore:
                 if not row:
                     return None
                 return {"swarm_id": row[0], "user_id": row[1], "role": row[2], "created_at": row[3]}
+
+    def update_swarm_name(self, swarm_id: str, name: str) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE swarms
+                    SET name = %s, updated_at = now()
+                    WHERE id = %s
+                    RETURNING id, owner_user_id, name, is_public, created_at
+                    """,
+                    (name, swarm_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "owner_id": row[1],
+                    "name": row[2],
+                    "is_public": bool(row[3]),
+                    "created_at": row[4],
+                }
 
     def default_swarm_id(self, user_id: str) -> Optional[str]:
         conn = self._core_connection(ensure_schema=False)
