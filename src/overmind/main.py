@@ -9,7 +9,7 @@ import ipaddress
 import logging
 import os
 import secrets
-import socket
+import ssl
 import sys
 import threading
 import time
@@ -19,6 +19,7 @@ import urllib.request
 import uuid
 import json
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -92,13 +93,13 @@ SUPPORTED_DEVICE_ACTIONS = {
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
 PUBLIC_PEER_PROBE_INTERVAL_SECONDS = int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "60"))
-PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "3"))
-PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS", "0.2"))
+PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "1"))
 PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN = max(0, int(os.getenv(
     "PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN",
-    "3" if _LAMBDA_RUNTIME_ENV else "0",
+    "0",
 )))
-PUBLIC_PEER_PROBE_PORTS = (8443, 443, 8080, 5000)
+PUBLIC_PEER_PROBE_PORTS = (443,)
+PUBLIC_PEER_PROBE_PATH = os.getenv("PUBLIC_PEER_PROBE_PATH", "/health")
 NOTIFICATION_DELIVERY_INTERVAL_SECONDS = int(os.getenv("NOTIFICATION_DELIVERY_INTERVAL_SECONDS", "180"))
 NOTIFICATION_DELIVERY_MAX_NOTIFICATIONS_PER_RUN = max(0, int(os.getenv(
     "NOTIFICATION_DELIVERY_MAX_NOTIFICATIONS_PER_RUN",
@@ -340,88 +341,63 @@ def run_https_app() -> None:
 
 
 def probe_device_public_endpoint(device: dict) -> dict:
-    """Check whether a Drone's reported endpoint accepts connections on any known port."""
+    """Check whether a Drone's public HTTPS health endpoint returns HTTP 200."""
     checked_at = datetime.utcnow()
     network = device.get("network") if isinstance(device.get("network"), dict) else {}
-
-    # Build ordered candidate list: public IP first, then reported IPv4/IPv6 addresses.
-    candidates: list[str] = []
     public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
-    if public_ip:
-        candidates.append(public_ip)
-    for ip in (network.get("ipv4") if isinstance(network.get("ipv4"), list) else []):
-        ip = str(ip or "").strip()
-        if ip and ip not in candidates:
-            candidates.append(ip)
-    for ip in (network.get("ipv6") if isinstance(network.get("ipv6"), list) else []):
-        ip = str(ip or "").strip()
-        if ip and ip not in candidates:
-            candidates.append(ip)
-
-    try:
-        port = int(device.get("api_port") or 8443)
-    except (TypeError, ValueError):
-        port = 0
     result = {
         "resolvable": False,
         "public_ip": public_ip or None,
-        "api_port": port if 1 <= port <= 65535 else None,
+        "api_port": 443,
         "checked_at": checked_at,
         "latency_ms": None,
         "failure_reason": None,
     }
 
-    valid_candidates = []
-    for raw in candidates:
-        try:
-            ipaddress.ip_address(raw.strip("[]"))
-            valid_candidates.append(raw)
-        except ValueError:
-            continue
-
-    if not valid_candidates:
-        result["failure_reason"] = "No valid IP addresses reported"
+    try:
+        parsed_ip = ipaddress.ip_address(public_ip.strip("[]"))
+    except ValueError:
+        result["failure_reason"] = "No valid public IP address reported"
+        return result
+    if not parsed_ip.is_global:
+        result["failure_reason"] = "Reported public IP is not globally routable"
         return result
 
-    failures = []
     started = time.monotonic()
-    timeout = max(0.05, min(PUBLIC_PEER_PROBE_TIMEOUT_SECONDS, PUBLIC_PEER_PROBE_SCAN_TIMEOUT_SECONDS))
-
-    def try_port(candidate_ip: str, candidate_port: int):
-        attempt_started = time.monotonic()
-        try:
-            connection = socket.create_connection((candidate_ip, candidate_port), timeout=timeout)
-            connection.close()
-        except OSError as error:
-            return None, f"{candidate_ip}:{candidate_port}: {str(error) or error.__class__.__name__}"
-        return {
-            "ip": candidate_ip,
-            "port": candidate_port,
-            "latency_ms": int((time.monotonic() - attempt_started) * 1000),
-        }, None
-
-    for candidate_ip in valid_candidates:
-        for candidate_port in PUBLIC_PEER_PROBE_PORTS:
-            found, failure = try_port(candidate_ip, candidate_port)
-            if failure and len(failures) < 4:
-                failures.append(failure)
-            if not found:
-                continue
+    timeout = max(0.05, PUBLIC_PEER_PROBE_TIMEOUT_SECONDS)
+    host = public_ip
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    path = "/" + str(PUBLIC_PEER_PROBE_PATH or "/health").lstrip("/")
+    url = f"https://{host}:443{path}"
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout,
+            context=ssl._create_unverified_context(),
+        ) as response:
+            status_code = int(getattr(response, "status", response.getcode()))
+        result["status_code"] = status_code
+        result["latency_ms"] = int((time.monotonic() - started) * 1000)
+        if status_code == 200:
             result["resolvable"] = True
-            result["public_ip"] = found["ip"]
-            result["api_port"] = found["port"]
-            result["discovered_port"] = found["port"]
-            result["latency_ms"] = found["latency_ms"]
-            result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
-            return result
-
-    result["failure_reason"] = "; ".join(failures) if failures else "No reachable Drone API port found"
+            result["discovered_port"] = 443
+            result["reachable_url"] = f"https://{host}"
+        else:
+            result["failure_reason"] = f"Health check returned HTTP {status_code}"
+    except urllib.error.HTTPError as error:
+        result["status_code"] = int(error.code)
+        result["failure_reason"] = f"Health check returned HTTP {error.code}"
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        reason = getattr(error, "reason", None) or str(error) or error.__class__.__name__
+        result["failure_reason"] = f"Health check failed: {reason}"
     result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
     return result
 
 
 def public_reachability_already_resolved(device: dict) -> bool:
-    """Return whether a Drone already has a stored successful endpoint that matches its current reported IPs."""
+    """Return whether a stored health result matches the current public IP."""
     reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
     if not reachability.get("resolvable"):
         return False
@@ -429,7 +405,7 @@ def public_reachability_already_resolved(device: dict) -> bool:
         port = int(reachability.get("api_port") or device.get("api_port") or 0)
     except (TypeError, ValueError):
         return False
-    if port not in PUBLIC_PEER_PROBE_PORTS:
+    if port != 443:
         return False
     resolved_ip = str(reachability.get("public_ip") or "").strip()
     if not resolved_ip:
@@ -439,19 +415,11 @@ def public_reachability_already_resolved(device: dict) -> bool:
     public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
     if public_ip:
         candidate_ips.add(public_ip)
-    for ip in (network.get("ipv4") if isinstance(network.get("ipv4"), list) else []):
-        ip = str(ip or "").strip()
-        if ip:
-            candidate_ips.add(ip)
-    for ip in (network.get("ipv6") if isinstance(network.get("ipv6"), list) else []):
-        ip = str(ip or "").strip()
-        if ip:
-            candidate_ips.add(ip)
     return resolved_ip in candidate_ips
 
 
 def poll_public_drone_reachability_once() -> None:
-    """Probe peer endpoints for all approved Drones."""
+    """Probe public health endpoints for all approved Drones."""
     if postgres_store.available():
         devices = postgres_store.list_all_approved_devices(
             limit=PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN,
@@ -466,16 +434,22 @@ def poll_public_drone_reachability_once() -> None:
         devices.sort(key=lambda d: str((d.get("public_reachability") or {}).get("checked_at") or ""))
         if PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN:
             devices = devices[:PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN]
-    for device in devices:
+    def probe_and_store(device: dict) -> None:
         if device.get("approval_status", "approved") != "approved":
-            continue
-        if public_reachability_already_resolved(device):
-            continue
+            return
         result = probe_device_public_endpoint(device)
         if postgres_store.available():
             postgres_store.update_device_reachability(device["id"], result)
         else:
             db.update_device_public_reachability(device["id"], result)
+
+    if not devices:
+        return
+    max_workers = max(1, len(devices))
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="drone-health") as executor:
+        futures = [executor.submit(probe_and_store, device) for device in devices]
+        for future in as_completed(futures):
+            future.result()
 
 
 def refresh_device_public_reachability(device: dict, *, force: bool = False) -> dict:

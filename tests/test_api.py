@@ -580,7 +580,7 @@ def test_device_status_notifications_limits_devices_per_run(client):
             owner["id"],
             f"status-limit-{index}",
             f"Status Limit {index}",
-            {"network": {"public_ip": f"8.8.8.{index + 1}"}, "api_port": 8443, "scheme": "https"},
+            {"network": {"public_ip": f"8.8.8.{index + 1}"}, "api_port": 443, "scheme": "https"},
             raw_token=f"status-limit-token-{index}",
         )
         device = db.get_device_by_device_id(f"status-limit-{index}")
@@ -1404,9 +1404,9 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
             authorization_token=auth_token,
             device_id="drone-123",
             device_name="Test Drone",
-            api_port=8443,
+            api_port=443,
             scheme="https",
-            reachable_url="https://bff-drone-a:8443",
+            reachable_url="https://bff-drone-a:443",
             batocera_info={
                 "model": "Test Model",
                 "system": "Linux",
@@ -1453,7 +1453,7 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
     assert devices_response.status_code == 200
     device = devices_response.json()["devices"][0]
     assert device["device_id"] == "drone-123"
-    assert device["reachable_url"] == "https://bff-drone-a:8443"
+    assert device["reachable_url"] == "https://bff-drone-a:443"
     assert device["certificate"]["public_certificate"].startswith("-----BEGIN CERTIFICATE-----")
     assert device["certificate"]["fingerprint"] == "abc123"
     assert "private_key" not in device["certificate"]
@@ -1461,7 +1461,7 @@ def test_register_device_with_valid_token_requires_approval_then_alive_works(cli
     heartbeat_response = client.post(
         "/api/devices/drone-123/heartbeat",
         headers={"Authorization": f"Bearer {drone_token}"},
-        json={"network": {"ipv4": ["192.168.1.50"]}, "reachable_url": "https://bff-drone-a:8443"},
+        json={"network": {"ipv4": ["192.168.1.50"]}, "reachable_url": "https://bff-drone-a:443"},
     )
     assert heartbeat_response.status_code == 200
 
@@ -3099,19 +3099,28 @@ def test_sync_system_probes_newly_forwarded_public_source(client, monkeypatch):
         json={"email": "probe-sync@example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("probe-sync@example.com")
-    db.create_device(user["id"], "fresh-source", "Fresh Source", {"network": {"public_ip": "8.8.8.8"}, "api_port": 8443, "scheme": "https"}, raw_token="a")
+    db.create_device(user["id"], "fresh-source", "Fresh Source", {"network": {"public_ip": "8.8.8.8"}, "api_port": 443, "scheme": "https"}, raw_token="a")
     db.create_device(user["id"], "fresh-target", "Fresh Target", {"ip_address": "10.0.0.4"}, raw_token="b")
     db.add_roms("fresh-source", "fbneo", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "good"}])
 
-    class FakeConnection:
-        def close(self):
+    class FakeResponse:
+        status = 200
+
+        def getcode(self):
+            return 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
             return None
 
-    def connect(address, timeout):
-        assert address == ("8.8.8.8", 8443)
-        return FakeConnection()
+    def open_url(request, timeout, context):
+        assert request.full_url == "https://8.8.8.8:443/health"
+        assert timeout == 1
+        return FakeResponse()
 
-    monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
 
     response = client.post(
         "/api/devices/fresh-target/sync-system",
@@ -4033,20 +4042,28 @@ def test_public_peer_poll_marks_public_endpoint_resolvable_for_swarm_transfer(cl
         owner["id"],
         "public-drone",
         "Public Drone",
-        {"network": {"public_ip": "8.8.8.8"}, "api_port": 8443, "scheme": "https"},
+        {"network": {"public_ip": "8.8.8.8"}, "api_port": 443, "scheme": "https"},
         raw_token="drone-token",
     )
     calls = []
 
-    class FakeConnection:
-        def close(self):
+    class FakeResponse:
+        status = 200
+
+        def getcode(self):
+            return 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
             return None
 
-    def connect(address, timeout):
-        calls.append((address, timeout))
-        return FakeConnection()
+    def open_url(request, timeout, context):
+        calls.append((request.full_url, timeout))
+        return FakeResponse()
 
-    monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
     overmind_main.poll_public_drone_reachability_once()
 
     response = client.get("/api/devices/public-drone", headers={"Authorization": f"Bearer {token}"})
@@ -4055,42 +4072,37 @@ def test_public_peer_poll_marks_public_endpoint_resolvable_for_swarm_transfer(cl
     assert response.json()["public_reachability"]["public_ip"] == "8.8.8.8"
     swarm_peer = db.get_swarm_for_device("public-drone")[0]
     assert swarm_peer["public_resolvable"] is True
-    assert swarm_peer["public_reachable_url"] == "https://8.8.8.8:8443"
-    assert calls and calls[0][0] == ("8.8.8.8", 8443)
+    assert swarm_peer["public_reachable_url"] == "https://8.8.8.8"
+    assert calls and calls[0] == ("https://8.8.8.8:443/health", 1)
 
 
-def test_public_peer_poll_discovers_forwarded_public_port(client, monkeypatch):
+def test_public_peer_poll_marks_non_200_public_endpoint_offline(client, monkeypatch):
     client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
     owner = db.get_user_by_email("owner@example.com")
     db.create_device(
         owner["id"],
-        "forwarded-drone",
-        "Forwarded Drone",
-        {"network": {"public_ip": "8.8.4.4"}, "api_port": 8443, "scheme": "https"},
+        "offline-drone",
+        "Offline Drone",
+        {"network": {"public_ip": "8.8.4.4"}, "api_port": 443, "scheme": "https"},
         raw_token="drone-token",
     )
 
-    class FakeConnection:
-        def close(self):
-            return None
+    def open_url(request, timeout, context):
+        raise overmind_main.urllib.error.HTTPError(request.full_url, 503, "unavailable", hdrs=None, fp=None)
 
-    def connect(address, timeout):
-        if address == ("8.8.4.4", 8080):
-            return FakeConnection()
-        raise OSError("closed")
-
-    monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
     overmind_main.poll_public_drone_reachability_once()
 
-    device = db.get_device_by_device_id("forwarded-drone")
-    assert device["api_port"] == 8080
-    assert device["reachable_url"] == "https://8.8.4.4:8080"
-    swarm_peer = db.get_swarm_for_device("forwarded-drone")[0]
-    assert swarm_peer["public_reachable_url"] == "https://8.8.4.4:8080"
+    device = db.get_device_by_device_id("offline-drone")
+    assert device["public_reachability"]["resolvable"] is False
+    assert device["public_reachability"]["status_code"] == 503
+    swarm_peer = db.get_swarm_for_device("offline-drone")[0]
+    assert swarm_peer["online"] is False
+    assert swarm_peer["public_reachable_url"] is None
 
 
-def test_public_peer_poll_only_checks_fixed_ports(client, monkeypatch):
-    assert overmind_main.PUBLIC_PEER_PROBE_PORTS == (8443, 443, 8080, 5000)
+def test_public_peer_poll_only_checks_https_health_on_port_443(client, monkeypatch):
+    assert overmind_main.PUBLIC_PEER_PROBE_PORTS == (443,)
 
     client.post("/api/auth/register", json={"email": "fixed-ports@example.com", "username": "fixed-ports-at-example.com", "password": "testpass123"})
     owner = db.get_user_by_email("fixed-ports@example.com")
@@ -4098,42 +4110,49 @@ def test_public_peer_poll_only_checks_fixed_ports(client, monkeypatch):
         owner["id"],
         "fixed-ports-drone",
         "Fixed Ports Drone",
-        {"network": {"public_ip": "8.8.4.4"}, "api_port": 8443, "scheme": "https"},
+        {"network": {"public_ip": "8.8.4.4"}, "api_port": 443, "scheme": "https"},
         raw_token="drone-token",
     )
     calls = []
 
-    def connect(address, timeout):
-        calls.append(address)
-        raise OSError("closed")
+    def open_url(request, timeout, context):
+        calls.append((request.full_url, timeout))
+        raise overmind_main.urllib.error.URLError("closed")
 
-    monkeypatch.setattr(overmind_main.socket, "create_connection", connect)
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
 
     overmind_main.poll_public_drone_reachability_once()
 
-    assert calls == [("8.8.4.4", port) for port in overmind_main.PUBLIC_PEER_PROBE_PORTS]
+    assert calls == [("https://8.8.4.4:443/health", 1)]
 
 
-def test_public_peer_poll_skips_already_resolved_public_endpoint(client, monkeypatch):
+def test_public_peer_poll_rechecks_already_resolved_public_endpoint(client, monkeypatch):
     client.post("/api/auth/register", json={"email": "skip-probe@example.com", "username": "skip-probe-at-example.com", "password": "testpass123"})
     owner = db.get_user_by_email("skip-probe@example.com")
     db.create_device(
         owner["id"],
-        "skip-probe-drone",
-        "Skip Probe Drone",
-        {"network": {"public_ip": "8.8.4.4"}, "api_port": 8080, "scheme": "https"},
+        "recheck-probe-drone",
+        "Recheck Probe Drone",
+        {"network": {"public_ip": "8.8.4.4"}, "api_port": 443, "scheme": "https"},
         raw_token="drone-token",
     )
-    device = db.get_device_by_device_id("skip-probe-drone")
+    device = db.get_device_by_device_id("recheck-probe-drone")
     db.update_device_public_reachability(
         device["id"],
-        {"resolvable": True, "public_ip": "8.8.4.4", "api_port": 8080, "checked_at": datetime.utcnow()},
+        {"resolvable": True, "public_ip": "8.8.4.4", "api_port": 443, "checked_at": datetime.utcnow()},
     )
-    monkeypatch.setattr(overmind_main.socket, "create_connection", lambda *args, **kwargs: pytest.fail("resolved drone must not be reprobed"))
+    calls = []
+
+    def open_url(request, timeout, context):
+        calls.append(request.full_url)
+        raise overmind_main.urllib.error.URLError("closed")
+
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", open_url)
 
     overmind_main.poll_public_drone_reachability_once()
 
-    assert db.get_device_by_device_id("skip-probe-drone")["api_port"] == 8080
+    assert calls == ["https://8.8.4.4:443/health"]
+    assert db.get_device_by_device_id("recheck-probe-drone")["public_reachability"]["resolvable"] is False
 
 
 def test_public_peer_poll_limits_devices_per_scheduled_run(client, monkeypatch):
@@ -4144,7 +4163,7 @@ def test_public_peer_poll_limits_devices_per_scheduled_run(client, monkeypatch):
             owner["id"],
             f"probe-limit-{index}",
             f"Probe Limit {index}",
-            {"network": {"public_ip": f"8.8.4.{index + 1}"}, "api_port": 8443, "scheme": "https"},
+            {"network": {"public_ip": f"8.8.4.{index + 1}"}, "api_port": 443, "scheme": "https"},
             raw_token=f"drone-token-{index}",
         )
     probed = []
@@ -4168,10 +4187,10 @@ def test_public_peer_poll_rejects_private_reported_addresses_without_connecting(
         owner["id"],
         "private-drone",
         "Private Drone",
-        {"network": {"public_ip": "192.168.0.206"}, "api_port": 8443, "scheme": "https"},
+        {"network": {"public_ip": "192.168.0.206"}, "api_port": 443, "scheme": "https"},
         raw_token="drone-token",
     )
-    monkeypatch.setattr(overmind_main.socket, "create_connection", lambda *args, **kwargs: pytest.fail("private IP must not be probed"))
+    monkeypatch.setattr(overmind_main.urllib.request, "urlopen", lambda *args, **kwargs: pytest.fail("private IP must not be probed"))
     overmind_main.poll_public_drone_reachability_once()
 
     swarm_peer = db.get_swarm_for_device("private-drone")[0]
@@ -4194,7 +4213,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         json={
             "device_id": "arcade-cabinet-001",
             "network": {"ipv4": ["192.168.1.50"], "ipv6": ["fd00::50"], "public_ip": "198.51.100.50", "hostname_override": "bff-drone-a"},
-            "reachable_url": "https://bff-drone-a:8443",
+            "reachable_url": "https://bff-drone-a:443",
             "rom_metadata": {
                 "type": "rom_metadata",
                 "roms_root": "/userdata/roms",
@@ -4211,7 +4230,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
     assert set(heartbeat_response.json()) == {"actions", "swarm", "log_stream_requested"}
     assert "device" not in heartbeat_response.json()
     swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["drone_id"] == "arcade-cabinet-001")
-    assert swarm_peer["reachable_url"] == "https://bff-drone-a:8443"
+    assert swarm_peer["reachable_url"] == "https://bff-drone-a:443"
     assert swarm_peer["public_ip"] == "198.51.100.50"
     assert swarm_peer["public_resolvable"] is False
     assert swarm_peer["public_reachable_url"] is None
@@ -4730,7 +4749,7 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
                 return [(
                     "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
                     None, "token-hash", created_at, created_at,
-                    8443, "https", "https://drone-a:8443", False, None, None,
+                    443, "https", "https://drone-a:443", False, None, None,
                     None, None, None, None, None, None, None,
                     None, None, None, None, None,
                 )]
@@ -4787,7 +4806,7 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                 return [(
                     "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
                     None, "token-hash", received_at, received_at,
-                    8443, "https", "https://drone-a:8443", False, None, None,
+                    443, "https", "https://drone-a:443", False, None, None,
                     None, None, None, None, None, None, None,
                     None, None, None, None, None,
                 )]
@@ -4850,13 +4869,13 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                 return [(
                     "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
                     None, "target-hash", reported_at, reported_at,
-                    8443, "https", "https://drone-a:8443", False, None, None,
+                    443, "https", "https://drone-a:443", False, None, None,
                     None, None, None, None, None, None, None,
                     None, None, None, None, None,
                 ), (
                     "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
                     None, "source-hash", reported_at, reported_at,
-                    8443, "https", "https://drone-b:8443", True, "198.51.100.2", reported_at,
+                    443, "https", "https://drone-b:443", True, "198.51.100.2", reported_at,
                     None, None, None, None, None, None, None,
                     None, None, None, None, None,
                 )]
@@ -4871,7 +4890,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
             if "FROM drone_action_parameters" in self.sql:
                 return []
             if "FROM drone_peer_checks" in self.sql:
-                return [(7, "d1", "drone-a", "drone-b", "https://drone-b:8443", "pass", 12.5, reported_at, None, reported_at)]
+                return [(7, "d1", "drone-a", "drone-b", "https://drone-b:443", "pass", 12.5, reported_at, None, reported_at)]
             if "FROM download_snapshots" in self.sql:
                 return [("d1", 11, reported_at, "target_drone", 1)]
             if "FROM download_items" in self.sql:

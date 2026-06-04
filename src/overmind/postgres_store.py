@@ -2246,21 +2246,29 @@ class PostgresMetadataStore:
         probed_ip = str(result.get("public_ip") or "") or None
         api_port = int(result["api_port"]) if resolvable and result.get("api_port") else None
         checked_at = self._dt(result.get("checked_at"))
+        reachable_url = None
+        if resolvable and probed_ip and api_port:
+            host = probed_ip
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            reachable_url = f"https://{host}" if api_port == 443 else f"https://{host}:{api_port}"
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO drone_network_state
-                        (drone_id, public_resolvable, public_ip, api_port, checked_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, now())
+                        (drone_id, public_resolvable, public_ip, api_port, scheme, reachable_url, checked_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, now())
                     ON CONFLICT (drone_id) DO UPDATE SET
                         public_resolvable = EXCLUDED.public_resolvable,
                         public_ip         = COALESCE(EXCLUDED.public_ip, drone_network_state.public_ip),
                         api_port          = COALESCE(EXCLUDED.api_port,  drone_network_state.api_port),
+                        scheme            = COALESCE(EXCLUDED.scheme,     drone_network_state.scheme),
+                        reachable_url     = COALESCE(EXCLUDED.reachable_url, drone_network_state.reachable_url),
                         checked_at        = EXCLUDED.checked_at,
                         updated_at        = now()
                     """,
-                    (drone_id, resolvable, probed_ip, api_port, checked_at),
+                    (drone_id, resolvable, probed_ip, api_port, "https" if reachable_url else None, reachable_url, checked_at),
                 )
         return True
 

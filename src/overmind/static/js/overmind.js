@@ -2922,7 +2922,7 @@
                         <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}${publicIpStatus}</div>
-                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
+                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}`)}</div>
                         <hr>
                         <strong>Certificate</strong>
                         <div class="small text-muted">Status: ${escapeHtml(cert.status || 'unknown')}</div>
@@ -3083,7 +3083,7 @@
                         <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
                         <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}${publicIpStatus}</div>
-                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}:${device.api_port || 8443}`)}</div>
+                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}`)}</div>
                         <hr>
                         <strong>Certificate</strong>
                         <div class="small text-muted">Status: ${escapeHtml(cert.status || 'unknown')}</div>

@@ -132,6 +132,8 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
     public_ip = network.get("public_ip") or network.get("public")
     public_reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
     public_resolvable = bool(public_reachability.get("resolvable")) and str(public_reachability.get("public_ip") or "") == str(public_ip or "")
+    if public_reachability.get("checked_at") or public_reachability.get("failure_reason"):
+        online = public_resolvable
     rom_count = 0
     try:
         count_device_roms = getattr(data_store, "count_device_roms", None)

@@ -1660,7 +1660,13 @@ class OvermindDatabase:
                 elif last_seen.tzinfo is not None and cutoff.tzinfo is None:
                     cutoff = cutoff.replace(tzinfo=last_seen.tzinfo)
 
-            is_online = bool(last_seen and last_seen >= cutoff)
+            reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
+            public_ip = (device.get("network") or {}).get("public_ip") or (device.get("network") or {}).get("public")
+            public_resolvable = bool(reachability.get("resolvable")) and str(reachability.get("public_ip") or "") == str(public_ip or "")
+            if reachability.get("checked_at") or reachability.get("failure_reason"):
+                is_online = public_resolvable
+            else:
+                is_online = bool(last_seen and last_seen >= cutoff)
             current = "online" if is_online else "offline"
             previous = device.get("last_known_status") or current
             if previous == current:
@@ -1689,7 +1695,8 @@ class OvermindDatabase:
                     host = str(public_ip)
                     if ":" in host and not host.startswith("["):
                         host = f"[{host}]"
-                    device["reachable_url"] = f"{scheme}://{host}:{device['api_port']}"
+                    port_suffix = "" if device["api_port"] == 443 and scheme == "https" else f":{device['api_port']}"
+                    device["reachable_url"] = f"{scheme}://{host}{port_suffix}"
             except (TypeError, ValueError):
                 pass
         return True
@@ -1706,13 +1713,14 @@ class OvermindDatabase:
             reported = peer.get("network") or {}
             public_ip = reported.get("public_ip") or reported.get("public")
             scheme = peer.get("scheme") or "https"
-            api_port = peer.get("api_port") or 8443
+            api_port = peer.get("api_port") or 443
             public_host = str(public_ip or "").strip()
             if ":" in public_host and not public_host.startswith("["):
                 public_host = f"[{public_host}]"
             reachability = peer.get("public_reachability") if isinstance(peer.get("public_reachability"), dict) else {}
             public_resolvable = bool(reachability.get("resolvable")) and str(reachability.get("public_ip") or "") == str(public_ip or "")
-            public_reachable_url = f"{scheme}://{public_host}:{api_port}" if public_host and public_resolvable else None
+            port_suffix = "" if api_port == 443 and scheme == "https" else f":{api_port}"
+            public_reachable_url = f"{scheme}://{public_host}{port_suffix}" if public_host and public_resolvable else None
             last_seen = peer.get("last_seen")
             peer_cutoff = cutoff
             if isinstance(last_seen, datetime) and isinstance(peer_cutoff, datetime):
@@ -1720,7 +1728,7 @@ class OvermindDatabase:
                     last_seen = last_seen.replace(tzinfo=peer_cutoff.tzinfo)
                 elif last_seen.tzinfo is not None and peer_cutoff.tzinfo is None:
                     peer_cutoff = peer_cutoff.replace(tzinfo=last_seen.tzinfo)
-            online = bool(last_seen and last_seen >= peer_cutoff)
+            online = public_resolvable if (reachability.get("checked_at") or reachability.get("failure_reason")) else bool(last_seen and last_seen >= peer_cutoff)
             output.append({
                 "drone_id": peer.get("device_id"),
                 "name": peer.get("device_name"),
