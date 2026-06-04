@@ -214,8 +214,16 @@ class PostgresMetadataStore:
             return False
         with conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE drones SET last_seen = now() WHERE id = %s", (internal_id,))
-                return cur.rowcount > 0
+                cur.execute(
+                    "UPDATE drones SET last_seen = now() WHERE id = %s RETURNING user_id",
+                    (internal_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                if _cache:
+                    _cache.invalidate_user_devices(str(row[0]))
+                return True
 
     def ensure_schema(self) -> None:
         if self._ready or not self.url:
