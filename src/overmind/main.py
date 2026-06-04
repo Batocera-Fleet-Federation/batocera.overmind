@@ -93,7 +93,7 @@ SUPPORTED_DEVICE_ACTIONS = {
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
 PUBLIC_PEER_PROBE_INTERVAL_SECONDS = int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "60"))
-PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "1"))
+PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "2"))
 PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN = max(0, int(os.getenv(
     "PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN",
     "0",
@@ -445,7 +445,7 @@ def poll_public_drone_reachability_once() -> None:
 
     if not devices:
         return
-    max_workers = max(1, len(devices))
+    max_workers = min(32, max(1, len(devices)))
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="drone-health") as executor:
         futures = [executor.submit(probe_and_store, device) for device in devices]
         for future in as_completed(futures):
