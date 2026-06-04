@@ -284,11 +284,13 @@ CREATE TABLE IF NOT EXISTS approved_drone_tokens (
 
 CREATE TABLE IF NOT EXISTS pending_drone_connections (
     device_id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
     swarm_id TEXT REFERENCES swarms(id) ON DELETE SET NULL,
     device_name TEXT NOT NULL,
     batocera_info JSONB,
     authorization_token_id TEXT REFERENCES integration_tokens(id) ON DELETE SET NULL,
+    drone_token_hash TEXT,
+    recovery_reason TEXT,
     requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     status TEXT NOT NULL DEFAULT 'pending'
 );

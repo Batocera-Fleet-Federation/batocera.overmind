@@ -207,6 +207,17 @@ class OvermindDatabase:
             return
         self._load_persistent_state()
 
+    def refresh_admin_overview_state(self) -> None:
+        if postgres_store.available():
+            state = postgres_store.load_admin_overview_state()
+            if isinstance(state, dict):
+                for field in ("users", "user_by_email", "swarms", "swarm_memberships", "devices", "user_devices"):
+                    value = state.get(field)
+                    if isinstance(value, dict):
+                        setattr(self, field, value)
+                return
+        self.refresh_persistent_state()
+
     @staticmethod
     def _is_lambda_runtime() -> bool:
         return (os.getenv("OVERMIND_RUNTIME") or "").strip().lower() == "lambda" or bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
@@ -873,6 +884,14 @@ class OvermindDatabase:
         rows.sort(key=lambda row: str(row.get("created_at") or ""))
         return rows
 
+    def get_swarm(self, swarm_id: str) -> Optional[dict]:
+        if postgres_store.available():
+            relational = postgres_store.get_swarm(swarm_id)
+            if relational is not None:
+                self.swarms[swarm_id] = relational
+                return relational
+        return self.swarms.get(swarm_id)
+
     def get_swarm_member(self, swarm_id: str, user_id: str) -> Optional[dict]:
         if postgres_store.available():
             relational = postgres_store.get_swarm_member(swarm_id, user_id)
@@ -1317,6 +1336,8 @@ class OvermindDatabase:
         batocera_info: dict,
         user_id: Optional[str] = None,
         authorization_token_id: Optional[str] = None,
+        drone_token_hash: Optional[str] = None,
+        recovery_reason: Optional[str] = None,
     ) -> dict:
         """Record that a drone is attempting to connect to Overmind."""
         if postgres_store.available():
@@ -1326,6 +1347,8 @@ class OvermindDatabase:
                 batocera_info,
                 user_id=user_id,
                 authorization_token_id=authorization_token_id,
+                drone_token_hash=drone_token_hash,
+                recovery_reason=recovery_reason,
             )
             if relational is not None:
                 self.pending_drone_connections[device_id] = relational
@@ -1336,8 +1359,10 @@ class OvermindDatabase:
             existing.update({
                 "device_name": device_name,
                 "batocera_info": batocera_info,
-                "user_id": user_id,
+                "user_id": user_id if user_id is not None else existing.get("user_id"),
                 "authorization_token_id": authorization_token_id or existing.get("authorization_token_id"),
+                "drone_token_hash": drone_token_hash or existing.get("drone_token_hash"),
+                "recovery_reason": recovery_reason or existing.get("recovery_reason"),
                 "last_seen": now,
                 "status": "pending",
             })
@@ -1353,6 +1378,8 @@ class OvermindDatabase:
             "last_seen": now,
             "status": "pending",
             "authorization_token_id": authorization_token_id,
+            "drone_token_hash": drone_token_hash,
+            "recovery_reason": recovery_reason,
         }
         self.pending_drone_connections[device_id] = connection
         return connection
@@ -1366,10 +1393,57 @@ class OvermindDatabase:
                 return relational
         visible = [
             conn for conn in self.pending_drone_connections.values()
-            if conn.get("status") == "pending" and conn.get("user_id") in (None, user_id)
+            if conn.get("status") == "pending" and conn.get("user_id") == user_id
         ]
         visible.sort(key=lambda row: row.get("last_seen"), reverse=True)
         return visible
+
+    def get_all_pending_drone_connections(self) -> List[dict]:
+        """Return all pending drone connections for super-admin recovery."""
+        if postgres_store.available():
+            relational = postgres_store.get_all_pending_drone_connections()
+            if relational is not None:
+                self.pending_drone_connections.update({row["device_id"]: row for row in relational})
+                return relational
+        visible = [
+            conn for conn in self.pending_drone_connections.values()
+            if conn.get("status") == "pending"
+        ]
+        visible.sort(key=lambda row: row.get("last_seen"), reverse=True)
+        return visible
+
+    def admin_assign_pending_drone_connection(self, device_id: str, swarm_id: str) -> Optional[dict]:
+        """Assign an unclaimed pending Drone request to a swarm and approve its current token."""
+        connection = self.pending_drone_connections.get(device_id)
+        if postgres_store.available():
+            relational = postgres_store.get_all_pending_drone_connections()
+            if relational is not None:
+                self.pending_drone_connections.update({row["device_id"]: row for row in relational})
+                connection = self.pending_drone_connections.get(device_id)
+        if not connection or connection.get("status") != "pending":
+            return None
+        swarm = self.get_swarm(swarm_id)
+        if not swarm:
+            return None
+        owner_id = swarm.get("owner_id")
+        if not owner_id:
+            return None
+        token_hash = connection.get("drone_token_hash")
+        if not token_hash:
+            return None
+        internal_id = self.create_device(
+            owner_id,
+            connection["device_id"],
+            connection.get("device_name") or connection["device_id"],
+            connection.get("batocera_info") if isinstance(connection.get("batocera_info"), dict) else {},
+            token_hash=token_hash,
+            authorization_token_id=connection.get("authorization_token_id"),
+            swarm_id=swarm_id,
+        )
+        self.pending_drone_connections.pop(device_id, None)
+        if postgres_store.available():
+            postgres_store.delete_any_pending_drone_connection(device_id)
+        return self.get_device(internal_id)
 
     def accept_pending_drone_connection(self, user_id: str, device_id: str) -> Optional[dict]:
         """Accept a pending drone connection and register it to the Overlord."""
@@ -1381,7 +1455,7 @@ class OvermindDatabase:
                 self.pending_drone_connections[device_id] = relational
         if not connection or connection.get("status") != "pending":
             return None
-        if connection.get("user_id") not in (None, user_id):
+        if connection.get("user_id") != user_id:
             return None
         authorization_token_id = connection.get("authorization_token_id")
         backing_token_hash = None
@@ -1453,7 +1527,7 @@ class OvermindDatabase:
             if relational_deleted is not None:
                 self.pending_drone_connections.pop(device_id, None)
                 return relational_deleted
-        if not connection or connection.get("user_id") not in (None, user_id):
+        if not connection or connection.get("user_id") != user_id:
             return False
         self.pending_drone_connections.pop(device_id, None)
         return True

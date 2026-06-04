@@ -370,6 +370,24 @@
                 }
             }
 
+            async function apiPost(path, payload) {
+                beginUiLoading();
+                try {
+                    const response = await fetch(path, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: JSON.stringify(payload || {})
+                    });
+                    await handleApiAuthFailure(response);
+                    return response;
+                } finally {
+                    endUiLoading();
+                }
+            }
+
             async function apiDelete(path) {
                 beginUiLoading();
                 try {
@@ -2443,7 +2461,6 @@
 
             async function loadDeviceSystems() {
                 if (!selectedDeviceId) {
-                    renderDroneAutoSyncPanel();
                     return;
                 }
                 try {
@@ -2457,7 +2474,6 @@
                         if (name) systems[name] = row;
                         return systems;
                     }, {});
-                    renderDroneAutoSyncPanel();
                 } catch (error) {
                     console.error('Error loading systems:', error);
                 }
@@ -2826,7 +2842,6 @@
             function displaySystemsTree() {
                 const container = document.getElementById('systems-list');
                 if (!container) {
-                    renderDroneAutoSyncPanel();
                     return;
                 }
                 const entries = filteredSystemEntries();
@@ -2852,14 +2867,17 @@
                         }).join('')}
                     </div>
                 `;
-                renderDroneAutoSyncPanel();
             }
 
             function renderDroneMetadataWaitingState(label) {
+                const requestButton = label === 'System & Roms metadata'
+                    ? '<button class="btn btn-primary btn-sm mt-2" type="button" onclick="queueDeviceAction(\'rebuild_asset_metadata\')"><i class="bi bi-database-down me-1"></i>Request System & Rom Data</button>'
+                    : '';
                 return `
                     <div class="empty-state d-flex flex-column align-items-center justify-content-center gap-2 py-4">
                         <div class="spinner-border text-primary" role="status" aria-hidden="true"></div>
                         <div>${label === 'ROM metadata' ? 'Waiting for Drone to upload artwork metadata' : `Waiting for Drone to upload ${escapeHtml(label)}`}</div>
+                        ${requestButton}
                     </div>
                 `;
             }
@@ -2996,72 +3014,6 @@
                 `;
             }
 
-            function renderDroneAutoSyncPanel() {
-                const container = document.getElementById('drone-auto-sync-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                const policy = device.auto_sync_policy || { enabled: false, systems: [] };
-                const selectedSystems = Array.isArray(policy.systems) ? policy.systems : [];
-                const systems = Object.keys(currentDeviceSystems || {}).sort();
-                const selectedCount = systems.filter(system => selectedSystems.includes(system)).length;
-                const dropdownLabel = selectedCount ? `${selectedCount} selected` : 'Select systems';
-                const systemOptions = systems.map(system => `
-                    <label class="dropdown-item app-dropdown-check form-check mb-0">
-                        <input class="form-check-input drone-auto-sync-system" type="checkbox" value="${escapeHtml(system)}" ${selectedSystems.includes(system) ? 'checked' : ''} onchange="updateDroneAutoSyncSystemLabel()">
-                        <span class="form-check-label ms-1">${escapeHtml(system)}</span>
-                    </label>
-                `).join('');
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2">
-                        <label class="d-flex gap-2 align-items-center mb-2">
-                            <input id="drone-auto-sync-enabled" class="form-check-input" type="checkbox" ${policy.enabled ? 'checked' : ''}>
-                            <strong>Auto-sync ROM metadata from this Drone</strong>
-                        </label>
-                        <div class="drone-auto-sync-controls mb-2">
-                            ${systems.length ? `
-                                <div class="dropdown app-checkbox-dropdown drone-auto-sync-dropdown">
-                                    <button id="drone-auto-sync-systems-button" class="btn btn-outline-primary dropdown-toggle text-start" type="button" onclick="toggleDroneAutoSyncDropdown(event)" aria-expanded="false">
-                                        <span id="drone-auto-sync-systems-label">${escapeHtml(dropdownLabel)}</span>
-                                    </button>
-                                    <div id="drone-auto-sync-systems-menu" class="dropdown-menu filter-dropdown-menu app-checkbox-menu drone-auto-sync-menu" onclick="event.stopPropagation()">
-                                        ${systemOptions}
-                                    </div>
-                                </div>
-                            ` : '<span class="small text-muted">Device has not reported system metadata yet.</span>'}
-                        </div>
-                        <button class="btn btn-primary btn-sm" onclick="saveDroneAutoSyncPolicy()">Save Policy</button>
-                    </div></div>
-                `;
-            }
-
-            function toggleDroneAutoSyncDropdown(event) {
-                event.preventDefault();
-                event.stopPropagation();
-                const menu = document.getElementById('drone-auto-sync-systems-menu');
-                const button = document.getElementById('drone-auto-sync-systems-button');
-                if (!menu || !button) return;
-                const willOpen = !menu.classList.contains('show');
-                menu.classList.toggle('show', willOpen);
-                button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
-            }
-
-            function closeDroneAutoSyncDropdown() {
-                const menu = document.getElementById('drone-auto-sync-systems-menu');
-                const button = document.getElementById('drone-auto-sync-systems-button');
-                if (!menu || !button) return;
-                menu.classList.remove('show');
-                button.setAttribute('aria-expanded', 'false');
-            }
-
-            document.addEventListener('click', closeDroneAutoSyncDropdown);
-
-            function updateDroneAutoSyncSystemLabel() {
-                const label = document.getElementById('drone-auto-sync-systems-label');
-                if (!label) return;
-                const count = document.querySelectorAll('.drone-auto-sync-system:checked').length;
-                label.textContent = count ? `${count} selected` : 'Select systems';
-            }
-
             function renderDroneMetadataPanel() {
                 const container = document.getElementById('device-metadata-panel');
                 const device = selectedDrone();
@@ -3121,16 +3073,6 @@
                         ${(device.peer_checks || []).length ? `<div class="small text-muted mt-1">Outbound checks: ${(device.peer_checks || []).filter(c => c.status === 'pass').length} passed / ${(device.peer_checks || []).length} total</div>` : ''}
                     </div></div>
                 `;
-            }
-
-            async function saveDroneAutoSyncPolicy() {
-                if (!selectedDeviceId) return;
-                const systems = Array.from(document.querySelectorAll('.drone-auto-sync-system:checked')).map(input => input.value);
-                const enabled = !!document.getElementById('drone-auto-sync-enabled')?.checked;
-                const response = await apiPatch(`/api/devices/${selectedDeviceId}/auto-sync`, { enabled, systems });
-                if (!response.ok) throw new Error('Failed to save policy');
-                await loadDevices();
-                showMessage('Drone sync policy saved.', 'success');
             }
 
             async function loadSwarmRomAvailabilityPanel() {
@@ -4143,12 +4085,39 @@
                     const users = data.users || [];
                     const swarms = data.swarms || [];
                     const drones = data.drones || [];
+                    const pendingConnections = data.pending_connections || [];
+                    const swarmOptions = swarms.map(swarm => `
+                        <option value="${escapeHtml(swarm.id)}">${escapeHtml(swarm.name || swarm.id)}${swarm.owner_email ? ` (${escapeHtml(swarm.owner_email)})` : ''}</option>
+                    `).join('');
                     summary.innerHTML = `
                         <span class="badge text-bg-primary">Users: ${users.length}</span>
                         <span class="badge text-bg-primary">Swarms: ${swarms.length}</span>
                         <span class="badge text-bg-primary">Drones: ${drones.length}</span>
+                        <span class="badge text-bg-primary">Pending: ${pendingConnections.length}</span>
                     `;
                     container.innerHTML = `
+                        <div class="device-card mb-3">
+                            <h4 class="h5">Pending Drone Connections</h4>
+                            <div class="table-responsive"><table class="table table-sm align-middle">
+                                <thead><tr><th>Name</th><th>Drone ID</th><th>Reason</th><th>Network</th><th>Requested</th><th>Assign Swarm</th><th></th></tr></thead>
+                                <tbody>${pendingConnections.map(conn => {
+                                    const info = conn.batocera_info || {};
+                                    const network = info.network || {};
+                                    const ip = Array.isArray(network.ipv4) && network.ipv4.length ? network.ipv4[0] : (info.ip_address || '');
+                                    const selectId = `admin-pending-swarm-${cssSafeId(conn.device_id)}`;
+                                    return `
+                                    <tr>
+                                        <td>${escapeHtml(conn.device_name || 'Drone')}</td>
+                                        <td class="mono">${escapeHtml(conn.device_id)}</td>
+                                        <td><span class="badge text-bg-warning">${escapeHtml(conn.recovery_reason || 'pending')}</span></td>
+                                        <td>${escapeHtml(info.reachable_url || ip || '')}</td>
+                                        <td>${formatAdminDate(conn.last_seen || conn.detected_at)}</td>
+                                        <td><select id="${selectId}" class="form-select form-select-sm">${swarmOptions || '<option value="">No swarms available</option>'}</select></td>
+                                        <td class="text-end"><button class="btn btn-primary btn-sm" onclick="assignPendingDroneToSwarm(${JSON.stringify(conn.device_id)})" ${swarms.length ? '' : 'disabled'}>Assign</button></td>
+                                    </tr>`;
+                                }).join('') || '<tr><td colspan="7" class="text-muted">No pending Drone connections.</td></tr>'}</tbody>
+                            </table></div>
+                        </div>
                         <div class="device-card mb-3">
                             <h4 class="h5">Users</h4>
                             <div class="table-responsive"><table class="table table-sm align-middle">
@@ -4200,6 +4169,25 @@
                 } catch (error) {
                     console.error('Error loading super admin data:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load super admin data.</div>';
+                }
+            }
+
+            async function assignPendingDroneToSwarm(deviceId) {
+                if (!isSuperAdmin()) return;
+                const select = document.getElementById(`admin-pending-swarm-${cssSafeId(deviceId)}`);
+                const swarmId = select ? select.value : '';
+                if (!swarmId) {
+                    showMessage('Choose a swarm first.', 'error');
+                    return;
+                }
+                try {
+                    const response = await apiPost(`/api/admin/drone-connections/${encodeURIComponent(deviceId)}/assign`, { swarm_id: swarmId });
+                    if (!response.ok) throw new Error('Failed to assign Drone');
+                    await loadSuperAdmin();
+                    showMessage('Drone assigned to swarm.', 'success');
+                } catch (error) {
+                    console.error('Error assigning pending Drone:', error);
+                    showMessage(error.message || 'Assignment failed.', 'error');
                 }
             }
 

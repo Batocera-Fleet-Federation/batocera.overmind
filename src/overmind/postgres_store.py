@@ -789,6 +789,90 @@ class PostgresMetadataStore:
                 state = _decode_state(row[0])
                 return state if isinstance(state, dict) else None
 
+    def load_admin_overview_state(self) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        state = {
+            "users": {},
+            "user_by_email": {},
+            "swarms": {},
+            "swarm_memberships": {},
+            "devices": {},
+            "user_devices": {},
+        }
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, email, password_hash, email_verified, is_active, auth_provider,
+                           username, full_name, avatar_data_url, created_at
+                    FROM users
+                    """
+                )
+                for user_id, email, password_hash, email_verified, is_active, auth_provider, username, full_name, avatar_data_url, created_at in cur.fetchall():
+                    if not user_id or not email:
+                        continue
+                    state["users"][user_id] = {
+                        "id": user_id,
+                        "email": email,
+                        "password": password_hash,
+                        "email_verified": bool(email_verified),
+                        "is_active": bool(is_active),
+                        "auth_provider": auth_provider or "password",
+                        "username": username,
+                        "full_name": full_name,
+                        "avatar_data_url": avatar_data_url,
+                        "created_at": created_at,
+                    }
+                    state["user_by_email"][email] = user_id
+                    state["user_devices"].setdefault(user_id, [])
+
+                cur.execute("SELECT id, owner_user_id, name, is_public, created_at FROM swarms")
+                for swarm_id, owner_id, name, is_public, created_at in cur.fetchall():
+                    state["swarms"][swarm_id] = {
+                        "id": swarm_id,
+                        "owner_id": owner_id,
+                        "name": name,
+                        "is_public": bool(is_public),
+                        "created_at": created_at,
+                    }
+
+                cur.execute("SELECT swarm_id, user_id, role, created_at FROM swarm_memberships")
+                for swarm_id, user_id, role, created_at in cur.fetchall():
+                    state["swarm_memberships"].setdefault(swarm_id, {})[user_id] = {
+                        "user_id": user_id,
+                        "role": role,
+                        "created_at": created_at,
+                    }
+
+                cur.execute(
+                    """
+                    SELECT d.id, d.device_id, d.device_name, d.user_id, d.swarm_id,
+                           d.approval_status, d.swarm_connected, d.registered_at, d.last_seen,
+                           n.reachable_url
+                    FROM drones d
+                    LEFT JOIN drone_network_state n ON n.drone_id = d.id
+                    WHERE d.removed_at IS NULL
+                    """
+                )
+                for internal_id, device_id, device_name, user_id, swarm_id, approval_status, swarm_connected, registered_at, last_seen, reachable_url in cur.fetchall():
+                    device = {
+                        "id": internal_id,
+                        "device_id": device_id,
+                        "device_name": device_name,
+                        "user_id": user_id,
+                        "swarm_id": swarm_id,
+                        "approval_status": approval_status or "approved",
+                        "swarm_connected": bool(swarm_connected),
+                        "registered_at": registered_at,
+                        "last_seen": last_seen,
+                        "reachable_url": reachable_url,
+                    }
+                    state["devices"][internal_id] = device
+                    state["user_devices"].setdefault(user_id, []).append(internal_id)
+        return state
+
     def claim_pending_notifications(self, notification_ids: Iterable[str], limit: int = 0) -> Optional[dict[str, datetime]]:
         ids = [str(item) for item in notification_ids if item]
         if not self.url:
@@ -1427,13 +1511,14 @@ class PostgresMetadataStore:
 
         cur.execute(
             """
-            SELECT device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status
+            SELECT device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id,
+                   drone_token_hash, recovery_reason, requested_at, status
             FROM pending_drone_connections
             WHERE user_id = ANY(%s) OR swarm_id = ANY(%s)
             """,
             (active_user_ids, active_swarm_ids),
         )
-        for device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status in cur.fetchall():
+        for device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, drone_token_hash, recovery_reason, requested_at, status in cur.fetchall():
             state["pending_drone_connections"][device_id] = {
                 "id": device_id,
                 "user_id": user_id,
@@ -1442,6 +1527,8 @@ class PostgresMetadataStore:
                 "device_name": device_name,
                 "batocera_info": _decode_state(batocera_info) if isinstance(batocera_info, dict) else {},
                 "authorization_token_id": authorization_token_id,
+                "drone_token_hash": drone_token_hash,
+                "recovery_reason": recovery_reason,
                 "detected_at": requested_at,
                 "last_seen": requested_at,
                 "status": status,
@@ -1666,6 +1753,27 @@ class PostgresMetadataStore:
                     }
                     for swarm_id, owner_id, name, is_public, created_at, role in cur.fetchall()
                 ]
+
+    def get_swarm(self, swarm_id: str) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, owner_user_id, name, is_public, created_at FROM swarms WHERE id = %s",
+                    (swarm_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "owner_id": row[1],
+                    "name": row[2],
+                    "is_public": bool(row[3]),
+                    "created_at": row[4],
+                }
 
     def get_swarm_member(self, swarm_id: str, user_id: str) -> Optional[dict]:
         conn = self._core_connection(ensure_schema=False)
@@ -2838,7 +2946,7 @@ class PostgresMetadataStore:
     def _pending_drone_connection_from_row(self, row) -> Optional[dict]:
         if not row:
             return None
-        device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status = row
+        device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, drone_token_hash, recovery_reason, requested_at, status = row
         decoded_info = _decode_state(batocera_info) if isinstance(batocera_info, dict) else batocera_info
         return {
             "id": device_id,
@@ -2848,6 +2956,8 @@ class PostgresMetadataStore:
             "device_name": device_name,
             "batocera_info": decoded_info if isinstance(decoded_info, dict) else {},
             "authorization_token_id": authorization_token_id,
+            "drone_token_hash": drone_token_hash,
+            "recovery_reason": recovery_reason,
             "detected_at": requested_at,
             "last_seen": requested_at,
             "status": status or "pending",
@@ -2862,6 +2972,8 @@ class PostgresMetadataStore:
         user_id: Optional[str],
         swarm_id: Optional[str] = None,
         authorization_token_id: Optional[str] = None,
+        drone_token_hash: Optional[str] = None,
+        recovery_reason: Optional[str] = None,
     ) -> Optional[dict]:
         conn = self._core_connection()
         if conn is None:
@@ -2874,17 +2986,21 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     INSERT INTO pending_drone_connections
-                        (device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status)
-                    VALUES (%s, %s, %s, %s, %s::jsonb, %s, now(), 'pending')
+                        (device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id,
+                         drone_token_hash, recovery_reason, requested_at, status)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, now(), 'pending')
                     ON CONFLICT (device_id) DO UPDATE SET
-                        user_id = EXCLUDED.user_id,
+                        user_id = COALESCE(EXCLUDED.user_id, pending_drone_connections.user_id),
                         swarm_id = COALESCE(EXCLUDED.swarm_id, pending_drone_connections.swarm_id),
                         device_name = EXCLUDED.device_name,
                         batocera_info = EXCLUDED.batocera_info,
                         authorization_token_id = COALESCE(EXCLUDED.authorization_token_id, pending_drone_connections.authorization_token_id),
+                        drone_token_hash = COALESCE(EXCLUDED.drone_token_hash, pending_drone_connections.drone_token_hash),
+                        recovery_reason = COALESCE(EXCLUDED.recovery_reason, pending_drone_connections.recovery_reason),
                         requested_at = now(),
                         status = 'pending'
-                    RETURNING device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status
+                    RETURNING device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id,
+                              drone_token_hash, recovery_reason, requested_at, status
                     """,
                     (
                         device_id,
@@ -2893,6 +3009,8 @@ class PostgresMetadataStore:
                         device_name or device_id,
                         self._json(batocera_info if isinstance(batocera_info, dict) else {}),
                         authorization_token_id,
+                        drone_token_hash,
+                        recovery_reason,
                     ),
                 )
                 return self._pending_drone_connection_from_row(cur.fetchone())
@@ -2906,12 +3024,11 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     SELECT p.device_id, p.user_id, p.swarm_id, p.device_name, p.batocera_info,
-                           p.authorization_token_id, p.requested_at, p.status
+                           p.authorization_token_id, p.drone_token_hash, p.recovery_reason, p.requested_at, p.status
                     FROM pending_drone_connections p
                     WHERE p.status = 'pending'
                       AND (
                           p.user_id = %s
-                          OR p.user_id IS NULL
                           OR EXISTS (
                               SELECT 1
                               FROM swarm_memberships m
@@ -2928,6 +3045,27 @@ class PostgresMetadataStore:
                     if conn_row
                 ]
 
+    def get_all_pending_drone_connections(self) -> Optional[list[dict]]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.device_id, p.user_id, p.swarm_id, p.device_name, p.batocera_info,
+                           p.authorization_token_id, p.drone_token_hash, p.recovery_reason, p.requested_at, p.status
+                    FROM pending_drone_connections p
+                    WHERE p.status = 'pending'
+                    ORDER BY p.requested_at DESC
+                    """
+                )
+                return [
+                    conn_row
+                    for conn_row in (self._pending_drone_connection_from_row(row) for row in cur.fetchall())
+                    if conn_row
+                ]
+
     def get_pending_drone_connection(self, user_id: str, device_id: str) -> Optional[dict]:
         conn = self._core_connection()
         if conn is None:
@@ -2937,13 +3075,12 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     SELECT p.device_id, p.user_id, p.swarm_id, p.device_name, p.batocera_info,
-                           p.authorization_token_id, p.requested_at, p.status
+                           p.authorization_token_id, p.drone_token_hash, p.recovery_reason, p.requested_at, p.status
                     FROM pending_drone_connections p
                     WHERE p.device_id = %s
                       AND p.status = 'pending'
                       AND (
                           p.user_id = %s
-                          OR p.user_id IS NULL
                           OR EXISTS (
                               SELECT 1
                               FROM swarm_memberships m
@@ -2969,7 +3106,6 @@ class PostgresMetadataStore:
                         WHERE p.device_id = %s
                           AND (
                               p.user_id = %s
-                              OR p.user_id IS NULL
                               OR EXISTS (
                                   SELECT 1
                                   FROM swarm_memberships m
@@ -2986,7 +3122,6 @@ class PostgresMetadataStore:
                         WHERE p.device_id = %s
                           AND (
                               p.user_id = %s
-                              OR p.user_id IS NULL
                               OR EXISTS (
                                   SELECT 1
                                   FROM swarm_memberships m
@@ -2996,6 +3131,15 @@ class PostgresMetadataStore:
                         """,
                         (device_id, user_id, user_id),
                     )
+                return cur.rowcount > 0
+
+    def delete_any_pending_drone_connection(self, device_id: str) -> Optional[bool]:
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM pending_drone_connections WHERE device_id = %s", (device_id,))
                 return cur.rowcount > 0
 
     def claim_integration_token(self, email: Optional[str], token: Optional[str], device_id: Optional[str], device_fingerprint: Optional[str] = None) -> Optional[dict]:
@@ -3485,19 +3629,22 @@ class PostgresMetadataStore:
             )
         pending = state.get("pending_drone_connections") if isinstance(state.get("pending_drone_connections"), dict) else {}
         for conn in pending.values():
-            if not isinstance(conn, dict) or not conn.get("device_id") or not conn.get("user_id"):
+            if not isinstance(conn, dict) or not conn.get("device_id"):
                 continue
             cur.execute(
                 """
                 INSERT INTO pending_drone_connections
-                    (device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id, requested_at, status)
-                VALUES (%s, %s, %s, %s, %s::jsonb, %s, COALESCE(%s, now()), %s)
+                    (device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id,
+                     drone_token_hash, recovery_reason, requested_at, status)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, COALESCE(%s, now()), %s)
                 ON CONFLICT (device_id) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
                     swarm_id = EXCLUDED.swarm_id,
                     device_name = EXCLUDED.device_name,
                     batocera_info = EXCLUDED.batocera_info,
                     authorization_token_id = EXCLUDED.authorization_token_id,
+                    drone_token_hash = EXCLUDED.drone_token_hash,
+                    recovery_reason = EXCLUDED.recovery_reason,
                     status = EXCLUDED.status
                 """,
                 (
@@ -3507,6 +3654,8 @@ class PostgresMetadataStore:
                     conn.get("device_name") or conn.get("device_id"),
                     self._json(conn.get("batocera_info") if isinstance(conn.get("batocera_info"), dict) else {}),
                     conn.get("authorization_token_id"),
+                    conn.get("drone_token_hash"),
+                    conn.get("recovery_reason"),
                     self._dt(conn.get("detected_at") or conn.get("last_seen")),
                     conn.get("status") or "pending",
                 ),

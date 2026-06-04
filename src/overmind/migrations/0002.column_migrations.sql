@@ -47,6 +47,9 @@ ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending BOOLEAN NOT 
 ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_completed_at TIMESTAMPTZ;
 
 ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS batocera_info JSONB;
+ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS drone_token_hash TEXT;
+ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS recovery_reason TEXT;
+ALTER TABLE pending_drone_connections ALTER COLUMN user_id DROP NOT NULL;
 
 -- rollback
 -- Note: safely removing added columns can cause data loss; rollback is intentionally omitted.

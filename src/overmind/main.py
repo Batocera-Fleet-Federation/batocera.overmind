@@ -121,6 +121,14 @@ admin_drone_row = partial(_admin_drone_row, data_store=db)
 device_response = partial(_device_response, data_store=db, offline_threshold_seconds=SWARM_OFFLINE_THRESHOLD_SECONDS)
 
 
+def admin_pending_drone_connection_row(connection: dict) -> dict:
+    return {
+        key: value
+        for key, value in (connection or {}).items()
+        if key != "drone_token_hash"
+    }
+
+
 class CapturedStream:
     """Mirror a stream while retaining a bounded recent tail for the UI."""
 
@@ -1092,6 +1100,47 @@ def get_current_drone(device_id: str, authorization: Optional[str]) -> dict:
     return device
 
 
+def _record_untrusted_drone_connection(
+    device_id: str,
+    device_name: str,
+    batocera_info: dict,
+    raw_token: Optional[str],
+    reason: str,
+) -> None:
+    """Record a disconnected Drone for super-admin recovery without trusting ownership."""
+    if not device_id or not raw_token:
+        return
+    try:
+        db.create_pending_drone_connection(
+            device_id,
+            device_name or device_id,
+            batocera_info if isinstance(batocera_info, dict) else {},
+            user_id=None,
+            authorization_token_id=None,
+            drone_token_hash=hash_drone_token(raw_token),
+            recovery_reason=reason,
+        )
+        print(f"Untrusted Drone recovery request recorded: device_id={device_id} reason={reason}")
+    except Exception:
+        logger.exception("Failed to record untrusted Drone recovery request device_id=%s", device_id)
+
+
+def _heartbeat_batocera_info(heartbeat: dict) -> dict:
+    batocera_info = {
+        "network": heartbeat.get("network") if isinstance(heartbeat.get("network"), dict) else {},
+        "api_port": heartbeat.get("api_port"),
+        "scheme": str(heartbeat.get("scheme") or heartbeat.get("protocol") or "").strip() or None,
+        "reachable_url": str(heartbeat.get("reachable_url") or "").strip() or None,
+        "system_info": heartbeat.get("system_info") if isinstance(heartbeat.get("system_info"), dict) else {},
+        "certificate": heartbeat.get("certificate") if isinstance(heartbeat.get("certificate"), dict) else None,
+    }
+    network = batocera_info.get("network") if isinstance(batocera_info.get("network"), dict) else {}
+    ipv4 = network.get("ipv4") if isinstance(network.get("ipv4"), list) else []
+    if ipv4:
+        batocera_info["ip_address"] = ipv4[0]
+    return batocera_info
+
+
 # ==================== Swarms ====================
 
 @app.get("/api/swarms")
@@ -1128,12 +1177,29 @@ async def dismiss_notifications(payload: dict = None, authorization: Optional[st
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
-    db.refresh_persistent_state()
+    db.refresh_admin_overview_state()
     db._dedupe_all_device_records()
     users = sorted((admin_user_row(user) for user in db.users.values()), key=lambda row: str(row.get("email") or "").lower())
     swarms = sorted((admin_swarm_row(swarm) for swarm in db.swarms.values()), key=lambda row: str(row.get("name") or "").lower())
     drones = sorted((admin_drone_row(device) for device in db.devices.values()), key=lambda row: str(row.get("device_name") or row.get("device_id") or "").lower())
-    return {"users": users, "swarms": swarms, "drones": drones}
+    pending_connections = sorted(
+        (admin_pending_drone_connection_row(connection) for connection in db.get_all_pending_drone_connections()),
+        key=lambda row: str(row.get("last_seen") or row.get("detected_at") or ""),
+        reverse=True,
+    )
+    return {"users": users, "swarms": swarms, "drones": drones, "pending_connections": pending_connections}
+
+
+@app.post("/api/admin/drone-connections/{device_id}/assign")
+async def admin_assign_drone_connection(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+    require_super_admin(authorization)
+    swarm_id = str((payload or {}).get("swarm_id") or "").strip()
+    if not swarm_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="swarm_id is required")
+    device = db.admin_assign_pending_drone_connection(device_id, swarm_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending Drone connection or swarm not found")
+    return {"status": "assigned", "device": device_response(device)}
 
 
 @app.get("/api/admin/runtime-metrics")
@@ -1390,6 +1456,13 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
         device_fingerprint,
     )
     if not claimed_token:
+        _record_untrusted_drone_connection(
+            device_data.device_id,
+            device_data.device_name,
+            batocera_info,
+            raw_auth_token,
+            "invalid_authorization_token",
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Drone authorization token")
     user = claimed_token["user"]
     integration_token = claimed_token["token"]
@@ -1791,9 +1864,22 @@ async def claim_device_action(device_id: str, payload: dict, authorization: Opti
 @app.post("/api/devices/{device_id}/heartbeat")
 async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, authorization: Optional[str] = Header(default=None)):
     """Update drone last-seen and return the next pending action, if any."""
-    device = get_current_drone(device_id, authorization)
-    mark_device_seen_fast(device)
     heartbeat = payload.model_dump(exclude_none=True)
+    try:
+        raw_token = get_bearer_token(authorization)
+    except HTTPException:
+        raw_token = None
+    device = db.verify_device_token(device_id, raw_token or "")
+    if not device:
+        _record_untrusted_drone_connection(
+            device_id,
+            str(heartbeat.get("device_name") or device_id),
+            _heartbeat_batocera_info(heartbeat),
+            raw_token,
+            "invalid_drone_token",
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Drone token")
+    mark_device_seen_fast(device)
     try:
         db.update_device_last_seen(
             device["id"],

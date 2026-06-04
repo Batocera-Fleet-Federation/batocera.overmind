@@ -816,6 +816,69 @@ def test_super_admin_overview_and_delete_permissions(client):
     assert db.get_device_by_device_id("admin-visible-drone") is None
 
 
+def test_super_admin_can_recover_untrusted_pending_drone_connection(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
+    admin_token = client.post(
+        "/api/auth/login",
+        json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"},
+    ).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "regular@example.com", "username": "regular-recovery", "password": "testpass123"})
+    regular_token = client.post(
+        "/api/auth/login",
+        json={"email": "regular@example.com", "username": "regular-recovery", "password": "testpass123"},
+    ).json()["access_token"]
+    regular_user = db.get_user_by_email("regular@example.com")
+    swarm_id = db.default_swarm_id(regular_user["id"])
+    old_drone_token = "old-token-from-stranded-drone"
+
+    heartbeat = client.post(
+        "/api/devices/stranded-drone/heartbeat",
+        headers={"Authorization": f"Bearer {old_drone_token}"},
+        json={
+            "device_name": "Stranded Drone",
+            "network": {"ipv4": ["10.42.0.5"]},
+            "reachable_url": "https://10.42.0.5:8443",
+        },
+    )
+    assert heartbeat.status_code == 401
+    assert db.get_device_by_device_id("stranded-drone") is None
+
+    regular_pending = client.get("/api/drone-connections", headers={"Authorization": f"Bearer {regular_token}"})
+    assert regular_pending.status_code == 200
+    assert regular_pending.json()["connections"] == []
+
+    overview = client.get("/api/admin/overview", headers={"Authorization": f"Bearer {admin_token}"})
+    assert overview.status_code == 200
+    payload = overview.json()
+    pending = [row for row in payload["pending_connections"] if row["device_id"] == "stranded-drone"]
+    assert len(pending) == 1
+    assert pending[0]["device_name"] == "Stranded Drone"
+    assert pending[0]["recovery_reason"] == "invalid_drone_token"
+    assert pending[0]["batocera_info"]["reachable_url"] == "https://10.42.0.5:8443"
+    assert "drone_token_hash" not in pending[0]
+
+    denied_accept = client.post("/api/drone-connections/stranded-drone/accept", headers={"Authorization": f"Bearer {regular_token}"})
+    assert denied_accept.status_code == 404
+
+    assign = client.post(
+        "/api/admin/drone-connections/stranded-drone/assign",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"swarm_id": swarm_id},
+    )
+    assert assign.status_code == 200
+    assigned = assign.json()["device"]
+    assert assigned["device_id"] == "stranded-drone"
+    assert db.get_device_by_device_id("stranded-drone")["swarm_id"] == swarm_id
+
+    recovered_heartbeat = client.post(
+        "/api/devices/stranded-drone/heartbeat",
+        headers={"Authorization": f"Bearer {old_drone_token}"},
+        json={"device_name": "Stranded Drone", "network": {"ipv4": ["10.42.0.5"]}},
+    )
+    assert recovered_heartbeat.status_code == 200
+    assert db.get_all_pending_drone_connections() == []
+
+
 def test_super_admin_delete_user_removes_owned_swarms_and_drones(client):
     client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr_jerrodh-at-hotmail.com", "password": "testpass123"})
     admin_token = client.post(
@@ -3529,6 +3592,9 @@ def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
     assert js.count("renderDroneMetadataWaitingState('System & Roms metadata')") >= 2
     assert "renderDroneMetadataWaitingState('BIOS metadata')" in js
     assert "renderDroneMetadataWaitingState('artwork metadata')" in js
+    assert "Request System & Rom Data" in js
+    assert "queueDeviceAction(\\'rebuild_asset_metadata\\')" in js
+    assert "Auto-sync ROM metadata from this Drone" not in js
     assert "overmindConfigVersion" in js
     assert "downloadSelectedOvermindConfigVersion" in js
     assert "overmindConfigFilter" in js
@@ -3725,6 +3791,8 @@ def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_log_sources')\"" not in html
     assert "requestDeviceDataSnapshot" not in js
+    assert "drone-auto-sync-panel" not in html
+    assert "Auto-sync ROM metadata from this Drone" not in js
     assert "loadGameLogs({queue:" not in js
     assert "loadDeviceConfigs({queue:" not in js
     assert "if (currentDeviceView === 'gamelogs') loadGameLogs();" in js
@@ -3817,7 +3885,7 @@ def test_drone_metadata_shows_resolvable_public_ip_state():
     assert "const publicIpStatus = device.peer_resolvable ? ' (peer-resolvable)' : '';" in js
     assert "Public IP: ${escapeHtml(publicIp)}${publicIpStatus}" in js
     metadata_start = js.index("function renderDroneMetadataPanel()")
-    metadata_end = js.index("async function saveDroneAutoSyncPolicy()", metadata_start)
+    metadata_end = js.index("async function loadSwarmRomAvailabilityPanel()", metadata_start)
     metadata_source = js[metadata_start:metadata_end]
     assert "Performance Metrics" not in metadata_source
     assert "renderMetricsGrid(info.performance || {})" in js
@@ -3832,6 +3900,10 @@ def test_super_admin_runtime_metrics_ui_refreshes_when_viewed():
 
     assert 'id="super-admin-metrics"' in html
     assert 'id="super-admin-logs"' in html
+    assert "Pending Drone Connections" in js
+    assert "pending_connections" in js
+    assert "assignPendingDroneToSwarm" in js
+    assert "/api/admin/drone-connections/" in js
     assert "apiGet('/api/admin/runtime-metrics')" in js
     assert "apiGet('/api/admin/runtime-logs')" in js
     assert "Overmind Runtime Logs" in js
@@ -4529,7 +4601,17 @@ def test_integration_token_claim_prefers_direct_relational_store(monkeypatch):
 def test_pending_drone_connections_prefer_direct_relational_store(monkeypatch):
     pending_rows = {}
 
-    def upsert(device_id, device_name, batocera_info, *, user_id, swarm_id=None, authorization_token_id=None):
+    def upsert(
+        device_id,
+        device_name,
+        batocera_info,
+        *,
+        user_id,
+        swarm_id=None,
+        authorization_token_id=None,
+        drone_token_hash=None,
+        recovery_reason=None,
+    ):
         row = {
             "id": device_id,
             "user_id": user_id,
@@ -4538,6 +4620,8 @@ def test_pending_drone_connections_prefer_direct_relational_store(monkeypatch):
             "device_name": device_name,
             "batocera_info": batocera_info,
             "authorization_token_id": authorization_token_id,
+            "drone_token_hash": drone_token_hash,
+            "recovery_reason": recovery_reason,
             "detected_at": datetime.utcnow(),
             "last_seen": datetime.utcnow(),
             "status": "pending",
@@ -4611,6 +4695,9 @@ def test_relational_schema_declares_domain_tables():
     assert "OVERMIND_POSTGRES_QUERY_LOG_PARAMS" in store_source
     assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected" in migration_sql
     assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in migration_sql
+    assert "ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS drone_token_hash" in migration_sql
+    assert "ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS recovery_reason" in migration_sql
+    assert "ALTER TABLE pending_drone_connections ALTER COLUMN user_id DROP NOT NULL" in migration_sql
     assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in migration_sql
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in migration_sql
     assert "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint" in migration_sql
