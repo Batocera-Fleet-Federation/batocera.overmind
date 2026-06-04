@@ -168,6 +168,11 @@ CREATE TABLE IF NOT EXISTS drones (
     swarm_connected BOOLEAN NOT NULL DEFAULT true,
     authorization_token_id TEXT,
     drone_token_hash TEXT,
+    rom_inventory_fingerprint TEXT,
+    drone_rom_inventory_fingerprint TEXT,
+    rom_inventory_fingerprint_algorithm TEXT,
+    rom_inventory_fingerprint_at TIMESTAMPTZ,
+    drone_rom_inventory_fingerprint_at TIMESTAMPTZ,
     registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen TIMESTAMPTZ,
     removed_at TIMESTAMPTZ

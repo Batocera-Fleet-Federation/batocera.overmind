@@ -314,6 +314,35 @@ class PostgresMetadataStore:
                     )
         return True
 
+    def update_device_rom_inventory_fingerprint(
+        self,
+        internal_id: str,
+        *,
+        drone_fingerprint: Optional[str] = None,
+        overmind_fingerprint: Optional[str] = None,
+        algorithm: Optional[str] = None,
+    ) -> bool:
+        if not internal_id or not any([drone_fingerprint, overmind_fingerprint]):
+            return False
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE drones
+                    SET rom_inventory_fingerprint = COALESCE(%s, rom_inventory_fingerprint),
+                        drone_rom_inventory_fingerprint = COALESCE(%s, drone_rom_inventory_fingerprint),
+                        rom_inventory_fingerprint_algorithm = COALESCE(%s, rom_inventory_fingerprint_algorithm),
+                        rom_inventory_fingerprint_at = CASE WHEN %s IS NULL THEN rom_inventory_fingerprint_at ELSE now() END,
+                        drone_rom_inventory_fingerprint_at = CASE WHEN %s IS NULL THEN drone_rom_inventory_fingerprint_at ELSE now() END
+                    WHERE id = %s
+                    """,
+                    (overmind_fingerprint, drone_fingerprint, algorithm, overmind_fingerprint, drone_fingerprint, internal_id),
+                )
+                return cur.rowcount > 0
+
     def touch_device_last_seen(self, internal_id: str) -> bool:
         """Update a Drone's liveness timestamp with a minimal write path."""
         conn = self._core_connection()
@@ -1026,6 +1055,9 @@ class PostgresMetadataStore:
             """
             SELECT d.id, d.device_id, d.device_name, d.user_id, d.swarm_id, d.approval_status, d.swarm_connected,
                    d.authorization_token_id, d.drone_token_hash, d.registered_at, d.last_seen,
+                   d.rom_inventory_fingerprint, d.drone_rom_inventory_fingerprint,
+                   d.rom_inventory_fingerprint_algorithm, d.rom_inventory_fingerprint_at,
+                   d.drone_rom_inventory_fingerprint_at,
                    n.api_port, n.scheme, n.reachable_url, n.public_resolvable, n.public_ip, n.checked_at,
                    s.hostname, s.model, s.system_name, s.architecture, s.cpu_model, s.cpu_cores, s.cpu_threads,
                    s.cpu_max_frequency, s.memory_available, s.memory_total, s.batocera_version, s.container
@@ -1039,6 +1071,9 @@ class PostgresMetadataStore:
             (
                 internal_id, device_id, device_name, user_id, swarm_id, approval_status, swarm_connected,
                 authorization_token_id, drone_token_hash, registered_at, last_seen,
+                rom_inventory_fingerprint, drone_rom_inventory_fingerprint,
+                rom_inventory_fingerprint_algorithm, rom_inventory_fingerprint_at,
+                drone_rom_inventory_fingerprint_at,
                 api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
                 hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
                 cpu_max_frequency, memory_available, memory_total, batocera_version, container,
@@ -1055,6 +1090,11 @@ class PostgresMetadataStore:
                 "drone_token_hash": drone_token_hash,
                 "registered_at": registered_at,
                 "last_seen": last_seen,
+                "rom_inventory_fingerprint": rom_inventory_fingerprint,
+                "drone_rom_inventory_fingerprint": drone_rom_inventory_fingerprint,
+                "rom_inventory_fingerprint_algorithm": rom_inventory_fingerprint_algorithm,
+                "rom_inventory_fingerprint_at": rom_inventory_fingerprint_at,
+                "drone_rom_inventory_fingerprint_at": drone_rom_inventory_fingerprint_at,
                 "api_port": api_port,
                 "scheme": scheme or "https",
                 "reachable_url": reachable_url,
@@ -1542,6 +1582,9 @@ class PostgresMetadataStore:
         (
             internal_id, device_id, device_name, user_id, swarm_id, approval_status, swarm_connected,
             authorization_token_id, drone_token_hash, registered_at, last_seen, removed_at,
+            rom_inventory_fingerprint, drone_rom_inventory_fingerprint,
+            rom_inventory_fingerprint_algorithm, rom_inventory_fingerprint_at,
+            drone_rom_inventory_fingerprint_at,
             api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
             hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
             cpu_max_frequency, memory_available, memory_total, batocera_version, container,
@@ -1586,6 +1629,11 @@ class PostgresMetadataStore:
             "registered_at": registered_at,
             "last_seen": last_seen,
             "removed_at": removed_at,
+            "rom_inventory_fingerprint": rom_inventory_fingerprint,
+            "drone_rom_inventory_fingerprint": drone_rom_inventory_fingerprint,
+            "rom_inventory_fingerprint_algorithm": rom_inventory_fingerprint_algorithm,
+            "rom_inventory_fingerprint_at": rom_inventory_fingerprint_at,
+            "drone_rom_inventory_fingerprint_at": drone_rom_inventory_fingerprint_at,
             "api_port": api_port,
             "scheme": scheme or "https",
             "reachable_url": reachable_url,
@@ -1624,6 +1672,9 @@ class PostgresMetadataStore:
             SELECT d.id, d.device_id, d.device_name, d.user_id, d.swarm_id, d.approval_status,
                    d.swarm_connected, d.authorization_token_id, d.drone_token_hash,
                    d.registered_at, d.last_seen, d.removed_at,
+                   d.rom_inventory_fingerprint, d.drone_rom_inventory_fingerprint,
+                   d.rom_inventory_fingerprint_algorithm, d.rom_inventory_fingerprint_at,
+                   d.drone_rom_inventory_fingerprint_at,
                    ns.api_port, ns.scheme, ns.reachable_url, ns.public_resolvable, ns.public_ip, ns.checked_at,
                    si.hostname, si.model, si.system_name, si.architecture, si.cpu_model, si.cpu_cores,
                    si.cpu_threads, si.cpu_max_frequency, si.memory_available, si.memory_total,
@@ -3380,8 +3431,11 @@ class PostgresMetadataStore:
                 """
                 INSERT INTO drones
                     (id, device_id, device_name, user_id, swarm_id, approval_status, swarm_connected,
-                     authorization_token_id, drone_token_hash, registered_at, last_seen)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()), %s)
+                     authorization_token_id, drone_token_hash, rom_inventory_fingerprint,
+                     drone_rom_inventory_fingerprint, rom_inventory_fingerprint_algorithm,
+                     rom_inventory_fingerprint_at, drone_rom_inventory_fingerprint_at,
+                     registered_at, last_seen)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()), %s)
                 ON CONFLICT (id) DO UPDATE SET
                     device_id = EXCLUDED.device_id,
                     device_name = EXCLUDED.device_name,
@@ -3391,6 +3445,11 @@ class PostgresMetadataStore:
                     swarm_connected = EXCLUDED.swarm_connected,
                     authorization_token_id = EXCLUDED.authorization_token_id,
                     drone_token_hash = EXCLUDED.drone_token_hash,
+                    rom_inventory_fingerprint = EXCLUDED.rom_inventory_fingerprint,
+                    drone_rom_inventory_fingerprint = EXCLUDED.drone_rom_inventory_fingerprint,
+                    rom_inventory_fingerprint_algorithm = EXCLUDED.rom_inventory_fingerprint_algorithm,
+                    rom_inventory_fingerprint_at = EXCLUDED.rom_inventory_fingerprint_at,
+                    drone_rom_inventory_fingerprint_at = EXCLUDED.drone_rom_inventory_fingerprint_at,
                     last_seen = EXCLUDED.last_seen
                 """,
                 (
@@ -3403,6 +3462,11 @@ class PostgresMetadataStore:
                     bool(device.get("swarm_connected", True)),
                     device.get("authorization_token_id"),
                     device.get("drone_token_hash"),
+                    device.get("rom_inventory_fingerprint"),
+                    device.get("drone_rom_inventory_fingerprint"),
+                    device.get("rom_inventory_fingerprint_algorithm"),
+                    self._dt(device.get("rom_inventory_fingerprint_at")),
+                    self._dt(device.get("drone_rom_inventory_fingerprint_at")),
                     self._dt(device.get("registered_at")),
                     self._dt(device.get("last_seen")),
                 ),

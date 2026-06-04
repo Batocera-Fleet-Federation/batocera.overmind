@@ -1,6 +1,7 @@
 """Overmind repository facade with optional PostgreSQL persistence."""
 
 import os
+import hashlib
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -24,6 +25,40 @@ try:
     from overmind import cache as _cache
 except Exception:
     _cache = None  # type: ignore[assignment]
+
+ROM_INVENTORY_FINGERPRINT_ALGORITHM = "rom-inventory-sha256-v1"
+
+
+def _normalize_rom_inventory_path(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
+
+
+def compute_rom_inventory_fingerprint(roms: list[dict]) -> str:
+    rows = []
+    for row in roms or []:
+        if not isinstance(row, dict):
+            continue
+        system = str(row.get("system") or row.get("system_name") or "").strip().lower()
+        path = _normalize_rom_inventory_path(
+            row.get("file_path")
+            or row.get("relative_path")
+            or row.get("rom_path")
+            or row.get("rom_file")
+            or row.get("rom_name")
+            or row.get("name")
+        )
+        if not system or not path:
+            continue
+        entry_type = str(row.get("entry_type") or "file").strip().lower()
+        md5_value = str(row.get("rom_md5") or row.get("md5") or row.get("hash") or "").strip().lower()
+        file_size = row.get("file_size") if row.get("file_size") is not None else row.get("byte_count")
+        size_value = str(int(file_size)) if isinstance(file_size, (int, float)) else str(file_size or "").strip()
+        rows.append("\t".join((system, path, entry_type, md5_value, size_value)))
+    digest = hashlib.sha256()
+    for value in sorted(rows):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 class OvermindDatabase:
     """Application repository backed by PostgreSQL as the source of truth.
@@ -75,6 +110,7 @@ class OvermindDatabase:
         "add_device_admin_claim",
         "update_device_last_seen",
         "update_device_public_reachability",
+        "update_device_rom_inventory_fingerprint",
         "rotate_device_token",
         "set_device_authorization_token",
         "update_device_auto_sync_policy",
@@ -1759,6 +1795,60 @@ class OvermindDatabase:
                 reachable_url=reachable_url,
             )
 
+    def update_device_rom_inventory_fingerprint(
+        self,
+        device_id: str,
+        *,
+        drone_fingerprint: Optional[str] = None,
+        overmind_fingerprint: Optional[str] = None,
+        compute_overmind: bool = False,
+    ) -> Optional[dict]:
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        if compute_overmind:
+            overmind_fingerprint = compute_rom_inventory_fingerprint(self.get_device_roms(device_id))
+        updated_at = datetime.utcnow()
+        if overmind_fingerprint:
+            device["rom_inventory_fingerprint"] = overmind_fingerprint
+            device["rom_inventory_fingerprint_algorithm"] = ROM_INVENTORY_FINGERPRINT_ALGORITHM
+            device["rom_inventory_fingerprint_at"] = updated_at
+        if drone_fingerprint:
+            device["drone_rom_inventory_fingerprint"] = drone_fingerprint
+            device["drone_rom_inventory_fingerprint_at"] = updated_at
+        if postgres_store.available():
+            postgres_store.update_device_rom_inventory_fingerprint(
+                device["id"],
+                drone_fingerprint=drone_fingerprint,
+                overmind_fingerprint=overmind_fingerprint,
+                algorithm=ROM_INVENTORY_FINGERPRINT_ALGORITHM if (drone_fingerprint or overmind_fingerprint) else None,
+            )
+        return device
+
+    def ensure_rom_metadata_sync_action_for_fingerprint(self, device_id: str, drone_fingerprint: str) -> Optional[dict]:
+        device = self.update_device_rom_inventory_fingerprint(device_id, drone_fingerprint=drone_fingerprint)
+        if not device:
+            return None
+        overmind_fingerprint = str(device.get("rom_inventory_fingerprint") or "").strip()
+        mismatch = not overmind_fingerprint or overmind_fingerprint != drone_fingerprint
+        if not mismatch:
+            return None
+        active_actions = self.get_device_actions(device.get("user_id"), device_id) or []
+        for action in active_actions:
+            if action.get("action") in {"rebuild_asset_metadata", "collect_rom_metadata"}:
+                return None
+        return self.create_device_action(
+            device.get("user_id"),
+            device_id,
+            "rebuild_asset_metadata",
+            {
+                "reason": "rom_inventory_fingerprint_mismatch",
+                "drone_rom_inventory_fingerprint": drone_fingerprint,
+                "overmind_rom_inventory_fingerprint": overmind_fingerprint or None,
+                "fingerprint_algorithm": ROM_INVENTORY_FINGERPRINT_ALGORITHM,
+            },
+        )
+
     def update_device_status_notifications(self, offline_seconds: int, limit: int = 0) -> None:
         cutoff = datetime.utcnow() - timedelta(seconds=max(1, int(offline_seconds)))
         devices = [
@@ -2235,6 +2325,9 @@ class OvermindDatabase:
         is_inventory_delta = update_mode == "inventory_delta"
         if update_mode == "rom_hash_patch":
             self._apply_rom_metadata_hash_patch(device, metadata)
+            progress = metadata.get("hash_progress") if isinstance(metadata.get("hash_progress"), dict) else {}
+            if progress.get("complete"):
+                self.update_device_rom_inventory_fingerprint(device_id, compute_overmind=True)
             self.update_device_last_seen(device["id"])
             return
         before = {
@@ -2289,6 +2382,36 @@ class OvermindDatabase:
             self._delete_asset_rows(device_id, "rom", deleted.get("roms") or [])
             self._delete_asset_rows(device_id, "bios", deleted.get("bios") or [])
             self._delete_asset_rows(device_id, "artwork", deleted.get("artwork") or [])
+        drone_fingerprint = str(row_metadata.get("rom_inventory_fingerprint") or "").strip() or None
+        delta_complete = False
+        if is_inventory_delta:
+            delta_total = row_metadata.get("delta_total")
+            delta_index = row_metadata.get("delta_index")
+            delta_complete = bool(row_metadata.get("inventory_complete"))
+            if delta_total is None:
+                delta_complete = True
+            elif not delta_complete:
+                try:
+                    delta_complete = int(delta_index or 0) >= int(delta_total) - 1
+                except (TypeError, ValueError):
+                    delta_complete = True
+        should_compute_fingerprint = (
+            (is_inventory_chunk and bool(row_metadata.get("inventory_complete")))
+            or update_mode == "inventory"
+            or (is_inventory_delta and delta_complete)
+            or update_mode is None
+        )
+        if drone_fingerprint or should_compute_fingerprint:
+            self.update_device_rom_inventory_fingerprint(
+                device_id,
+                drone_fingerprint=drone_fingerprint,
+                compute_overmind=should_compute_fingerprint,
+            )
+            if drone_fingerprint:
+                metadata["rom_inventory_fingerprint"] = drone_fingerprint
+                metadata["rom_inventory_fingerprint_algorithm"] = (
+                    row_metadata.get("rom_inventory_fingerprint_algorithm") or ROM_INVENTORY_FINGERPRINT_ALGORITHM
+                )
         after = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
@@ -2302,7 +2425,7 @@ class OvermindDatabase:
         chunk_index = int(incoming.get("chunk_index") or 0)
         previous = device.get("rom_metadata") if isinstance(device.get("rom_metadata"), dict) else {}
         merged = dict(previous) if chunk_index else {}
-        for key in ("type", "device_id", "update_mode", "inventory_id", "chunk_total", "inventory_counts", "collected_at", "roms_root", "bios_root", "cache"):
+        for key in ("type", "device_id", "update_mode", "inventory_id", "chunk_total", "inventory_counts", "collected_at", "roms_root", "bios_root", "cache", "rom_inventory_fingerprint", "rom_inventory_fingerprint_algorithm"):
             if key in incoming:
                 merged[key] = incoming[key]
         for key in ("systems", "gamelists"):

@@ -8,6 +8,11 @@ ALTER TABLE drones ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAUL
 ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE drones ADD COLUMN IF NOT EXISTS authorization_token_id TEXT;
 ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash TEXT;
+ALTER TABLE drones ADD COLUMN IF NOT EXISTS rom_inventory_fingerprint TEXT;
+ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_rom_inventory_fingerprint TEXT;
+ALTER TABLE drones ADD COLUMN IF NOT EXISTS rom_inventory_fingerprint_algorithm TEXT;
+ALTER TABLE drones ADD COLUMN IF NOT EXISTS rom_inventory_fingerprint_at TIMESTAMPTZ;
+ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_rom_inventory_fingerprint_at TIMESTAMPTZ;
 ALTER TABLE drones ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE drones ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
 ALTER TABLE drones ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ;

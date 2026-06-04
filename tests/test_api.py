@@ -2871,6 +2871,147 @@ def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_la
     assert second.status_code == 200
     assert {row["file_path"] for row in db.get_device_roms("drone-a")} == {"New One.zip", "New Two.zip"}
     assert {row["file_path"] for row in db.get_device_bios("drone-a")} == {"new/bios.bin"}
+    device = db.get_device_by_device_id("drone-a")
+    assert device["rom_inventory_fingerprint"] == db_module.compute_rom_inventory_fingerprint(db.get_device_roms("drone-a"))
+
+
+def test_asset_metadata_final_chunk_stores_drone_rom_inventory_fingerprint(client):
+    client.post("/api/auth/register", json={"email": "fingerprint-upload@example.com", "username": "fingerprint-upload-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("fingerprint-upload@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    headers = {"Authorization": "Bearer drone-token-a"}
+    expected = db_module.compute_rom_inventory_fingerprint([
+        {"system": "snes", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 8},
+        {"system": "snes", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 9},
+    ])
+
+    first = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_chunk",
+            "replace_all": True,
+            "inventory_id": "fingerprint-1",
+            "chunk_index": 0,
+            "chunk_total": 2,
+            "inventory_complete": False,
+            "roms": [{"system": "snes", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 8}],
+        },
+    )
+    assert first.status_code == 200
+    assert not db.get_device_by_device_id("drone-a").get("rom_inventory_fingerprint")
+
+    second = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory_chunk",
+            "replace_all": True,
+            "inventory_id": "fingerprint-1",
+            "chunk_index": 1,
+            "chunk_total": 2,
+            "inventory_complete": True,
+            "rom_inventory_fingerprint": expected,
+            "rom_inventory_fingerprint_algorithm": db_module.ROM_INVENTORY_FINGERPRINT_ALGORITHM,
+            "roms": [{"system": "snes", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 9}],
+        },
+    )
+
+    assert second.status_code == 200
+    device = db.get_device_by_device_id("drone-a")
+    assert device["drone_rom_inventory_fingerprint"] == expected
+    assert device["rom_inventory_fingerprint"] == expected
+
+
+def test_heartbeat_queues_metadata_rebuild_when_rom_inventory_fingerprint_differs(client):
+    client.post("/api/auth/register", json={"email": "fingerprint-heartbeat@example.com", "username": "fingerprint-heartbeat-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("fingerprint-heartbeat@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    headers = {"Authorization": "Bearer drone-token-a"}
+    db.add_roms("drone-a", "snes", [{"rom_name": "Old.zip", "file_path": "Old.zip", "rom_md5": "old", "file_size": 1}])
+    db.update_device_rom_inventory_fingerprint("drone-a", compute_overmind=True)
+
+    response = client.post(
+        "/api/devices/drone-a/heartbeat",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "rom_inventory_fingerprint": "different",
+            "rom_inventory_fingerprint_algorithm": db_module.ROM_INVENTORY_FINGERPRINT_ALGORITHM,
+        },
+    )
+
+    assert response.status_code == 200
+    actions = response.json()["actions"]
+    assert len(actions) == 1
+    assert actions[0]["action"] == "rebuild_asset_metadata"
+    assert actions[0]["payload"]["reason"] == "rom_inventory_fingerprint_mismatch"
+
+    second = client.post(
+        "/api/devices/drone-a/heartbeat",
+        headers=headers,
+        json={"device_id": "drone-a", "rom_inventory_fingerprint": "different"},
+    )
+    assert second.status_code == 200
+    assert second.json()["actions"] == []
+
+
+def test_heartbeat_does_not_queue_metadata_rebuild_when_rom_inventory_fingerprint_matches(client):
+    client.post("/api/auth/register", json={"email": "fingerprint-match@example.com", "username": "fingerprint-match-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("fingerprint-match@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    headers = {"Authorization": "Bearer drone-token-a"}
+    db.add_roms("drone-a", "snes", [{"rom_name": "Same.zip", "file_path": "Same.zip", "rom_md5": "same", "file_size": 1}])
+    device = db.update_device_rom_inventory_fingerprint("drone-a", compute_overmind=True)
+
+    response = client.post(
+        "/api/devices/drone-a/heartbeat",
+        headers=headers,
+        json={"device_id": "drone-a", "rom_inventory_fingerprint": device["rom_inventory_fingerprint"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["actions"] == []
+
+
+def test_rom_hash_patch_completion_recomputes_overmind_fingerprint(client):
+    client.post("/api/auth/register", json={"email": "fingerprint-hash@example.com", "username": "fingerprint-hash-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("fingerprint-hash@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    headers = {"Authorization": "Bearer drone-token-a"}
+    upload = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory",
+            "roms": [{"system": "snes", "file_path": "A.zip", "rom_name": "A", "file_size": 1}],
+        },
+    )
+    assert upload.status_code == 200
+    before = db.get_device_by_device_id("drone-a")["rom_inventory_fingerprint"]
+
+    patch = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers=headers,
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "rom_hash_patch",
+            "roms": [{"system": "snes", "file_path": "A.zip", "rom_md5": "abc", "file_size": 1}],
+            "hash_progress": {"processed": 1, "total": 1, "complete": True},
+        },
+    )
+
+    assert patch.status_code == 200
+    after = db.get_device_by_device_id("drone-a")["rom_inventory_fingerprint"]
+    assert after != before
+    assert after == db_module.compute_rom_inventory_fingerprint(db.get_device_roms("drone-a"))
 
 
 def test_asset_metadata_delta_only_upserts_and_deletes_listed_assets(client):
@@ -4844,11 +4985,12 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
             if "FROM integration_tokens" in self.sql:
                 return []
             if "FROM drones d" in self.sql and "LEFT JOIN drone_network_state" in self.sql:
-                return [(
-                    "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
-                    None, "token-hash", created_at, created_at,
-                    443, "https", "https://drone-a:443", False, None, None,
-                    None, None, None, None, None, None, None,
+                    return [(
+                        "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
+                        None, "token-hash", created_at, created_at,
+                        None, None, None, None, None,
+                        443, "https", "https://drone-a:443", False, None, None,
+                        None, None, None, None, None, None, None,
                     None, None, None, None, None,
                 )]
             if "FROM device_admin_claims" in self.sql:
@@ -4901,11 +5043,12 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
             if "FROM integration_tokens" in self.sql:
                 return []
             if "FROM drones d" in self.sql and "LEFT JOIN drone_network_state" in self.sql:
-                return [(
-                    "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
-                    None, "token-hash", received_at, received_at,
-                    443, "https", "https://drone-a:443", False, None, None,
-                    None, None, None, None, None, None, None,
+                    return [(
+                        "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
+                        None, "token-hash", received_at, received_at,
+                        None, None, None, None, None,
+                        443, "https", "https://drone-a:443", False, None, None,
+                        None, None, None, None, None, None, None,
                     None, None, None, None, None,
                 )]
             if "FROM gameplay_sessions" in self.sql:
@@ -4964,17 +5107,19 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
             if "FROM integration_tokens" in self.sql:
                 return []
             if "FROM drones d" in self.sql and "LEFT JOIN drone_network_state" in self.sql:
-                return [(
-                    "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
-                    None, "target-hash", reported_at, reported_at,
-                    443, "https", "https://drone-a:443", False, None, None,
-                    None, None, None, None, None, None, None,
-                    None, None, None, None, None,
-                ), (
-                    "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
-                    None, "source-hash", reported_at, reported_at,
-                    443, "https", "https://drone-b:443", True, "198.51.100.2", reported_at,
-                    None, None, None, None, None, None, None,
+                    return [(
+                        "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
+                        None, "target-hash", reported_at, reported_at,
+                        None, None, None, None, None,
+                        443, "https", "https://drone-a:443", False, None, None,
+                        None, None, None, None, None, None, None,
+                        None, None, None, None, None,
+                    ), (
+                        "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
+                        None, "source-hash", reported_at, reported_at,
+                        None, None, None, None, None,
+                        443, "https", "https://drone-b:443", True, "198.51.100.2", reported_at,
+                        None, None, None, None, None, None, None,
                     None, None, None, None, None,
                 )]
             if "FROM drone_certificates" in self.sql:

@@ -1919,6 +1919,12 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
             db.store_download_state(device_id, heartbeat["downloads"])
         except Exception:
             logger.exception("Heartbeat download state update failed device_id=%s", device_id)
+    rom_fingerprint = str(heartbeat.get("rom_inventory_fingerprint") or "").strip()
+    if rom_fingerprint:
+        try:
+            db.ensure_rom_metadata_sync_action_for_fingerprint(device_id, rom_fingerprint)
+        except Exception:
+            logger.exception("Heartbeat ROM fingerprint comparison failed device_id=%s", device_id)
     try:
         actions = db.claim_pending_device_actions(device_id)
     except Exception:
