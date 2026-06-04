@@ -18,6 +18,22 @@ except Exception:
     _cache = None  # type: ignore[assignment]
 
 
+def _compute_asset_keys(asset_type: str, payload: dict, system_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Return (master_key, sort_key) for a ROM or BIOS asset row, or (None, None) for artwork."""
+    if asset_type == "rom":
+        md5 = str(payload.get("rom_md5") or "").strip().lower()
+        sys = str(system_name or "").strip().lower()
+        path = str(payload.get("file_path") or payload.get("rom_name") or "").strip().lower()
+        mk = f"md5:{md5}" if md5 else f"path:{sys}:{path}"
+        return mk, f"{sys}:{path}"
+    if asset_type == "bios":
+        md5 = str(payload.get("bios_md5") or payload.get("md5") or "").strip().lower()
+        path = str(payload.get("file_path") or payload.get("relative_path") or payload.get("bios_name") or "").strip().lower()
+        mk = f"md5:{md5}" if md5 else f"path:{path}"
+        return mk, path
+    return None, None
+
+
 def _is_excluded_emulator_config_path(value: str) -> bool:
     label = str(value or "").replace("\\", "/").strip("/")
     lowered = label.lower()
@@ -1114,6 +1130,55 @@ class PostgresMetadataStore:
                           applied_at = EXCLUDED.applied_at
             """
         )
+        # v2: stored master_key / sort_key columns with covering index
+        cur.execute("SELECT version FROM overmind_schema_versions WHERE id = 'relational'")
+        schema_row = cur.fetchone()
+        if not schema_row or int(schema_row[0] or 0) < 2:
+            cur.execute("ALTER TABLE overmind_device_assets ADD COLUMN IF NOT EXISTS master_key TEXT")
+            cur.execute("ALTER TABLE overmind_device_assets ADD COLUMN IF NOT EXISTS sort_key TEXT")
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_oda_master_key_cover
+                ON overmind_device_assets (device_internal_id, asset_type, master_key, sort_key)
+                WHERE master_key IS NOT NULL
+                """
+            )
+            cur.execute(
+                """
+                UPDATE overmind_device_assets SET
+                    master_key = CASE
+                        WHEN asset_type = 'rom' THEN
+                            CASE WHEN nullif(lower(coalesce(payload->>'rom_md5', '')), '') IS NOT NULL
+                                 THEN 'md5:' || lower(payload->>'rom_md5')
+                            ELSE 'path:' || lower(coalesce(system_name, '')) || ':' ||
+                                            lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
+                            END
+                        WHEN asset_type = 'bios' THEN
+                            CASE WHEN nullif(lower(coalesce(payload->>'bios_md5', payload->>'md5', '')), '') IS NOT NULL
+                                 THEN 'md5:' || lower(coalesce(payload->>'bios_md5', payload->>'md5'))
+                            ELSE 'path:' || lower(coalesce(payload->>'file_path', payload->>'relative_path', payload->>'bios_name', ''))
+                            END
+                        ELSE NULL
+                    END,
+                    sort_key = CASE
+                        WHEN asset_type = 'rom'  THEN lower(coalesce(system_name, '')) || ':' ||
+                                                       lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
+                        WHEN asset_type = 'bios' THEN lower(coalesce(payload->>'file_path',
+                                                              payload->>'relative_path', payload->>'bios_name', ''))
+                        ELSE NULL
+                    END
+                WHERE master_key IS NULL AND asset_type IN ('rom', 'bios')
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO overmind_schema_versions (id, version, applied_at)
+                VALUES ('relational', 2, now())
+                ON CONFLICT (id) DO UPDATE SET
+                    version = GREATEST(overmind_schema_versions.version, EXCLUDED.version),
+                    applied_at = EXCLUDED.applied_at
+                """
+            )
 
     def assets_enabled(self) -> bool:
         if not self.url:
@@ -4438,8 +4503,32 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     INSERT INTO overmind_device_assets
-                        (device_internal_id, device_id, asset_type, item_key, system_name, payload, updated_at)
-                    SELECT device_internal_id, device_id, asset_type, item_key, system_name, payload, now()
+                        (device_internal_id, device_id, asset_type, item_key, system_name, payload,
+                         master_key, sort_key, updated_at)
+                    SELECT device_internal_id, device_id, asset_type, item_key, system_name, payload,
+                        CASE
+                            WHEN asset_type = 'rom' THEN
+                                CASE WHEN nullif(lower(coalesce(payload->>'rom_md5', '')), '') IS NOT NULL
+                                     THEN 'md5:' || lower(payload->>'rom_md5')
+                                ELSE 'path:' || lower(coalesce(system_name, '')) || ':' ||
+                                                lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
+                                END
+                            WHEN asset_type = 'bios' THEN
+                                CASE WHEN nullif(lower(coalesce(payload->>'bios_md5', payload->>'md5', '')), '') IS NOT NULL
+                                     THEN 'md5:' || lower(coalesce(payload->>'bios_md5', payload->>'md5'))
+                                ELSE 'path:' || lower(coalesce(payload->>'file_path',
+                                                       payload->>'relative_path', payload->>'bios_name', ''))
+                                END
+                            ELSE NULL
+                        END,
+                        CASE
+                            WHEN asset_type = 'rom'  THEN lower(coalesce(system_name, '')) || ':' ||
+                                                           lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
+                            WHEN asset_type = 'bios' THEN lower(coalesce(payload->>'file_path',
+                                                                  payload->>'relative_path', payload->>'bios_name', ''))
+                            ELSE NULL
+                        END,
+                        now()
                     FROM overmind_device_asset_staging
                     WHERE device_internal_id = %s AND inventory_id = %s
                     """,
@@ -4587,7 +4676,8 @@ class PostgresMetadataStore:
             system_name = str(row.get("system_name") or row.get("system") or "").strip() or None
             row_id = str(row.get("id") or item_key)
             payload = {**row, "id": row_id, "device_id": row.get("device_id") or device_id}
-            prepared.append((device_internal_id, device_id, asset_type, item_key, system_name, json.dumps(_encode_state(payload))))
+            mk, sk = _compute_asset_keys(asset_type, payload, system_name)
+            prepared.append((device_internal_id, device_id, asset_type, item_key, system_name, json.dumps(_encode_state(payload)), mk, sk))
             row_ids.append(row_id)
         with conn:
             with conn.cursor() as cur:
@@ -4609,13 +4699,16 @@ class PostgresMetadataStore:
                 if prepared:
                     cur.executemany(
                         """
-                        INSERT INTO overmind_device_assets (device_internal_id, device_id, asset_type, item_key, system_name, payload, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s::jsonb, now())
+                        INSERT INTO overmind_device_assets
+                            (device_internal_id, device_id, asset_type, item_key, system_name, payload, master_key, sort_key, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, now())
                         ON CONFLICT (device_internal_id, asset_type, item_key)
-                        DO UPDATE SET device_id = EXCLUDED.device_id,
+                        DO UPDATE SET device_id   = EXCLUDED.device_id,
                                       system_name = EXCLUDED.system_name,
-                                      payload = EXCLUDED.payload,
-                                      updated_at = now()
+                                      payload     = EXCLUDED.payload,
+                                      master_key  = EXCLUDED.master_key,
+                                      sort_key    = EXCLUDED.sort_key,
+                                      updated_at  = now()
                         """,
                         prepared,
                     )
@@ -4875,35 +4968,76 @@ class PostgresMetadataStore:
         if conn is None:
             return [], 0
         offset = (page - 1) * per_page
-        if asset_type == "rom":
-            master_key = """
-                CASE
-                    WHEN nullif(lower(coalesce(payload->>'rom_md5', '')), '') IS NOT NULL
-                        THEN 'md5:' || lower(payload->>'rom_md5')
-                    ELSE 'path:' || lower(coalesce(system_name, '')) || ':' || lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
-                END
-            """
-            sort_key = "lower(coalesce(system_name, '')) || ':' || lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))"
-            source = "overmind_device_assets"
-            extra_select = "NULL::text AS artwork_type"
-        elif asset_type == "bios":
-            master_key = """
-                CASE
-                    WHEN nullif(lower(coalesce(payload->>'bios_md5', payload->>'md5', '')), '') IS NOT NULL
-                        THEN 'md5:' || lower(coalesce(payload->>'bios_md5', payload->>'md5'))
-                    ELSE 'path:' || lower(coalesce(payload->>'file_path', payload->>'relative_path', payload->>'bios_name', ''))
-                END
-            """
-            sort_key = "lower(coalesce(payload->>'file_path', payload->>'relative_path', payload->>'bios_name', ''))"
-            source = "overmind_device_assets"
-            extra_select = "NULL::text AS artwork_type"
+        if asset_type in ("rom", "bios"):
+            # Fast path: use stored master_key/sort_key columns + covering index.
+            clauses: list[str] = [
+                "device_internal_id = ANY(%s)",
+                "asset_type = %s",
+                "master_key IS NOT NULL",
+                "master_key <> ''",
+            ]
+            base_params: list[object] = [ids, asset_type]
+            clean_query = str(query or "").strip().lower()
+            if clean_query:
+                # Pushed to base table so the GIN trgm index can be used.
+                clauses.append("lower(payload::text) LIKE %s")
+                base_params.append(f"%{clean_query}%")
+            clean_system = str(system_name or "").strip().lower()
+            if clean_system:
+                clauses.append("lower(coalesce(system_name, '')) = %s")
+                base_params.append(clean_system)
+            clean_status = str(status or "").strip().lower()
+            if selected_internal_id and clean_status in {"missing", "present"}:
+                presence = "EXISTS" if clean_status == "present" else "NOT EXISTS"
+                clauses.append(
+                    f"{presence} (SELECT 1 FROM overmind_device_assets x"
+                    f" WHERE x.device_internal_id = %s AND x.asset_type = %s AND x.master_key = overmind_device_assets.master_key)"
+                )
+                base_params.extend([str(selected_internal_id), asset_type])
+            selected_param = str(selected_internal_id) if selected_internal_id else None
+            where = " AND ".join(clauses)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        WITH filtered AS (
+                            SELECT master_key, MIN(sort_key) AS sort_key
+                            FROM overmind_device_assets
+                            WHERE {where}
+                            GROUP BY master_key
+                        ),
+                        counted AS (
+                            SELECT master_key, sort_key, COUNT(*) OVER () AS total_count
+                            FROM filtered
+                        ),
+                        paged AS (
+                            SELECT master_key, total_count
+                            FROM counted
+                            ORDER BY sort_key, master_key
+                            LIMIT %s OFFSET %s
+                        )
+                        SELECT a.device_internal_id, a.payload, a.master_key, NULL::text AS artwork_type,
+                               CASE WHEN %s::text IS NULL THEN false ELSE EXISTS (
+                                   SELECT 1 FROM overmind_device_assets s
+                                   WHERE s.device_internal_id = %s AND s.asset_type = %s
+                                     AND s.master_key = a.master_key
+                               ) END AS present_on_selected,
+                               p.total_count
+                        FROM overmind_device_assets a
+                        JOIN paged p ON p.master_key = a.master_key
+                        WHERE a.device_internal_id = ANY(%s) AND a.asset_type = %s
+                        ORDER BY a.sort_key, a.master_key, a.device_internal_id
+                        """,
+                        [*base_params, per_page, offset, selected_param, selected_param, asset_type, ids, asset_type],
+                    )
+                    rows = cur.fetchall()
         elif asset_type == "artwork":
-            master_key = """
+            master_key_expr = """
                 'artwork:' || lower(coalesce(system_name, payload->>'system', '')) || ':' ||
                 lower(coalesce(payload->>'rom_path', payload->>'file_path', payload->>'rom_name', '')) || ':' ||
                 lower(artwork_type.value)
             """
-            sort_key = """
+            sort_key_expr = """
                 lower(coalesce(system_name, payload->>'system', '')) || ':' ||
                 lower(coalesce(payload->>'rom_path', payload->>'file_path', payload->>'rom_name', '')) || ':' ||
                 lower(artwork_type.value)
@@ -4912,77 +5046,65 @@ class PostgresMetadataStore:
                 overmind_device_assets
                 CROSS JOIN LATERAL jsonb_array_elements_text(coalesce(payload->'artwork_types', '[]'::jsonb)) AS artwork_type(value)
             """
-            extra_select = "artwork_type.value AS artwork_type"
+            normalized_sql = f"""
+                SELECT device_internal_id, device_id, payload, system_name, artwork_type.value AS artwork_type,
+                       {master_key_expr} AS master_key,
+                       {sort_key_expr} AS sort_key
+                FROM {source}
+                WHERE device_internal_id = ANY(%s) AND asset_type = %s
+            """
+            clauses_aw = ["n.master_key <> ''"]
+            filters_aw: list[object] = []
+            clean_query = str(query or "").strip().lower()
+            if clean_query:
+                clauses_aw.append("lower(n.payload::text) LIKE %s")
+                filters_aw.append(f"%{clean_query}%")
+            clean_system = str(system_name or "").strip().lower()
+            if clean_system:
+                clauses_aw.append("lower(coalesce(n.system_name, n.payload->>'system', '')) = %s")
+                filters_aw.append(clean_system)
+            clean_artwork_type = str(artwork_type or "").strip().lower()
+            if clean_artwork_type:
+                clauses_aw.append("lower(coalesce(n.artwork_type, '')) = %s")
+                filters_aw.append(clean_artwork_type)
+            selected_param = str(selected_internal_id) if selected_internal_id else None
+            base_params_aw = [ids, asset_type, *filters_aw]
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        WITH normalized AS ({normalized_sql}),
+                        filtered_keys AS (
+                            SELECT n.master_key, min(n.sort_key) AS sort_key
+                            FROM normalized n
+                            WHERE {" AND ".join(clauses_aw)}
+                            GROUP BY n.master_key
+                        ),
+                        counted_keys AS (
+                            SELECT master_key, sort_key, COUNT(*) OVER () AS total_count
+                            FROM filtered_keys
+                        ),
+                        paged_keys AS (
+                            SELECT master_key, total_count
+                            FROM counted_keys
+                            ORDER BY sort_key, master_key
+                            LIMIT %s OFFSET %s
+                        )
+                        SELECT n.device_internal_id, n.payload, n.master_key, n.artwork_type,
+                               CASE WHEN %s::text IS NULL THEN false ELSE EXISTS (
+                                   SELECT 1 FROM normalized selected
+                                   WHERE selected.master_key = n.master_key AND selected.device_internal_id = %s
+                               ) END AS present_on_selected,
+                               p.total_count
+                        FROM normalized n
+                        JOIN paged_keys p ON p.master_key = n.master_key
+                        ORDER BY n.sort_key, n.master_key, n.device_internal_id
+                        """,
+                        [*base_params_aw, per_page, offset, selected_param, selected_param],
+                    )
+                    rows = cur.fetchall()
         else:
             return [], 0
-
-        normalized_sql = f"""
-            SELECT device_internal_id, device_id, payload, system_name, {extra_select},
-                   {master_key} AS master_key,
-                   {sort_key} AS sort_key
-            FROM {source}
-            WHERE device_internal_id = ANY(%s) AND asset_type = %s
-        """
-        clauses = ["n.master_key <> ''"]
-        filters: list[object] = []
-        clean_query = str(query or "").strip().lower()
-        if clean_query:
-            clauses.append("lower(n.payload::text) LIKE %s")
-            filters.append(f"%{clean_query}%")
-        clean_system = str(system_name or "").strip().lower()
-        if clean_system:
-            clauses.append("lower(coalesce(n.system_name, n.payload->>'system', '')) = %s")
-            filters.append(clean_system)
-        clean_artwork_type = str(artwork_type or "").strip().lower()
-        if clean_artwork_type and asset_type == "artwork":
-            clauses.append("lower(coalesce(n.artwork_type, '')) = %s")
-            filters.append(clean_artwork_type)
-        clean_status = str(status or "").strip().lower()
-        if selected_internal_id and clean_status in {"missing", "present"}:
-            presence = "EXISTS" if clean_status == "present" else "NOT EXISTS"
-            clauses.append(
-                f"{presence} (SELECT 1 FROM normalized selected WHERE selected.master_key = n.master_key AND selected.device_internal_id = %s)"
-            )
-            filters.append(str(selected_internal_id))
-        filtered_sql = f"""
-            filtered_keys AS (
-                SELECT n.master_key, min(n.sort_key) AS sort_key
-                FROM normalized n
-                WHERE {" AND ".join(clauses)}
-                GROUP BY n.master_key
-            )
-        """
-        base_params = [ids, asset_type, *filters]
-        selected_param = str(selected_internal_id) if selected_internal_id else None
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    WITH normalized AS ({normalized_sql}),
-                    {filtered_sql},
-                    counted_keys AS (
-                        SELECT master_key, sort_key, COUNT(*) OVER () AS total_count
-                        FROM filtered_keys
-                    ),
-                    paged_keys AS (
-                        SELECT master_key, total_count
-                        FROM counted_keys
-                        ORDER BY sort_key, master_key
-                        LIMIT %s OFFSET %s
-                    )
-                    SELECT n.device_internal_id, n.payload, n.master_key, n.artwork_type,
-                           CASE WHEN %s::text IS NULL THEN false ELSE EXISTS (
-                               SELECT 1 FROM normalized selected
-                               WHERE selected.master_key = n.master_key AND selected.device_internal_id = %s
-                           ) END AS present_on_selected,
-                           p.total_count
-                    FROM normalized n
-                    JOIN paged_keys p ON p.master_key = n.master_key
-                    ORDER BY n.sort_key, n.master_key, n.device_internal_id
-                    """,
-                    [*base_params, per_page, offset, selected_param, selected_param],
-                )
-                rows = cur.fetchall()
         if not rows:
             return [], 0
         total = int(rows[0][5] or 0)
