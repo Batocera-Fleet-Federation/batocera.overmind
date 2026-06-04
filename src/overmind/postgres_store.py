@@ -337,8 +337,15 @@ class PostgresMetadataStore:
         conn = self._connect()
         if conn is None:
             return
+        # Phase 1: table DDL + fast column migrations, serialized via advisory lock.
+        # The advisory lock prevents concurrent Lambda cold starts from racing on
+        # CREATE INDEX / ALTER TABLE statements, which caused connection exhaustion
+        # when many instances timed out mid-migration holding table locks.
+        indexes_needed: list[str] = []
         with conn:
             with conn.cursor() as cur:
+                # Serialize concurrent schema migrations across Lambda instances.
+                cur.execute("SELECT pg_advisory_xact_lock(5432000001)")
                 if os.getenv("OVERMIND_RESET_RELATIONAL_SCHEMA", "").lower() == "true":
                     self._drop_existing_schema(cur)
                 cur.execute(
@@ -393,33 +400,29 @@ class PostgresMetadataStore:
                 )
                 cur.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_device_type
-                    ON overmind_device_assets (device_internal_id, asset_type)
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_overmind_device_asset_staging_inventory
-                    ON overmind_device_asset_staging (device_internal_id, inventory_id, asset_type)
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_type_system
-                    ON overmind_device_assets (asset_type, system_name)
-                    """
-                )
-                cur.execute(
-                    """
                     UPDATE overmind_app_state
                     SET state = state - 'roms' - 'bios' - 'artwork'
                     WHERE id = 'default'
                       AND (state ? 'roms' OR state ? 'bios' OR state ? 'artwork')
                     """
                 )
-                self._ensure_relational_schema(cur)
+                indexes_needed = self._ensure_relational_schema(cur)
+        # Tables exist — mark ready so requests can proceed even if index creation
+        # below fails or is interrupted by a Lambda timeout.
         self._ready = True
         self.last_error = None
+        # Phase 2: index creation outside the main transaction, each in its own
+        # connection so a slow/failing index doesn't block the others or hold locks.
+        for index_sql in indexes_needed:
+            idx_conn = self._connect()
+            if idx_conn is None:
+                break
+            try:
+                with idx_conn:
+                    with idx_conn.cursor() as cur:
+                        cur.execute(index_sql)
+            except Exception as idx_err:
+                logger.warning("Index creation deferred (non-fatal): %s — %s", index_sql[:80], idx_err)
 
     def _drop_existing_schema(self, cur) -> None:
         """Drop all known Overmind tables for an intentional no-migration rebuild."""
@@ -478,8 +481,8 @@ class PostgresMetadataStore:
             """
         )
 
-    def _ensure_relational_schema(self, cur) -> None:
-        """Create the normalized Overmind schema used by the relational repository."""
+    def _ensure_relational_schema(self, cur) -> list:
+        """Create the normalized Overmind schema. Returns index SQL to run outside the transaction."""
         statements = [
             """
             CREATE TABLE IF NOT EXISTS overmind_schema_versions (
@@ -1094,33 +1097,7 @@ class PostgresMetadataStore:
         for statement in migrations:
             cur.execute(statement)
         cur.execute("ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS batocera_info JSONB")
-        indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_drones_user_swarm ON drones(user_id, swarm_id)",
-            "CREATE INDEX IF NOT EXISTS idx_drones_device_id ON drones(device_id)",
-            "CREATE INDEX IF NOT EXISTS idx_roms_swarm_search ON drone_roms(system_name, rom_md5, normalized_path)",
-            "CREATE INDEX IF NOT EXISTS idx_roms_drone_system ON drone_roms(drone_id, system_name)",
-            "CREATE INDEX IF NOT EXISTS idx_bios_hash ON drone_bios(bios_md5)",
-            "CREATE INDEX IF NOT EXISTS idx_artwork_lookup ON drone_artwork(system_name, normalized_rom_path, artwork_type)",
-            "CREATE INDEX IF NOT EXISTS idx_actions_drone_status ON drone_actions(drone_id, status, created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_sync_activity_target ON sync_activity(target_drone_id, received_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_gameplay_drone_system ON gameplay_sessions(drone_id, system_name, played_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_gameplay_drone_received ON gameplay_sessions(drone_id, received_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received ON drone_speed_samples(drone_id, received_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_events_drone_received ON drone_events(drone_id, received_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received ON drone_peer_checks(source_drone_id, received_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_notifications_swarm_created ON notifications(swarm_id, created_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery ON notifications(delivery_pending, created_at) WHERE delivery_pending IS TRUE AND delivery_completed_at IS NULL",
-            "CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_device_id ON overmind_device_assets (device_id, asset_type)",
-        ]
-        for statement in indexes:
-            cur.execute(statement)
-        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_payload_trgm
-            ON overmind_device_assets USING GIN (lower(payload::text) gin_trgm_ops)
-            """
-        )
+        # v1: column migrations already applied above; bump version if not yet set
         cur.execute(
             """
             INSERT INTO overmind_schema_versions (id, version, applied_at)
@@ -1136,13 +1113,6 @@ class PostgresMetadataStore:
         if not schema_row or int(schema_row[0] or 0) < 2:
             cur.execute("ALTER TABLE overmind_device_assets ADD COLUMN IF NOT EXISTS master_key TEXT")
             cur.execute("ALTER TABLE overmind_device_assets ADD COLUMN IF NOT EXISTS sort_key TEXT")
-            cur.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_oda_master_key_cover
-                ON overmind_device_assets (device_internal_id, asset_type, master_key, sort_key)
-                WHERE master_key IS NOT NULL
-                """
-            )
             cur.execute(
                 """
                 UPDATE overmind_device_assets SET
@@ -1179,6 +1149,33 @@ class PostgresMetadataStore:
                     applied_at = EXCLUDED.applied_at
                 """
             )
+        # Return indexes to be created outside the transaction (non-blocking, non-fatal).
+        # These are kept separate to avoid long table locks during Lambda cold starts.
+        # The GIN trigram index on payload (idx_overmind_device_assets_payload_trgm)
+        # has been removed — it was enormous, slow to build, and not required for
+        # core ROM queries.
+        return [
+            "CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_device_type ON overmind_device_assets (device_internal_id, asset_type)",
+            "CREATE INDEX IF NOT EXISTS idx_overmind_device_asset_staging_inventory ON overmind_device_asset_staging (device_internal_id, inventory_id, asset_type)",
+            "CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_type_system ON overmind_device_assets (asset_type, system_name)",
+            "CREATE INDEX IF NOT EXISTS idx_drones_user_swarm ON drones(user_id, swarm_id)",
+            "CREATE INDEX IF NOT EXISTS idx_drones_device_id ON drones(device_id)",
+            "CREATE INDEX IF NOT EXISTS idx_roms_swarm_search ON drone_roms(system_name, rom_md5, normalized_path)",
+            "CREATE INDEX IF NOT EXISTS idx_roms_drone_system ON drone_roms(drone_id, system_name)",
+            "CREATE INDEX IF NOT EXISTS idx_bios_hash ON drone_bios(bios_md5)",
+            "CREATE INDEX IF NOT EXISTS idx_artwork_lookup ON drone_artwork(system_name, normalized_rom_path, artwork_type)",
+            "CREATE INDEX IF NOT EXISTS idx_actions_drone_status ON drone_actions(drone_id, status, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_sync_activity_target ON sync_activity(target_drone_id, received_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_gameplay_drone_system ON gameplay_sessions(drone_id, system_name, played_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_gameplay_drone_received ON gameplay_sessions(drone_id, received_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received ON drone_speed_samples(drone_id, received_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_events_drone_received ON drone_events(drone_id, received_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received ON drone_peer_checks(source_drone_id, received_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_swarm_created ON notifications(swarm_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery ON notifications(delivery_pending, created_at) WHERE delivery_pending IS TRUE AND delivery_completed_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS idx_overmind_device_assets_device_id ON overmind_device_assets (device_id, asset_type)",
+            "CREATE INDEX IF NOT EXISTS idx_oda_master_key_cover ON overmind_device_assets (device_internal_id, asset_type, master_key, sort_key) WHERE master_key IS NOT NULL",
+        ]
 
     def assets_enabled(self) -> bool:
         if not self.url:
