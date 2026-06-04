@@ -131,9 +131,11 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
     network = device.get("network") if isinstance(device.get("network"), dict) else {}
     public_ip = network.get("public_ip") or network.get("public")
     public_reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
-    public_resolvable = bool(public_reachability.get("resolvable")) and str(public_reachability.get("public_ip") or "") == str(public_ip or "")
-    if public_reachability.get("checked_at") or public_reachability.get("failure_reason"):
-        online = public_resolvable
+    is_peer_resolvable = getattr(data_store, "is_drone_peer_resolvable", None)
+    peer_resolvable = bool(is_peer_resolvable(device.get("device_id") or "")) if callable(is_peer_resolvable) else False
+    public_resolvable = peer_resolvable
+    get_peer_resolvers = getattr(data_store, "get_peer_resolvers", None)
+    peer_resolved_by = get_peer_resolvers(device.get("device_id") or "") if callable(get_peer_resolvers) else []
     rom_count = 0
     try:
         count_device_roms = getattr(data_store, "count_device_roms", None)
@@ -173,6 +175,8 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
         "scheme": device.get("scheme") or "https",
         "reachable_url": device.get("reachable_url"),
         "public_resolvable": public_resolvable,
+        "peer_resolvable": peer_resolvable,
+        "peer_resolved_by": peer_resolved_by,
         "public_reachability": public_reachability,
         "certificate": cert or None,
         "peer_checks": data_store.get_latest_peer_checks(device.get("device_id")) if device.get("device_id") else [],

@@ -1669,13 +1669,7 @@ class OvermindDatabase:
                 elif last_seen.tzinfo is not None and cutoff.tzinfo is None:
                     cutoff = cutoff.replace(tzinfo=last_seen.tzinfo)
 
-            reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
-            public_ip = (device.get("network") or {}).get("public_ip") or (device.get("network") or {}).get("public")
-            public_resolvable = bool(reachability.get("resolvable")) and str(reachability.get("public_ip") or "") == str(public_ip or "")
-            if reachability.get("checked_at") or reachability.get("failure_reason"):
-                is_online = public_resolvable
-            else:
-                is_online = bool(last_seen and last_seen >= cutoff)
+            is_online = bool(last_seen and last_seen >= cutoff)
             current = "online" if is_online else "offline"
             previous = device.get("last_known_status") or current
             if previous == current:
@@ -1715,6 +1709,14 @@ class OvermindDatabase:
         if not device:
             return []
         cutoff = datetime.utcnow() - timedelta(seconds=max(1, int(offline_seconds)))
+        # Build a set of peer-resolvable device_ids from the peer_checks buckets
+        peer_resolvable_ids: set = set()
+        for bucket in self.peer_checks.values():
+            for check in bucket:
+                if check.get("status") == "pass":
+                    target = check.get("target_drone_id")
+                    if target:
+                        peer_resolvable_ids.add(str(target))
         output = []
         for peer in self.get_user_devices(device["user_id"]):
             resolved = peer.get("resolved_network") or {}
@@ -1726,8 +1728,8 @@ class OvermindDatabase:
             public_host = str(public_ip or "").strip()
             if ":" in public_host and not public_host.startswith("["):
                 public_host = f"[{public_host}]"
-            reachability = peer.get("public_reachability") if isinstance(peer.get("public_reachability"), dict) else {}
-            public_resolvable = bool(reachability.get("resolvable")) and str(reachability.get("public_ip") or "") == str(public_ip or "")
+            peer_device_id = str(peer.get("device_id") or "")
+            public_resolvable = peer_device_id in peer_resolvable_ids and bool(public_ip)
             port_suffix = "" if api_port == 443 and scheme == "https" else f":{api_port}"
             public_reachable_url = f"{scheme}://{public_host}{port_suffix}" if public_host and public_resolvable else None
             last_seen = peer.get("last_seen")
@@ -1737,9 +1739,9 @@ class OvermindDatabase:
                     last_seen = last_seen.replace(tzinfo=peer_cutoff.tzinfo)
                 elif last_seen.tzinfo is not None and peer_cutoff.tzinfo is None:
                     peer_cutoff = peer_cutoff.replace(tzinfo=last_seen.tzinfo)
-            online = public_resolvable if (reachability.get("checked_at") or reachability.get("failure_reason")) else bool(last_seen and last_seen >= peer_cutoff)
+            online = bool(last_seen and last_seen >= peer_cutoff)
             output.append({
-                "drone_id": peer.get("device_id"),
+                "drone_id": peer_device_id,
                 "name": peer.get("device_name"),
                 "local_ip": ipv4[0] if ipv4 else (peer.get("batocera_info") or {}).get("ip_address"),
                 "public_ip": public_ip,
@@ -2319,6 +2321,43 @@ class OvermindDatabase:
                     "source_name": device.get("device_name") or (device.get("system_info") or {}).get("hostname") or device_id,
                 }
         return sorted(latest.values(), key=lambda row: str(row.get("target_name") or row.get("target_drone_id") or "").lower())
+
+    def is_drone_peer_resolvable(self, device_id: str) -> bool:
+        """Return True if any other drone has a passing peer-check targeting this device."""
+        for bucket in self.peer_checks.values():
+            for check in bucket:
+                if str(check.get("target_drone_id") or "") == device_id and check.get("status") == "pass":
+                    return True
+        return False
+
+    def get_peer_resolvers(self, device_id: str) -> List[dict]:
+        """Return list of drones that have a passing peer-check for this device (latest per source)."""
+        latest: Dict[str, dict] = {}
+        for bucket in self.peer_checks.values():
+            for check in bucket:
+                if str(check.get("target_drone_id") or "") != device_id:
+                    continue
+                src = str(check.get("source_drone_id") or "")
+                if not src or src == device_id:
+                    continue
+                prev = latest.get(src)
+                if prev is None or str(check.get("checked_at") or "") >= str(prev.get("checked_at") or ""):
+                    latest[src] = check
+        devices_by_id = {}
+        for internal_id, device in self.devices.items():
+            dev_id = device.get("device_id")
+            if dev_id:
+                devices_by_id[str(dev_id)] = device
+        result = []
+        for src, check in latest.items():
+            if check.get("status") != "pass":
+                continue
+            peer = devices_by_id.get(src) or {}
+            result.append({
+                **check,
+                "source_name": peer.get("device_name") or (peer.get("system_info") or {}).get("hostname") or src,
+            })
+        return sorted(result, key=lambda row: str(row.get("source_name") or row.get("source_drone_id") or "").lower())
 
     def get_speed_samples(self, user_id: str, device_id: str) -> Optional[List[dict]]:
         device = self.get_device_by_device_id(device_id)

@@ -5,11 +5,9 @@ import binascii
 import hashlib
 import hmac
 import html
-import ipaddress
 import logging
 import os
 import secrets
-import ssl
 import sys
 import threading
 import time
@@ -19,7 +17,6 @@ import urllib.request
 import uuid
 import json
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -92,14 +89,6 @@ SUPPORTED_DEVICE_ACTIONS = {
     "cancel_download",
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
-PUBLIC_PEER_PROBE_INTERVAL_SECONDS = int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", "60"))
-PUBLIC_PEER_PROBE_TIMEOUT_SECONDS = float(os.getenv("PUBLIC_PEER_PROBE_TIMEOUT_SECONDS", "2"))
-PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN = max(0, int(os.getenv(
-    "PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN",
-    "0",
-)))
-PUBLIC_PEER_PROBE_PORTS = (443,)
-PUBLIC_PEER_PROBE_PATH = os.getenv("PUBLIC_PEER_PROBE_PATH", "/health")
 NOTIFICATION_DELIVERY_INTERVAL_SECONDS = int(os.getenv("NOTIFICATION_DELIVERY_INTERVAL_SECONDS", "180"))
 NOTIFICATION_DELIVERY_MAX_NOTIFICATIONS_PER_RUN = max(0, int(os.getenv(
     "NOTIFICATION_DELIVERY_MAX_NOTIFICATIONS_PER_RUN",
@@ -306,7 +295,6 @@ app = FastAPI(
     version=APP_VERSION.lstrip("v"),
 )
 _RUNTIME_SECRET_REFRESHER = None
-_PUBLIC_PEER_PROBE_THREAD = None
 _NOTIFICATION_DELIVERY_THREAD = None
 _RUNTIME_INITIALIZED = False
 
@@ -340,148 +328,6 @@ def run_https_app() -> None:
     _run_https_app(app, certificate_loader=ensure_self_signed_cert)
 
 
-def probe_device_public_endpoint(device: dict) -> dict:
-    """Check whether a Drone's public HTTPS health endpoint returns HTTP 200."""
-    checked_at = datetime.utcnow()
-    network = device.get("network") if isinstance(device.get("network"), dict) else {}
-    public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
-    result = {
-        "resolvable": False,
-        "public_ip": public_ip or None,
-        "api_port": 443,
-        "checked_at": checked_at,
-        "latency_ms": None,
-        "failure_reason": None,
-    }
-
-    try:
-        parsed_ip = ipaddress.ip_address(public_ip.strip("[]"))
-    except ValueError:
-        result["failure_reason"] = "No valid public IP address reported"
-        return result
-    if not parsed_ip.is_global:
-        result["failure_reason"] = "Reported public IP is not globally routable"
-        return result
-
-    started = time.monotonic()
-    timeout = max(0.05, PUBLIC_PEER_PROBE_TIMEOUT_SECONDS)
-    host = public_ip
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    path = "/" + str(PUBLIC_PEER_PROBE_PATH or "/health").lstrip("/")
-    url = f"https://{host}:443{path}"
-    request = urllib.request.Request(url, method="GET")
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=timeout,
-            context=ssl._create_unverified_context(),
-        ) as response:
-            status_code = int(getattr(response, "status", response.getcode()))
-        result["status_code"] = status_code
-        result["latency_ms"] = int((time.monotonic() - started) * 1000)
-        if status_code == 200:
-            result["resolvable"] = True
-            result["discovered_port"] = 443
-            result["reachable_url"] = f"https://{host}"
-        else:
-            result["failure_reason"] = f"Health check returned HTTP {status_code}"
-    except urllib.error.HTTPError as error:
-        result["status_code"] = int(error.code)
-        result["failure_reason"] = f"Health check returned HTTP {error.code}"
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        reason = getattr(error, "reason", None) or str(error) or error.__class__.__name__
-        result["failure_reason"] = f"Health check failed: {reason}"
-    result["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
-    return result
-
-
-def public_reachability_already_resolved(device: dict) -> bool:
-    """Return whether a stored health result matches the current public IP."""
-    reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
-    if not reachability.get("resolvable"):
-        return False
-    try:
-        port = int(reachability.get("api_port") or device.get("api_port") or 0)
-    except (TypeError, ValueError):
-        return False
-    if port != 443:
-        return False
-    resolved_ip = str(reachability.get("public_ip") or "").strip()
-    if not resolved_ip:
-        return False
-    network = device.get("network") if isinstance(device.get("network"), dict) else {}
-    candidate_ips: set[str] = set()
-    public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
-    if public_ip:
-        candidate_ips.add(public_ip)
-    return resolved_ip in candidate_ips
-
-
-def poll_public_drone_reachability_once() -> None:
-    """Probe public health endpoints for all approved Drones."""
-    if postgres_store.available():
-        devices = postgres_store.list_all_approved_devices(
-            limit=PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN,
-            oldest_checked_first=True,
-        ) or []
-    else:
-        db.refresh_persistent_state()
-        devices = [
-            d for d in list(db.devices.values())
-            if d.get("approval_status", "approved") == "approved"
-        ]
-        devices.sort(key=lambda d: str((d.get("public_reachability") or {}).get("checked_at") or ""))
-        if PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN:
-            devices = devices[:PUBLIC_PEER_PROBE_MAX_DEVICES_PER_RUN]
-    def probe_and_store(device: dict) -> None:
-        if device.get("approval_status", "approved") != "approved":
-            return
-        result = probe_device_public_endpoint(device)
-        if postgres_store.available():
-            postgres_store.update_device_reachability(device["id"], result)
-        else:
-            db.update_device_public_reachability(device["id"], result)
-
-    if not devices:
-        return
-    max_workers = min(32, max(1, len(devices)))
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="drone-health") as executor:
-        futures = [executor.submit(probe_and_store, device) for device in devices]
-        for future in as_completed(futures):
-            future.result()
-
-
-def refresh_device_public_reachability(device: dict, *, force: bool = False) -> dict:
-    """Refresh and return a device's public reachability when it is useful to do so."""
-    if not isinstance(device, dict):
-        return {}
-    if not force and public_reachability_already_resolved(device):
-        return device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
-    result = probe_device_public_endpoint(device)
-    db.update_device_public_reachability(device["id"], result)
-    device.update(db.devices.get(device["id"], {}))
-    return result
-
-
-def start_public_drone_reachability_poller() -> None:
-    """Start periodic public endpoint probes unless disabled by configuration."""
-    global _PUBLIC_PEER_PROBE_THREAD
-    interval_seconds = max(0, int(os.getenv("PUBLIC_PEER_PROBE_INTERVAL_SECONDS", str(PUBLIC_PEER_PROBE_INTERVAL_SECONDS))))
-    if interval_seconds == 0 or (_PUBLIC_PEER_PROBE_THREAD and _PUBLIC_PEER_PROBE_THREAD.is_alive()):
-        return
-
-    def loop() -> None:
-        while True:
-            try:
-                poll_public_drone_reachability_once()
-            except Exception as error:
-                logger.warning("Public Drone endpoint poll failed: %s", error)
-            time.sleep(max(5, interval_seconds))
-
-    _PUBLIC_PEER_PROBE_THREAD = threading.Thread(target=loop, name="public-drone-reachability-poller", daemon=True)
-    _PUBLIC_PEER_PROBE_THREAD.start()
-
 
 def poll_notification_delivery_once() -> int:
     """Deliver queued notification events in per-channel digests."""
@@ -502,9 +348,6 @@ def poll_device_status_notifications_once() -> None:
 def run_scheduled_job(job_name: str) -> dict:
     """Run a single background job by name for EventBridge or local scripts."""
     job = str(job_name or "").strip().lower().replace("_", "-")
-    if job in {"public-reachability", "public-peer-probe", "peer-probe"}:
-        poll_public_drone_reachability_once()
-        return {"job": job, "status": "ok"}
     if job in {"notification-delivery", "notifications"}:
         delivered = poll_notification_delivery_once()
         return {"job": job, "status": "ok", "delivered": delivered}
@@ -589,7 +432,6 @@ def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Opt
     db.refresh_persistent_state()
 
     if start_pollers:
-        start_public_drone_reachability_poller()
         start_notification_delivery_poller()
 
     _RUNTIME_INITIALIZED = True
@@ -846,7 +688,7 @@ def notify_sync_triggered(user: dict, device: dict, sync_type: str, nature: str,
 
 
 def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = None) -> list:
-    """Return sources whose latest public endpoint probe succeeded."""
+    """Return sources that have been peer-resolved by at least one drone in the swarm."""
     eligible = []
     for source in sources if isinstance(sources, list) else []:
         if not isinstance(source, dict):
@@ -857,15 +699,7 @@ def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = No
         source_device = db.get_device_by_device_id(source_id)
         if not source_device:
             continue
-        network = source_device.get("network") if isinstance(source_device.get("network"), dict) else {}
-        public_ip = str(network.get("public_ip") or network.get("public") or "").strip()
-        reachability = source_device.get("public_reachability") if isinstance(source_device.get("public_reachability"), dict) else {}
-        if not public_ip:
-            continue
-        if (
-            not reachability.get("resolvable")
-            or str(reachability.get("public_ip") or "").strip() != public_ip
-        ):
+        if not db.is_drone_peer_resolvable(source_id):
             continue
         eligible.append({
             "device_id": source_id,

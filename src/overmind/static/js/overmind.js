@@ -1674,7 +1674,7 @@
                                     <div class="mt-3 d-flex flex-wrap gap-1">
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
-                                        <span class="badge ${device.public_resolvable ? 'text-bg-success' : (device.public_reachability && device.public_reachability.checked_at ? 'text-bg-warning' : 'text-bg-secondary')}">${device.public_resolvable ? 'Resolvable' : (device.public_reachability && device.public_reachability.checked_at ? 'Not Resolvable' : 'Resolution Pending')}</span>
+                                        <span class="badge ${device.peer_resolvable ? 'text-bg-success' : ((device.peer_checks && device.peer_checks.some && device.peer_checks.some(c => c.target_drone_id === device.device_id)) || (device.peer_resolved_by && device.peer_resolved_by.length > 0) ? 'text-bg-warning' : 'text-bg-secondary')}">${device.peer_resolvable ? 'Resolvable' : 'Not Resolvable'}</span>
                                     </div>
                                     <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
@@ -2891,9 +2891,10 @@
                 const ipv4 = resolved.ipv4 || [];
                 const ipv6 = resolved.ipv6 || [];
                 const publicIp = (device.network || {}).public_ip || (device.network || {}).public || 'n/a';
-                const publicIpStatus = device.public_resolvable ? ' (resolvable)' : '';
+                const publicIpStatus = device.peer_resolvable ? ' (peer-resolvable)' : '';
                 const cert = device.certificate || {};
                 const peerChecks = device.peer_checks || [];
+                const peerResolvedBy = device.peer_resolved_by || [];
                 const info = device.system_info || {};
                 const systemRows = [
                     ['Hostname', info.hostname || device.device_name],
@@ -2941,7 +2942,7 @@
                         <strong>Performance Metrics</strong>
                         <div class="mt-2">${renderMetricsGrid(info.performance || {})}</div>
                         <hr>
-                        <strong>Peer-to-Peer Checks</strong>
+                        <strong>Outbound Peer Checks (from this drone)</strong>
                         ${latestPeers.length ? latestPeers.map(check => `
                             <div class="mt-2 p-2 rounded border">
                                 <div class="d-flex justify-content-between gap-2">
@@ -2951,7 +2952,18 @@
                                 <div class="small text-muted">${escapeHtml(check.target_address || 'n/a')} · ${escapeHtml(check.checked_at || 'n/a')} · ${check.latency_ms ?? 'n/a'} ms</div>
                                 ${check.failure_reason ? `<div class="small text-danger">${escapeHtml(check.failure_reason)}</div>` : ''}
                             </div>
-                        `).join('') : '<div class="small text-muted mt-1">No peer checks reported yet.</div>'}
+                        `).join('') : '<div class="small text-muted mt-1">No outbound peer checks reported yet.</div>'}
+                        <hr>
+                        <strong>Resolved By (drones that reached this drone)</strong>
+                        ${peerResolvedBy.length ? peerResolvedBy.map(r => `
+                            <div class="mt-2 p-2 rounded border">
+                                <div class="d-flex justify-content-between gap-2">
+                                    <span class="small">${escapeHtml(r.source_name || r.source_drone_id || 'Peer Drone')}</span>
+                                    <span class="badge text-bg-success">RESOLVED</span>
+                                </div>
+                                <div class="small text-muted">${escapeHtml(r.target_address || 'n/a')} · ${escapeHtml(r.checked_at || 'n/a')} · ${r.latency_ms ?? 'n/a'} ms</div>
+                            </div>
+                        `).join('') : '<div class="small text-muted mt-1">No drones have resolved this drone yet.</div>'}
                     </div></div>
                 `;
             }
@@ -3058,7 +3070,7 @@
                 const ipv4 = resolved.ipv4 || [];
                 const ipv6 = resolved.ipv6 || [];
                 const publicIp = (device.network || {}).public_ip || (device.network || {}).public || 'n/a';
-                const publicIpStatus = device.public_resolvable ? ' (resolvable)' : '';
+                const publicIpStatus = device.peer_resolvable ? ' (peer-resolvable)' : '';
                 const cert = device.certificate || {};
                 const info = device.system_info || {};
                 const sample = device.last_speed_sample;
@@ -3100,6 +3112,13 @@
                         <hr>
                         <strong>Speed Sample</strong>
                         ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
+                        <hr>
+                        <strong>Swarm P2P Health</strong>
+                        <div class="mt-1">
+                            <span class="badge ${device.peer_resolvable ? 'text-bg-success' : 'text-bg-secondary'} mb-2">${device.peer_resolvable ? 'Resolvable' : 'Not Resolvable'}</span>
+                        </div>
+                        ${(device.peer_resolved_by || []).length ? `<div class="small text-muted">Resolved by: ${(device.peer_resolved_by || []).map(r => escapeHtml(r.source_name || r.source_drone_id || 'unknown')).join(', ')}</div>` : '<div class="small text-muted">No peer has resolved this drone yet.</div>'}
+                        ${(device.peer_checks || []).length ? `<div class="small text-muted mt-1">Outbound checks: ${(device.peer_checks || []).filter(c => c.status === 'pass').length} passed / ${(device.peer_checks || []).length} total</div>` : ''}
                     </div></div>
                 `;
             }
