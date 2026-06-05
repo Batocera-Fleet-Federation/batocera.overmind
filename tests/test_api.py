@@ -879,6 +879,79 @@ def test_super_admin_can_recover_untrusted_pending_drone_connection(client):
     assert db.get_all_pending_drone_connections() == []
 
 
+def test_super_admin_can_assign_onboarding_pending_drone_to_any_swarm(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
+    admin_token = client.post(
+        "/api/auth/login",
+        json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"},
+    ).json()["access_token"]
+    admin_user = db.get_user_by_email("mr_jerrodh@hotmail.com")
+    admin_swarm_id = db.default_swarm_id(admin_user["id"])
+
+    client.post("/api/auth/register", json={"email": "remote-owner@example.com", "username": "remote-owner", "password": "testpass123"})
+    owner_token = client.post(
+        "/api/auth/login",
+        json={"email": "remote-owner@example.com", "username": "remote-owner", "password": "testpass123"},
+    ).json()["access_token"]
+    token_response = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"label": "Lost cabinet onboarding"},
+    )
+    auth_token = token_response.json()["token"]["authorization_token"]
+
+    register_response = client.post(
+        "/api/devices/register",
+        headers={"Authorization": f"Bearer {auth_token}"},
+        json=_device_registration_payload(
+            authorization_token=auth_token,
+            device_id="lost-onboarding-drone",
+            device_name="Lost Onboarding Drone",
+            reachable_url="https://lost-onboarding-drone:8443",
+            batocera_info={
+                "model": "Test Model",
+                "system": "Linux",
+                "architecture": "x86_64",
+                "cpu_model": "Test CPU",
+                "cpu_cores": 4,
+                "cpu_threads": 8,
+                "cpu_max_frequency": "3.0 GHz",
+                "memory_available": "8 GiB",
+                "memory_total": "16 GiB",
+                "ip_address": "lost-onboarding-drone",
+                "network": {"ipv4": ["10.42.0.9"]},
+            },
+        ),
+    )
+    assert register_response.status_code == 200
+    assert register_response.json()["status"] == "pending"
+
+    overview = client.get("/api/admin/overview", headers={"Authorization": f"Bearer {admin_token}"})
+    assert overview.status_code == 200
+    pending = [row for row in overview.json()["pending_connections"] if row["device_id"] == "lost-onboarding-drone"]
+    assert len(pending) == 1
+    assert "drone_token_hash" not in pending[0]
+
+    assign = client.post(
+        "/api/admin/drone-connections/lost-onboarding-drone/assign",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"swarm_id": admin_swarm_id},
+    )
+    assert assign.status_code == 200
+    device = db.get_device_by_device_id("lost-onboarding-drone")
+    assert device["user_id"] == admin_user["id"]
+    assert device["swarm_id"] == admin_swarm_id
+    assert device.get("authorization_token_id") is None
+
+    heartbeat = client.post(
+        "/api/devices/lost-onboarding-drone/heartbeat",
+        headers={"Authorization": f"Bearer {auth_token}"},
+        json={"device_name": "Lost Onboarding Drone", "network": {"ipv4": ["10.42.0.9"]}},
+    )
+    assert heartbeat.status_code == 200
+    assert db.get_all_pending_drone_connections() == []
+
+
 def test_super_admin_delete_user_removes_owned_swarms_and_drones(client):
     client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr_jerrodh-at-hotmail.com", "password": "testpass123"})
     admin_token = client.post(

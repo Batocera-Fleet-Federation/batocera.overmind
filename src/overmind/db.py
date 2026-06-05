@@ -1465,6 +1465,21 @@ class OvermindDatabase:
         if not owner_id:
             return None
         token_hash = connection.get("drone_token_hash")
+        authorization_token_id = connection.get("authorization_token_id")
+        connection_user_id = connection.get("user_id")
+        if not token_hash and authorization_token_id and connection_user_id:
+            token_rows = self.integration_tokens.get(connection_user_id, [])
+            if postgres_store.available():
+                token_rows = postgres_store.get_integration_tokens(connection_user_id) or token_rows
+            backing = next(
+                (
+                    row for row in token_rows
+                    if row.get("id") == authorization_token_id and not row.get("revoked_at")
+                ),
+                None,
+            )
+            if backing:
+                token_hash = backing.get("token_hash")
         if not token_hash:
             return None
         internal_id = self.create_device(
@@ -1473,7 +1488,7 @@ class OvermindDatabase:
             connection.get("device_name") or connection["device_id"],
             connection.get("batocera_info") if isinstance(connection.get("batocera_info"), dict) else {},
             token_hash=token_hash,
-            authorization_token_id=connection.get("authorization_token_id"),
+            authorization_token_id=authorization_token_id if connection_user_id == owner_id else None,
             swarm_id=swarm_id,
         )
         self.pending_drone_connections.pop(device_id, None)
