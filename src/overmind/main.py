@@ -670,7 +670,8 @@ def create_and_send_verification(user: dict) -> None:
         hash_secret_token(raw_token),
         datetime.utcnow() + timedelta(minutes=VERIFICATION_TTL_MINUTES),
     )
-    send_verification_email(user, code, raw_token)
+    sent = send_verification_email(user, code, raw_token)
+    logger.info("Verification email send result user_id=%s sent=%s", user.get("id"), sent)
 
 
 def ensure_active_user(user: dict) -> None:
@@ -924,7 +925,8 @@ async def forgot_password(payload: ForgotPasswordRequest):
     if user and user.get("auth_provider") in (None, "password") and user.get("password"):
         raw_token = secrets.token_urlsafe(32)
         db.create_password_reset(user["id"], hash_secret_token(raw_token), datetime.utcnow() + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES))
-        send_password_reset_email(user, raw_token)
+        sent = send_password_reset_email(user, raw_token)
+        logger.info("Password reset email send result user_id=%s sent=%s", user.get("id"), sent)
     return {"message": "If an eligible account exists, a password reset email has been sent."}
 
 
@@ -1314,7 +1316,8 @@ async def invite_swarm_member(swarm_id: str, payload: SwarmInviteRequest, author
         print(f"Invitation accepted for existing user {payload.email}: swarm_id={swarm_id}")
     db.refresh_persistent_state()
     swarm = db.swarms.get(swarm_id) or {}
-    send_invitation_email(str(payload.email), swarm, role, raw_token)
+    sent = send_invitation_email(str(payload.email), swarm, role, raw_token)
+    logger.info("Invitation email send result invitation_id=%s sent=%s", invite.get("id"), sent)
     print(f"Invitation created for {payload.email}: swarm_id={swarm_id} role={role}")
     return {"invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
 
@@ -1341,7 +1344,8 @@ async def resend_swarm_invitation(swarm_id: str, invitation_id: str, authorizati
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
     db.refresh_persistent_state()
     swarm = db.swarms.get(swarm_id) or {}
-    send_invitation_email(str(invite.get("email") or ""), swarm, READONLY_ROLE, raw_token)
+    sent = send_invitation_email(str(invite.get("email") or ""), swarm, READONLY_ROLE, raw_token)
+    logger.info("Invitation resend email result invitation_id=%s sent=%s", invite.get("id"), sent)
     print(f"Invitation resent for {invite.get('email')}: swarm_id={swarm_id}")
     return {"status": "sent", "invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
 

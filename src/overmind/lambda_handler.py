@@ -36,12 +36,7 @@ def _is_lightweight_auth_path(path: str) -> bool:
     return path in {
         "/api/auth/providers",
         "/api/auth/login",
-        "/api/auth/register",
         "/api/auth/refresh",
-        "/api/auth/verify-email",
-        "/api/auth/resend-verification",
-        "/api/auth/forgot-password",
-        "/api/auth/reset-password",
     } or _is_oauth_start_path(path) or _is_auth_callback_path(path)
 
 

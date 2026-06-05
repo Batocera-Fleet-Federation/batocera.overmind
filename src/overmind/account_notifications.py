@@ -13,7 +13,7 @@ def send_verification_email(
     *,
     email_client: Any,
     ttl_minutes: int,
-) -> None:
+) -> bool:
     link = f"{email_client.base_url()}/api/auth/verify-email?token={urllib.parse.quote(token)}"
     body_html = email_client.render_email_template(
         "registration_verification.html",
@@ -24,7 +24,7 @@ def send_verification_email(
         body_html,
         f"Your Overmind validation code is {code}.\nVerify here: {link}\nThis code expires in {ttl_minutes} minutes.",
     )
-    email_client.send_email(user["email"], "Verify your Batocera Overmind account", html_body, text_body)
+    return email_client.send_email(user["email"], "Verify your Batocera Overmind account", html_body, text_body)
 
 
 def send_password_reset_email(
@@ -33,7 +33,7 @@ def send_password_reset_email(
     *,
     email_client: Any,
     ttl_minutes: int,
-) -> None:
+) -> bool:
     link = f"{email_client.base_url()}/#reset-password={urllib.parse.quote(token)}"
     body_html = email_client.render_email_template(
         "password_reset.html",
@@ -44,10 +44,10 @@ def send_password_reset_email(
         body_html,
         f"Reset your Overmind password: {link}\nThis link expires in {ttl_minutes} minutes.",
     )
-    email_client.send_email(user["email"], "Reset your Batocera Overmind password", html_body, text_body)
+    return email_client.send_email(user["email"], "Reset your Batocera Overmind password", html_body, text_body)
 
 
-def send_invitation_email(email: str, swarm: dict, role: str, token: str, *, email_client: Any) -> None:
+def send_invitation_email(email: str, swarm: dict, role: str, token: str, *, email_client: Any) -> bool:
     link = f"{email_client.base_url()}/#invite={urllib.parse.quote(token)}"
     body_html = email_client.render_email_template(
         "swarm_invitation.html",
@@ -58,4 +58,4 @@ def send_invitation_email(email: str, swarm: dict, role: str, token: str, *, ema
         body_html,
         f"You were invited to {swarm.get('name')} as {role}.\nAccept: {link}",
     )
-    email_client.send_email(email, "Batocera Overmind swarm invitation", html_body, text_body)
+    return email_client.send_email(email, "Batocera Overmind swarm invitation", html_body, text_body)

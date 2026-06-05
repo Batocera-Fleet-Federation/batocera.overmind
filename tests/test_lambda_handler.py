@@ -125,6 +125,26 @@ def test_handler_loads_secret_without_runtime_startup_for_password_login(monkeyp
     assert called == {"startup": False, "secret": True}
 
 
+def test_handler_initializes_runtime_for_registration_email(monkeypatch):
+    called = {"startup": False, "secret": False}
+
+    def initialize(**kwargs):
+        called["startup"] = True
+
+    def load_secret(**kwargs):
+        called["secret"] = True
+
+    monkeypatch.setattr(lambda_handler, "_LIGHTWEIGHT_RUNTIME_SECRET_LOADED", False)
+    monkeypatch.setattr(lambda_handler, "initialize_runtime", initialize)
+    monkeypatch.setattr(lambda_handler, "load_runtime_secret_once", load_secret)
+    monkeypatch.setattr(lambda_handler, "_adapter", lambda event, context: {"statusCode": 200})
+
+    result = lambda_handler.handler({"rawPath": "/api/auth/register", "requestContext": {"http": {"method": "POST"}}}, None)
+
+    assert result == {"statusCode": 200}
+    assert called == {"startup": True, "secret": False}
+
+
 def test_handler_initializes_runtime_for_api_routes(monkeypatch):
     called = {"startup": False}
 
