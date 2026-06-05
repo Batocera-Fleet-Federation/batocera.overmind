@@ -1,7 +1,8 @@
-"""Logging must go to stderr, and DB-query noise stays out of the admin tail.
+"""Logging must use the matching stream, and DB-query noise stays out of the admin tail.
 
-Regression coverage for: error tracebacks appearing on stdout, and the per-query
-PostgreSQL timing logs being suppressed from CloudWatch entirely.
+Regression coverage for: INFO records appearing in stderr, error tracebacks
+appearing on stdout, and per-query PostgreSQL timing logs leaking into the admin
+tail.
 """
 
 import io
@@ -37,7 +38,7 @@ def test_db_query_log_record_detection():
     assert _is_db_query_log_record(other) is False
 
 
-def test_logging_handler_writes_errors_to_stderr_not_stdout(monkeypatch):
+def test_logging_handler_routes_info_to_stdout_and_errors_to_stderr(monkeypatch):
     import overmind.main as m
 
     class _Cap:
@@ -50,11 +51,16 @@ def test_logging_handler_writes_errors_to_stderr_not_stdout(monkeypatch):
     handler = CapturedLoggingHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
 
+    info = logging.LogRecord("overmind.main", logging.INFO, __file__, 1, "routine", None, None)
+    handler.emit(info)
+    assert "routine" in cap.stdout.snapshot()
+    assert cap.stderr.snapshot() == ""
+
     err = logging.LogRecord("overmind.main", logging.ERROR, __file__, 1, "boom", None, None)
     handler.emit(err)
-    # Error landed on stderr, nothing on stdout.
+    # Error landed on stderr, not stdout.
     assert "boom" in cap.stderr.snapshot()
-    assert cap.stdout.snapshot() == ""
+    assert "boom" not in cap.stdout.snapshot()
 
     # DB-query noise reaches the real stderr stream but not the admin tail.
     q = logging.LogRecord("overmind.postgres_store", logging.WARNING, __file__, 1,

@@ -233,10 +233,12 @@ class CapturedLoggingHandler(logging.Handler):
             return
         try:
             message = self.format(record)
-            # All log records are written to stderr (never stdout). Per-query
-            # PostgreSQL timing noise still reaches CloudWatch but is excluded
-            # from the bounded tail shown in the admin UI.
-            _STREAM_LOG_CAPTURE.stderr.write(message + "\n", capture=not _is_db_query_log_record(record))
+            # Match conventional stream semantics in the admin UI: routine
+            # informational logs go to stdout, while warnings/errors stay on
+            # stderr. Per-query PostgreSQL timing noise still reaches the real
+            # stream but is excluded from the bounded tail shown in the UI.
+            target = _STREAM_LOG_CAPTURE.stderr if record.levelno >= logging.WARNING else _STREAM_LOG_CAPTURE.stdout
+            target.write(message + "\n", capture=not _is_db_query_log_record(record))
         except Exception:
             pass
 
@@ -258,10 +260,9 @@ def install_stream_log_capture() -> None:
     _STREAM_LOG_CAPTURE.install()
     root = logging.getLogger()
     # The AWS Lambda runtime attaches a root handler that emits log records to
-    # stdout. Drop pre-existing handlers so application logs (warnings, errors,
-    # and tracebacks) flow only through CapturedLoggingHandler -> stderr, leaving
-    # stdout for ordinary operational output. Records still reach CloudWatch
-    # because the captured stderr forwards to the real stderr file descriptor.
+    # stdout. Drop pre-existing handlers so application logs flow only through
+    # CapturedLoggingHandler, which preserves stdout/stderr semantics while
+    # forwarding to the real streams for CloudWatch.
     for existing in list(root.handlers):
         root.removeHandler(existing)
     handler = CapturedLoggingHandler()
