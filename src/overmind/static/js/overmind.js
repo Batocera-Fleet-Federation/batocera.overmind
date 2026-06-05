@@ -4195,7 +4195,7 @@
                 const container = document.getElementById('super-admin-metrics');
                 if (!container || !isSuperAdmin()) return;
                 try {
-                    const response = await apiGet('/api/admin/runtime-metrics');
+                    const response = await apiGet('/api/admin/runtime-metrics', { showLoader: false });
                     if (!response.ok) throw new Error('Failed to load runtime metrics');
                     const payload = await response.json();
                     container.innerHTML = `
@@ -4216,7 +4216,8 @@
             // to the bottom; otherwise we preserve their exact scroll offset.
             function updateLogPane(pre, text) {
                 if (!pre) return;
-                const wasAtBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+                const wasEmpty = !pre.textContent;
+                const wasAtBottom = wasEmpty || pre.scrollHeight <= pre.clientHeight || pre.scrollHeight - pre.scrollTop - pre.clientHeight < 32;
                 const previousScrollTop = pre.scrollTop;
                 if (pre.textContent !== text) {
                     pre.textContent = text;
@@ -4224,42 +4225,67 @@
                 pre.scrollTop = wasAtBottom ? pre.scrollHeight : previousScrollTop;
             }
 
+            function ensureSuperAdminLogShell(container) {
+                if (!container || document.getElementById('super-admin-log-stdout')) return;
+                container.innerHTML = `
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                        <h4 class="h5 mb-0">Overmind Runtime Logs</h4>
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <span class="badge text-bg-secondary" id="super-admin-log-maxlines"></span>
+                            <span class="small text-muted" id="super-admin-log-status" aria-live="polite"></span>
+                        </div>
+                    </div>
+                    <div class="runtime-log-section mb-3">
+                        <div class="runtime-log-header">
+                            <span class="small text-muted">stdout</span>
+                            <button class="btn btn-outline-secondary btn-sm" type="button" title="Copy stdout logs" onclick="copyRuntimeLogPane('super-admin-log-stdout', 'stdout')"><i class="bi bi-clipboard me-1"></i>Copy</button>
+                        </div>
+                        <pre id="super-admin-log-stdout" class="runtime-log-pane mono" tabindex="0"></pre>
+                    </div>
+                    <div class="runtime-log-section">
+                        <div class="runtime-log-header">
+                            <span class="small text-muted">stderr</span>
+                            <button class="btn btn-outline-secondary btn-sm" type="button" title="Copy stderr logs" onclick="copyRuntimeLogPane('super-admin-log-stderr', 'stderr')"><i class="bi bi-clipboard me-1"></i>Copy</button>
+                        </div>
+                        <pre id="super-admin-log-stderr" class="runtime-log-pane mono" tabindex="0"></pre>
+                    </div>
+                    <div class="small text-muted mt-2" id="super-admin-log-captured"></div>
+                `;
+            }
+
+            async function copyRuntimeLogPane(elementId, label) {
+                const pane = document.getElementById(elementId);
+                const text = pane ? pane.textContent || '' : '';
+                try {
+                    await copyTextToClipboard(text);
+                    showMessage(`${label} logs copied.`, 'success');
+                } catch (error) {
+                    console.error('Runtime log copy failed:', error);
+                    showMessage(error.message || 'Copy failed', 'error');
+                }
+            }
+
             async function loadSuperAdminLogs() {
                 const container = document.getElementById('super-admin-logs');
                 if (!container || !isSuperAdmin()) return;
+                ensureSuperAdminLogShell(container);
                 try {
-                    const response = await apiGet('/api/admin/runtime-logs');
+                    const response = await apiGet('/api/admin/runtime-logs', { showLoader: false });
                     if (!response.ok) throw new Error('Failed to load runtime logs');
                     const payload = await response.json();
                     const logs = payload.logs || {};
-                    // Build the static structure once; subsequent refreshes only
-                    // update the text content of the panes (see updateLogPane).
-                    if (!document.getElementById('super-admin-log-stdout')) {
-                        container.innerHTML = `
-                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <h4 class="h5 mb-0">Overmind Runtime Logs</h4>
-                                <span class="badge text-bg-secondary" id="super-admin-log-maxlines"></span>
-                            </div>
-                            <div class="mb-3">
-                                <div class="small text-muted mb-1">stdout</div>
-                                <pre id="super-admin-log-stdout" class="mono bg-dark text-light p-3 rounded mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;"></pre>
-                            </div>
-                            <div>
-                                <div class="small text-muted mb-1">stderr</div>
-                                <pre id="super-admin-log-stderr" class="mono bg-dark text-light p-3 rounded mb-0" style="max-height:420px;overflow:auto;white-space:pre-wrap;"></pre>
-                            </div>
-                            <div class="small text-muted mt-2" id="super-admin-log-captured"></div>
-                        `;
-                    }
                     const maxLinesBadge = document.getElementById('super-admin-log-maxlines');
                     if (maxLinesBadge) maxLinesBadge.textContent = `last ${Number(logs.max_lines || 0)} lines`;
                     updateLogPane(document.getElementById('super-admin-log-stdout'), logs.stdout || 'No stdout captured yet.');
                     updateLogPane(document.getElementById('super-admin-log-stderr'), logs.stderr || 'No stderr captured yet.');
                     const capturedEl = document.getElementById('super-admin-log-captured');
                     if (capturedEl) capturedEl.textContent = `Captured: ${logs.captured_at ? new Date(logs.captured_at).toLocaleString() : 'n/a'}`;
+                    const statusEl = document.getElementById('super-admin-log-status');
+                    if (statusEl) statusEl.textContent = '';
                 } catch (error) {
                     console.error('Error loading runtime logs:', error);
-                    container.innerHTML = '<div class="empty-state">Unable to load runtime logs.</div>';
+                    const statusEl = document.getElementById('super-admin-log-status');
+                    if (statusEl) statusEl.textContent = 'Update failed; showing last captured logs.';
                 }
             }
 
@@ -4395,7 +4421,7 @@
             }
 
             async function copyTextToClipboard(text) {
-                if (!text) throw new Error('No token available to copy.');
+                if (!text) throw new Error('No text available to copy.');
                 if (navigator.clipboard && window.isSecureContext) {
                     await navigator.clipboard.writeText(text);
                     return;

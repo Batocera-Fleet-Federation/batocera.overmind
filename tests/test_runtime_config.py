@@ -120,6 +120,22 @@ def test_ui_notifications_nav_and_polling_hooks():
     assert "startNotificationPolling();" in js
 
 
+def test_super_admin_runtime_logs_are_stable_and_copyable():
+    root = Path(__file__).resolve().parents[1]
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    css = root.joinpath("src/overmind/static/css/overmind.css").read_text(encoding="utf-8")
+
+    assert "ensureSuperAdminLogShell(container);" in js
+    assert "apiGet('/api/admin/runtime-logs', { showLoader: false })" in js
+    assert "apiGet('/api/admin/runtime-metrics', { showLoader: false })" in js
+    assert "Update failed; showing last captured logs." in js
+    assert "copyRuntimeLogPane('super-admin-log-stdout', 'stdout')" in js
+    assert "copyRuntimeLogPane('super-admin-log-stderr', 'stderr')" in js
+    assert ".runtime-log-pane" in css
+    assert "font-size: .72rem;" in css
+    assert "user-select: text;" in css
+
+
 def test_profile_notification_preferences_match_created_event_types():
     root = Path(__file__).resolve().parents[1]
     html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
