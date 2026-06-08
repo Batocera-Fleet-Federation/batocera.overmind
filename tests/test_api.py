@@ -882,6 +882,36 @@ def test_super_admin_sync_actions_listing_and_search(client):
     assert client.get("/api/admin/sync-actions", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
 
 
+def test_managed_config_registry_merge():
+    from overmind.managed_configs import merge_managed_configs, MANAGED_CONFIG_REGISTRY
+
+    payload = {
+        "type": "emulator_configs",
+        "configs": [
+            {"relative_path": "batocera.conf", "content": "x",
+             "versions": [{"content": "a"}, {"content": "b"}, {"content": "c"}]},
+            {"relative_path": "some/unmanaged.cfg", "content": "y", "versions": [{"content": "y"}]},
+        ],
+    }
+    merged = merge_managed_configs(payload)
+    by_rel = {row["relative_path"]: row for row in merged["configs"]}
+    assert merged["managed_total"] == len(MANAGED_CONFIG_REGISTRY)
+    # Present, managed, with the right version count and friendly name.
+    assert by_rel["batocera.conf"]["present"] is True
+    assert by_rel["batocera.conf"]["version_count"] == 3
+    assert by_rel["batocera.conf"]["name"] == "Batocera (batocera.conf)"
+    # An expected config the drone never uploaded shows as absent.
+    assert by_rel["dolphin-emu/Dolphin.ini"]["present"] is False
+    assert by_rel["dolphin-emu/Dolphin.ini"]["version_count"] == 0
+    # Extra (non-registry) uploads are still shown.
+    assert by_rel["some/unmanaged.cfg"]["present"] is True
+
+    # With no upload at all, the full registry still shows (all absent).
+    empty = merge_managed_configs(None)
+    assert len(empty["configs"]) == len(MANAGED_CONFIG_REGISTRY)
+    assert empty["present_total"] == 0
+
+
 def test_runtime_logs_stderr_uses_shared_buffer(monkeypatch):
     import logging
     from overmind import cache, main as overmind_main
@@ -3898,8 +3928,17 @@ def test_selected_drone_config_view_reads_relational_store(client, monkeypatch):
 
     assert response.status_code == 200
     configs = response.json()["emulator_configs"]["configs"]
-    assert [row["relative_path"] for row in configs] == ["retroarch/retroarch.cfg"]
-    assert configs[0]["content"] == "video_driver = vulkan"
+    rel_paths = [row["relative_path"] for row in configs]
+    # The uploaded config is present with its content; log/logs paths are excluded.
+    uploaded = next(row for row in configs if row["relative_path"] == "retroarch/retroarch.cfg")
+    assert uploaded["content"] == "video_driver = vulkan"
+    assert uploaded["present"] is True
+    assert "retroarch/log/runtime.cfg" not in rel_paths
+    assert "retroarch/logs/trace.cfg" not in rel_paths
+    # The curated managed-config registry is always shown, including absent ones.
+    assert "batocera.conf" in rel_paths
+    dolphin = next(row for row in configs if row["relative_path"] == "dolphin-emu/Dolphin.ini")
+    assert dolphin["present"] is False and dolphin["version_count"] == 0
 
 
 def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():

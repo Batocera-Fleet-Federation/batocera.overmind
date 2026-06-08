@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from overmind.managed_configs import merge_managed_configs
+
 
 def _refresh(data_store: Any) -> None:
     refresh = getattr(data_store, "refresh_persistent_state", None)
@@ -164,6 +166,9 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
             emulator_configs = load_configs(device.get("device_id"))
     except Exception:
         pass
+    # Always present the curated managed-config set (availability + version counts),
+    # even before the drone has uploaded anything.
+    emulator_configs = merge_managed_configs(emulator_configs)
     return {
         "id": device["id"],
         "device_id": device["device_id"],

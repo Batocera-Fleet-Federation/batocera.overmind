@@ -2321,12 +2321,15 @@
                     return;
                 }
                 const rows = configs.map((item, index) => {
-                    const label = item.relative_path || item.path || item.name || `config-${index + 1}`;
-                    const content = item.content || item.text || JSON.stringify(item, null, 2);
+                    const relPath = item.relative_path || item.path || `config-${index + 1}`;
+                    const label = item.name || relPath;
+                    const present = item.present !== false;
+                    const content = item.content || item.text || '';
                     const versions = Array.isArray(item.versions) && item.versions.length
                         ? item.versions
-                        : [{collected_at: item.collected_at || '', fingerprint: item.fingerprint || '', content}];
-                    return {label, root: item.root || '', content, fingerprint: item.fingerprint || '', versions};
+                        : (present && content ? [{collected_at: item.collected_at || '', fingerprint: item.fingerprint || '', content}] : []);
+                    const versionCount = Number.isInteger(item.version_count) ? item.version_count : versions.length;
+                    return {label, relPath, root: item.root || '', content, present, versionCount, fingerprint: item.fingerprint || '', versions};
                 });
                 const previousIndex = Number.isInteger(window.overmindSelectedConfigIndex) ? window.overmindSelectedConfigIndex : 0;
                 container.innerHTML = `
@@ -2340,8 +2343,9 @@
                                     </div>
                                     <div class="list-group list-group-flush source-selector config-source-scroll" id="overmindConfigSources">
                                         ${rows.map((row, index) => `
-                                        <button type="button" class="list-group-item list-group-item-action text-start" data-config-index="${index}" onclick="selectOvermindConfig(${index})">
-                                            <i class="bi bi-file-earmark-code me-2"></i>${escapeHtml(row.label)}
+                                        <button type="button" class="list-group-item list-group-item-action text-start d-flex justify-content-between align-items-center gap-2" data-config-index="${index}" onclick="selectOvermindConfig(${index})">
+                                            <span class="text-truncate"><i class="bi ${row.present ? 'bi-check-circle-fill text-success' : 'bi-exclamation-triangle-fill text-warning'} me-2" title="${row.present ? 'Available on this drone' : 'Not available on this drone'}"></i>${escapeHtml(row.label)}</span>
+                                            <span class="badge ${row.versionCount ? 'text-bg-secondary' : 'text-bg-light text-muted'}" title="${row.versionCount} version(s) stored">v${row.versionCount}</span>
                                         </button>
                                     `).join('')}
                                 </div>
@@ -2396,8 +2400,8 @@
                 const fingerprint = document.getElementById('overmindConfigFingerprint');
                 const versionSelect = document.getElementById('overmindConfigVersion');
                 const content = document.getElementById('overmindConfigContent');
-                if (title) title.textContent = row.label;
-                if (path) path.textContent = row.root || '';
+                if (title) title.textContent = `${row.label}${row.versionCount ? ` · ${row.versionCount} version${row.versionCount === 1 ? '' : 's'}` : ''}`;
+                if (path) path.textContent = (row.relPath || row.root || '') + (row.present ? '' : ' — not available on this drone');
                 if (versionSelect) {
                     versionSelect.innerHTML = (row.versions || []).map((version, versionIndex) => {
                         const stamp = version.collected_at ? new Date(version.collected_at).toLocaleString() : `Version ${versionIndex + 1}`;
@@ -2405,10 +2409,11 @@
                         return `<option value="${versionIndex}">${escapeHtml(stamp + hash)}</option>`;
                     }).join('');
                     versionSelect.value = '0';
+                    versionSelect.disabled = !(row.versions || []).length;
                 }
                 const version = (row.versions || [])[0] || row;
                 if (fingerprint) fingerprint.textContent = version.fingerprint ? `fingerprint: ${version.fingerprint}` : '';
-                if (content) content.textContent = version.content || row.content || '';
+                if (content) content.textContent = row.present ? (version.content || row.content || '') : 'This config does not exist on the drone yet.';
             }
 
             function filterOvermindConfigs(value) {
