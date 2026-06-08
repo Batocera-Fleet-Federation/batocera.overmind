@@ -4217,20 +4217,22 @@ def test_asset_metadata_delta_upserts_existing_rows_without_duplicate_system_cou
     assert db.get_user_systems_summary(user["id"]) == [{"system_name": "snes", "rom_count": 1, "device_count": 1}]
 
 
-def test_selected_drone_actions_ui_omits_shutdown_and_collect_data_buttons():
+def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_buttons():
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     assert "queueDeviceAction('shutdown')" not in html
     assert ">Shutdown<" not in html
     assert "queueDeviceAction('update')" not in html
     assert ">Update<" not in html
-    assert ">Remote Restart<" in html
-    assert "queueDeviceAction('rebuild_asset_metadata')" in html
-    assert "queueDeviceAction('refresh_emulator_list')" in html
-    assert ">Rebuild Asset Metadata<" in html
-    assert "queueDeviceAction('enable_kiosk')" in html
-    assert "queueDeviceAction('disable_kiosk')" in html
-    assert "deleteDeviceActions()" in html
+    assert "data-device-view=\"actions\"" not in html
+    assert "device-actions-panel" not in html
+    assert ">Remote Restart<" in js
+    assert "rebuild_asset_metadata" in html
+    assert "refresh_emulator_list" in js
+    assert "Rebuild Asset Metadata" in html
+    assert "deviceKioskToggle" in js
+    assert "queueKioskMode(this.checked)" in js
+    assert "deleteDeviceActions()" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_log_sources')\"" not in html

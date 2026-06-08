@@ -349,14 +349,11 @@
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="configs" onclick="switchDeviceView('configs', this)">
                                                 <i class="bi bi-file-earmark-code me-1"></i>Configs
                                             </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="actions" onclick="switchDeviceView('actions', this)">
-                                                <i class="bi bi-lightning-charge me-1"></i>Actions
-                                            </button>
                                         </div>
                                     </div>
                                 </div>
                                 <div id="device-systems-panel" class="device-subpanel">
-                                    <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
+                                    <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-end gap-2">
                                         <div style="flex:1;min-width:220px">
                                             <label class="form-label" for="device-rom-search">Search systems and ROMs</label>
                                             <div class="input-group">
@@ -378,6 +375,9 @@
                                                 <option value="present">Present</option>
                                             </select>
                                         </div>
+                                        <button class="btn btn-outline-primary mutate-only" type="button" onclick="queueDeviceAction('rebuild_asset_metadata', {refreshActions:false})">
+                                            <i class="bi bi-database-up me-1"></i>Rebuild Asset Metadata
+                                        </button>
                                     </div>
                                     <div id="swarm-rom-availability-panel" class="mb-3"></div>
                                 </div>
@@ -389,18 +389,6 @@
                                 </div>
                                 <div id="device-configs-panel" class="device-subpanel" style="display:none;">
                                     <div id="configs-list"></div>
-                                </div>
-                                <div id="device-actions-panel" class="device-subpanel" style="display:none;">
-                                    <div class="d-flex flex-wrap gap-2 mb-3 mutate-only">
-                                        <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Remote Restart</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('refresh_emulator_list')"><i class="bi bi-controller me-1"></i>Refresh Emulator List</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('rebuild_asset_metadata')"><i class="bi bi-database-up me-1"></i>Rebuild Asset Metadata</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('enable_kiosk')"><i class="bi bi-lock me-1"></i>Enable Kiosk</button>
-                                        <button class="btn btn-outline-primary btn-sm" onclick="queueDeviceAction('disable_kiosk')"><i class="bi bi-unlock me-1"></i>Disable Kiosk</button>
-                                        <button class="btn btn-outline-secondary btn-sm" onclick="loadDeviceActions()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-                                        <button class="btn btn-outline-danger btn-sm" onclick="deleteDeviceActions()"><i class="bi bi-trash me-1"></i>Delete Actions</button>
-                                    </div>
-                                    <div id="actions-list"></div>
                                 </div>
                             </div>
                         </div>

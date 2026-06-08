@@ -2316,8 +2316,10 @@
                                 <strong>Emulator Configs</strong>
                                 <div class="small text-muted">Waiting for Drone to upload changed emulator configs. This view updates automatically every 30 seconds.</div>
                             </div>
+                            <button class="btn btn-outline-primary btn-sm mutate-only" onclick="queueDeviceAction('refresh_emulator_list', {refreshActions:false})"><i class="bi bi-controller me-1"></i>Refresh Emulator List</button>
                         </div>
                     </div></div>`;
+                    applyRbacUI();
                     return;
                 }
                 const rows = configs.map((item, index) => {
@@ -2357,6 +2359,7 @@
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                     <span id="overmindConfigTitle">Select a config</span>
                                     <div class="d-flex gap-2">
+                                        <button class="btn btn-sm btn-outline-primary mutate-only" onclick="queueDeviceAction('refresh_emulator_list', {refreshActions:false})"><i class="bi bi-controller me-1"></i>Refresh Emulator List</button>
                                         <button class="btn btn-sm btn-outline-primary" onclick="loadDeviceConfigs()">Refresh View</button>
                                     </div>
                                 </div>
@@ -2384,6 +2387,7 @@
                 if (rows.length) {
                     setTimeout(() => selectOvermindConfig(Math.min(previousIndex, rows.length - 1)), 0);
                 }
+                applyRbacUI();
             }
 
             function selectOvermindConfig(index) {
@@ -2909,6 +2913,10 @@
                 return device;
             }
 
+            async function queueKioskMode(enabled) {
+                await queueDeviceAction(enabled ? 'enable_kiosk' : 'disable_kiosk', {refreshActions:false});
+            }
+
             function renderDroneNetworkPanel() {
                 const container = document.getElementById('drone-network-panel');
                 const device = selectedDrone();
@@ -3034,6 +3042,8 @@
                 const cert = device.certificate || {};
                 const info = device.system_info || {};
                 const sample = device.last_speed_sample;
+                const kioskKnown = info.kiosk_enabled === true || info.kiosk_enabled === false;
+                const kioskEnabled = info.kiosk_enabled === true;
                 const systemRows = [
                     ['Hostname', info.hostname || device.device_name],
                     ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
@@ -3043,11 +3053,22 @@
                     ['CPU', info.cpu ? `${info.cpu.model || 'CPU'} ${info.cpu.count ? `(${info.cpu.count} cores)` : ''}` : ''],
                     ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
                     ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
+                    ['Kiosk Mode', kioskKnown ? (kioskEnabled ? 'enabled' : 'disabled') : 'unknown'],
                     ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
                     ['Updated', info.last_system_info_update || info.updated_at],
                 ].filter(row => row[1]);
                 container.innerHTML = `
                     <div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3 mutate-only">
+                            <strong>Device Controls</strong>
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart', {refreshActions:false})"><i class="bi bi-arrow-clockwise me-1"></i>Remote Restart</button>
+                                <div class="form-check form-switch mb-0 d-flex align-items-center gap-2" title="${kioskKnown ? '' : 'Current Kiosk mode has not been reported by this Drone yet.'}">
+                                    <input class="form-check-input mt-0" type="checkbox" role="switch" id="deviceKioskToggle" ${kioskEnabled ? 'checked' : ''} onchange="queueKioskMode(this.checked)">
+                                    <label class="form-check-label small" for="deviceKioskToggle"><i class="bi ${kioskEnabled ? 'bi-lock' : 'bi-unlock'} me-1"></i>Kiosk Mode</label>
+                                </div>
+                            </div>
+                        </div>
                         <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
                             <strong>Connection Information</strong>
                             <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
@@ -3081,6 +3102,7 @@
                         ${(device.peer_checks || []).length ? `<div class="small text-muted mt-1">Outbound checks: ${(device.peer_checks || []).filter(c => c.status === 'pass').length} passed / ${(device.peer_checks || []).length} total</div>` : ''}
                     </div></div>
                 `;
+                applyRbacUI();
             }
 
             async function loadSwarmRomAvailabilityPanel() {
@@ -3789,7 +3811,7 @@
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(viewName) ? viewName : 'systems';
+                currentDeviceView = ['bios', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
                 startSelectedDeviceDataAutoRefresh(currentDeviceView);
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
@@ -3800,14 +3822,12 @@
                 const artworkPanel = document.getElementById('device-artwork-panel');
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
                 const configsPanel = document.getElementById('device-configs-panel');
-                const actionsPanel = document.getElementById('device-actions-panel');
                 const metadataPanel = document.getElementById('device-metadata-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
                 if (artworkPanel) artworkPanel.style.display = 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
                 if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
-                if (actionsPanel) actionsPanel.style.display = currentDeviceView === 'actions' ? 'block' : 'none';
                 if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
 
                 if (currentDeviceView === 'systems') {
@@ -3825,10 +3845,7 @@
                 }
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
                 actionRefreshTimer = null;
-                if (currentDeviceView === 'actions') {
-                    loadDeviceActions();
-                    actionRefreshTimer = setInterval(loadDeviceActions, 5000);
-                }
+                applyRbacUI();
                 if (updateUrl) setRoute('devices', selectedDeviceId, currentDeviceView);
             }
 
@@ -3842,13 +3859,18 @@
                 if (window.location.hash !== hash) window.location.hash = hash; else applyRouteFromHash();
             }
 
+            function normalizeDeviceView(viewName) {
+                if (viewName === 'actions') return 'metadata';
+                return ['bios', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
+            }
+
             function parseRoute() {
                 const raw = window.location.hash || '#/devices';
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
                 const allowed = ['devices', 'hive', 'profile', 'notifications', 'super-admin', 'help'];
                 if ((parts[0] === 'systems' || parts[0] === 'bios' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
-                    return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: parts[0] };
+                    return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: normalizeDeviceView(parts[0]) };
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 if (tab === 'devices' && parts[1] === 'swarm') {
@@ -3857,16 +3879,16 @@
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[4]) ? parts[4] : 'drones' };
                     }
                     if (parts[3] === 'device') {
-                        return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[5]) ? parts[5] : 'systems', swarmView: 'drones' };
+                        return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: normalizeDeviceView(parts[5]), swarmView: 'drones' };
                     }
                     const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
                     return { tab, deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[2]) ? parts[2] : 'drones' };
                 }
                 if (tab === 'devices' && parts[1] === 'device') {
-                    return { tab, deviceId: parts[2] ? decodeURIComponent(parts[2]) : null, deviceView: ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[3]) ? parts[3] : 'systems', swarmView: 'drones' };
+                    return { tab, deviceId: parts[2] ? decodeURIComponent(parts[2]) : null, deviceView: normalizeDeviceView(parts[3]), swarmView: 'drones' };
                 }
                 const deviceId = tab === 'devices' && parts[1] ? decodeURIComponent(parts[1]) : null;
-                const deviceView = tab === 'devices' && ['bios', 'gamelogs', 'configs', 'actions', 'metadata'].includes(parts[2]) ? parts[2] : 'systems';
+                const deviceView = tab === 'devices' ? normalizeDeviceView(parts[2]) : 'systems';
                 return { tab, deviceId, deviceView, swarmView: 'drones' };
             }
 
