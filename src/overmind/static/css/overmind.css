@@ -609,8 +609,8 @@
                 font-size: .72rem;
                 line-height: 1.25;
                 margin: 0;
-                max-height: 360px;
-                min-height: 180px;
+                /* Fixed height so the panel never grows/shifts as logs stream in. */
+                height: 320px;
                 overflow: auto;
                 padding: .65rem;
                 resize: vertical;

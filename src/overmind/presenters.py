@@ -15,6 +15,17 @@ def _refresh(data_store: Any) -> None:
 def admin_user_row(user: dict, *, data_store: Any, super_admin_email: str) -> dict:
     _refresh(data_store)
     user_id = user.get("id")
+    # One swarm maps to one user; surface its name on the user row. Prefer the
+    # swarm the user owns, falling back to any swarm they belong to.
+    owned_swarm = next((swarm for swarm in data_store.swarms.values() if swarm.get("owner_id") == user_id), None)
+    swarm_name = None
+    if owned_swarm:
+        swarm_name = owned_swarm.get("name")
+    else:
+        for swarm_id, members in data_store.swarm_memberships.items():
+            if user_id in members:
+                swarm_name = (data_store.swarms.get(swarm_id) or {}).get("name")
+                break
     return {
         "id": user_id,
         "email": user.get("email"),
@@ -24,6 +35,7 @@ def admin_user_row(user: dict, *, data_store: Any, super_admin_email: str) -> di
         "email_verified": bool(user.get("email_verified")),
         "is_active": bool(user.get("is_active")),
         "created_at": user.get("created_at"),
+        "swarm_name": swarm_name,
         "swarm_count": sum(1 for members in data_store.swarm_memberships.values() if user_id in members),
         "owned_swarm_count": sum(1 for swarm in data_store.swarms.values() if swarm.get("owner_id") == user_id),
         "drone_count": sum(1 for device in data_store.devices.values() if device.get("user_id") == user_id),

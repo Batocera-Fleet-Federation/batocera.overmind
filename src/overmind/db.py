@@ -364,6 +364,27 @@ class OvermindDatabase:
                 return True
         return False
 
+    def hydrate_pending_notifications_from_store(self) -> None:
+        """Load recipients and pending notifications from Postgres for digest delivery.
+
+        In stateless runtimes (Lambda) the in-memory notification store is never
+        populated, so the delivery job would otherwise see nothing to send. This
+        refreshes users/swarms/memberships and replaces ``self.notifications`` with
+        the notifications still awaiting delivery from the database.
+        """
+        if not postgres_store.available():
+            return
+        self.refresh_admin_overview_state()
+        pending = postgres_store.load_pending_notifications()
+        if pending is None:
+            return
+        rebuilt: Dict[str, list] = {}
+        for entry in pending:
+            swarm_id = str(entry.get("swarm_id") or "")
+            if swarm_id:
+                rebuilt.setdefault(swarm_id, []).append(entry)
+        self.notifications = rebuilt
+
     def claim_pending_notifications_for_delivery(self, notification_ids: list[str], limit: int = 0) -> Optional[set[str]]:
         claimed = postgres_store.claim_pending_notifications(notification_ids, limit=limit)
         if claimed is None:
@@ -1441,12 +1462,55 @@ class OvermindDatabase:
             if relational is not None:
                 self.pending_drone_connections.update({row["device_id"]: row for row in relational})
                 return relational
+        approved_device_ids = {
+            str(device.get("device_id"))
+            for device in self.devices.values()
+            if device.get("approval_status", "approved") == "approved" and not device.get("removed_at")
+        }
         visible = [
             conn for conn in self.pending_drone_connections.values()
-            if conn.get("status") == "pending"
+            if conn.get("status") == "pending" and str(conn.get("device_id")) not in approved_device_ids
         ]
         visible.sort(key=lambda row: row.get("last_seen"), reverse=True)
         return visible
+
+    def list_all_sync_actions(self, search: Optional[str] = None, limit: int = 200) -> List[dict]:
+        """Return queued sync actions across all users/drones (super-admin view)."""
+        if postgres_store.available():
+            rows = postgres_store.list_all_sync_actions(search, limit)
+            if rows is not None:
+                return rows
+        term = str(search or "").strip().lower()
+        results: List[dict] = []
+        for internal_id, actions in self.device_actions.items():
+            device = next((d for d in self.devices.values() if d.get("id") == internal_id), None)
+            if not device:
+                continue
+            owner = self.get_user(device.get("user_id")) or {}
+            for action in actions:
+                if not str(action.get("action") or "").startswith("sync"):
+                    continue
+                if str(action.get("status") or "pending") not in {"pending", "claimed", "in_progress"}:
+                    continue
+                payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+                row = {
+                    "id": action.get("id"),
+                    "action": action.get("action"),
+                    "status": action.get("status") or "pending",
+                    "created_at": action.get("created_at"),
+                    "device_id": device.get("device_id"),
+                    "device_name": device.get("device_name"),
+                    "email": owner.get("email"),
+                    "username": owner.get("username"),
+                    "full_name": owner.get("full_name"),
+                    "system": str(payload.get("system") or payload.get("system_name") or ""),
+                    "rom": str(payload.get("rom_name") or payload.get("rom_path") or payload.get("rom_file") or ""),
+                }
+                if term and term not in " ".join(str(row.get(k) or "") for k in ("email", "username", "full_name", "device_id", "system", "rom")).lower():
+                    continue
+                results.append(row)
+        results.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        return results[:max(1, int(limit))]
 
     def admin_assign_pending_drone_connection(self, device_id: str, swarm_id: str) -> Optional[dict]:
         """Assign an unclaimed pending Drone request to a swarm and approve its current token."""

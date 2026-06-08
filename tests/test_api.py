@@ -816,6 +816,61 @@ def test_super_admin_overview_and_delete_permissions(client):
     assert db.get_device_by_device_id("admin-visible-drone") is None
 
 
+def test_super_admin_user_row_includes_swarm_name(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr_jerrodh-at-hotmail.com", "password": "testpass123"})
+    admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+
+    overview = client.get("/api/admin/overview", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    owner_row = next(user for user in overview["users"] if user["email"] == "owner@example.com")
+    assert "swarm_name" in owner_row and owner_row["swarm_name"]
+    # The delete-swarm endpoint is removed.
+    assert client.delete("/api/admin/swarms/anything", headers={"Authorization": f"Bearer {admin_token}"}).status_code in (404, 405)
+
+
+def test_pending_connections_exclude_approved_drones(client):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(owner["id"], "dup-drone", "Dup Drone", {"ip_address": "1.2.3.4"}, raw_token="t")
+    db.pending_drone_connections["dup-drone"] = {
+        "device_id": "dup-drone",
+        "status": "pending",
+        "device_name": "Dup Drone",
+        "last_seen": datetime.utcnow(),
+    }
+    pending = db.get_all_pending_drone_connections()
+    assert all(conn["device_id"] != "dup-drone" for conn in pending)
+
+
+def test_super_admin_sync_actions_listing_and_search(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr_jerrodh-at-hotmail.com", "password": "testpass123"})
+    admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(owner["id"], "sync-drone", "Sync Drone", {"ip_address": "10.0.0.5"}, raw_token="t1")
+    db.create_device_action(owner["id"], "sync-drone", "sync_rom", {"system": "snes", "rom_name": "Chrono Trigger"})
+    db.create_device_action(owner["id"], "sync-drone", "sync_artwork", {"system": "gba", "rom_name": "Metroid Fusion"})
+
+    resp = client.get("/api/admin/sync-actions", headers={"Authorization": f"Bearer {admin_token}"})
+    assert resp.status_code == 200
+    actions = resp.json()["sync_actions"]
+    assert {a["system"] for a in actions} == {"snes", "gba"}
+    assert all(a["email"] == "owner@example.com" for a in actions)
+
+    by_rom = client.get("/api/admin/sync-actions?q=chrono", headers={"Authorization": f"Bearer {admin_token}"}).json()["sync_actions"]
+    assert len(by_rom) == 1 and by_rom[0]["system"] == "snes"
+
+    by_email = client.get("/api/admin/sync-actions?q=owner@example", headers={"Authorization": f"Bearer {admin_token}"}).json()["sync_actions"]
+    assert len(by_email) == 2
+
+    none_match = client.get("/api/admin/sync-actions?q=zzzznope", headers={"Authorization": f"Bearer {admin_token}"}).json()["sync_actions"]
+    assert none_match == []
+
+    client.post("/api/auth/register", json={"email": "reg@example.com", "username": "reg-at-example.com", "password": "testpass123"})
+    reg_token = client.post("/api/auth/login", json={"email": "reg@example.com", "password": "testpass123"}).json()["access_token"]
+    assert client.get("/api/admin/sync-actions", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
+
+
 def test_super_admin_can_recover_untrusted_pending_drone_connection(client):
     client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
     admin_token = client.post(
@@ -4120,8 +4175,8 @@ def test_super_admin_runtime_metrics_ui_refreshes_when_viewed():
     assert "pending_connections" in js
     assert "assignPendingDroneToSwarm" in js
     assert "/api/admin/drone-connections/" in js
-    assert "apiGet('/api/admin/runtime-metrics')" in js
-    assert "apiGet('/api/admin/runtime-logs')" in js
+    assert "apiGet('/api/admin/runtime-metrics'" in js
+    assert "apiGet('/api/admin/runtime-logs'" in js
     assert "Overmind Runtime Logs" in js
     assert "setInterval(() =>" in js
     assert "5000" in js

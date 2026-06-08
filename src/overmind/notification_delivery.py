@@ -105,6 +105,11 @@ def deliver_notification(data_store: Any, notification: dict, *, email_client: A
 def deliver_pending_notifications(data_store: Any, *, email_client: Any = emailer, limit: int = 0) -> int:
     """Deliver one digest per enabled user/channel for all queued events."""
     _refresh(data_store)
+    # In stateless runtimes the in-memory store is empty; load pending
+    # notifications (and recipients) straight from the database.
+    hydrate = getattr(data_store, "hydrate_pending_notifications_from_store", None)
+    if callable(hydrate):
+        hydrate()
     limit = max(0, int(limit or 0))
     pending = [
         (notification, data_store.swarms.get(swarm_id) or {})
@@ -123,6 +128,7 @@ def deliver_pending_notifications(data_store: Any, *, email_client: Any = emaile
     elif limit:
         pending = pending[:limit]
     if not pending:
+        logger.info("Notification digest delivery: no pending notifications")
         return 0
 
     sent_count = 0
@@ -166,6 +172,7 @@ def deliver_pending_notifications(data_store: Any, *, email_client: Any = emaile
     persist = getattr(data_store, "_persist_state", None)
     if callable(persist):
         persist()
+    logger.info("Notification digest delivery: pending=%d digests_sent=%d", len(pending), sent_count)
     return sent_count
 
 

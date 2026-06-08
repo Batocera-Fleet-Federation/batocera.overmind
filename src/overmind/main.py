@@ -1302,6 +1302,15 @@ async def admin_assign_drone_connection(device_id: str, payload: dict, authoriza
     return {"status": "assigned", "device": device_response(device)}
 
 
+@app.get("/api/admin/sync-actions")
+async def admin_sync_actions(q: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
+    """List queued sync actions across all users and drones (super admin only)."""
+    require_super_admin(authorization)
+    db.refresh_admin_overview_state()
+    actions = db.list_all_sync_actions(search=q, limit=500)
+    return {"sync_actions": actions}
+
+
 @app.get("/api/admin/runtime-metrics")
 async def admin_runtime_metrics(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
@@ -1333,14 +1342,6 @@ async def admin_delete_user(user_id: str, authorization: Optional[str] = Header(
     if not db.admin_delete_user(user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return {"status": "deleted", "user_id": user_id}
-
-
-@app.delete("/api/admin/swarms/{swarm_id}")
-async def admin_delete_swarm(swarm_id: str, authorization: Optional[str] = Header(default=None)):
-    require_super_admin(authorization)
-    if not db.admin_delete_swarm(swarm_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swarm not found")
-    return {"status": "deleted", "swarm_id": swarm_id}
 
 
 @app.delete("/api/admin/drones/{device_id}")

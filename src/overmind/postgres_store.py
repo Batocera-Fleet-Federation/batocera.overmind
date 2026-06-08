@@ -952,6 +952,65 @@ class PostgresMetadataStore:
                 )
                 return {notification_id: completed_at for notification_id, completed_at in cur.fetchall()}
 
+    def load_pending_notifications(self, limit: int = 500) -> Optional[list[dict]]:
+        """Return notifications still awaiting delivery, with their detail fields.
+
+        This is the authoritative source for the digest delivery job in stateless
+        runtimes (Lambda), where the in-memory notification store is never hydrated.
+        """
+        if not self.url:
+            return None
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, swarm_id, event_type, title, message, actor_user_id, created_at
+                    FROM notifications
+                    WHERE delivery_pending IS TRUE AND delivery_completed_at IS NULL
+                    ORDER BY created_at ASC
+                    LIMIT %s
+                    """,
+                    (max(1, int(limit)),),
+                )
+                by_id: dict = {}
+                result: list[dict] = []
+                for notification_id, swarm_id, event_type, title, message, actor_user_id, created_at in cur.fetchall():
+                    entry = {
+                        "id": notification_id,
+                        "swarm_id": swarm_id,
+                        "event_type": event_type,
+                        "title": title,
+                        "message": message,
+                        "actor_user_id": actor_user_id,
+                        "created_at": created_at,
+                        "details": {},
+                        "read_by": {},
+                        "dismissed_by": {},
+                        "delivery_pending": True,
+                        "delivery_completed_at": None,
+                    }
+                    by_id[notification_id] = entry
+                    result.append(entry)
+                if by_id:
+                    cur.execute(
+                        "SELECT notification_id, field_name, field_value FROM notification_fields WHERE notification_id = ANY(%s)",
+                        (list(by_id),),
+                    )
+                    for notification_id, field_name, field_value in cur.fetchall():
+                        entry = by_id.get(notification_id)
+                        if not entry or not field_name:
+                            continue
+                        try:
+                            value = _decode_state(json.loads(field_value)) if field_value is not None else None
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            value = field_value
+                        entry["details"][str(field_name)] = value
+                return result
+
     def _load_relational_state(self, cur) -> dict:
         """Rehydrate core app state from normalized tables for fresh workers."""
         state = {
@@ -3166,6 +3225,12 @@ class PostgresMetadataStore:
                            p.authorization_token_id, p.drone_token_hash, p.recovery_reason, p.requested_at, p.status
                     FROM pending_drone_connections p
                     WHERE p.status = 'pending'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM drones d
+                          WHERE d.device_id = p.device_id
+                            AND d.approval_status = 'approved'
+                            AND d.removed_at IS NULL
+                      )
                     ORDER BY p.requested_at DESC
                     """
                 )
@@ -3174,6 +3239,78 @@ class PostgresMetadataStore:
                     for conn_row in (self._pending_drone_connection_from_row(row) for row in cur.fetchall())
                     if conn_row
                 ]
+
+    def list_all_sync_actions(self, search: Optional[str] = None, limit: int = 200) -> Optional[list[dict]]:
+        """Return queued sync actions across all users and drones for the admin view.
+
+        Optionally filtered by a search term matched against owner email/username,
+        drone id, and the action's system/rom parameters.
+        """
+        conn = self._core_connection()
+        if conn is None:
+            return None
+        term = str(search or "").strip()
+        like = f"%{term}%" if term else None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT a.id, a.action, a.status, a.created_at,
+                           d.device_id, d.device_name, u.email, u.username, u.full_name,
+                           COALESCE(
+                               (SELECT parameter_value FROM drone_action_parameters
+                                WHERE action_id = a.id AND parameter_name = 'system' LIMIT 1),
+                               (SELECT parameter_value FROM drone_action_parameters
+                                WHERE action_id = a.id AND parameter_name = 'system_name' LIMIT 1)
+                           ) AS system_val,
+                           COALESCE(
+                               (SELECT parameter_value FROM drone_action_parameters
+                                WHERE action_id = a.id AND parameter_name = 'rom_name' LIMIT 1),
+                               (SELECT parameter_value FROM drone_action_parameters
+                                WHERE action_id = a.id AND parameter_name = 'rom_path' LIMIT 1),
+                               (SELECT parameter_value FROM drone_action_parameters
+                                WHERE action_id = a.id AND parameter_name = 'rom_file' LIMIT 1)
+                           ) AS rom_val
+                    FROM drone_actions a
+                    JOIN drones d ON d.id = a.drone_id
+                    LEFT JOIN users u ON u.id = d.user_id
+                    WHERE a.action LIKE 'sync%%'
+                      AND a.status IN ('pending', 'claimed')
+                      AND (
+                          %s IS NULL
+                          OR u.email ILIKE %s
+                          OR u.username ILIKE %s
+                          OR u.full_name ILIKE %s
+                          OR d.device_id ILIKE %s
+                          OR d.device_name ILIKE %s
+                          OR EXISTS (
+                              SELECT 1 FROM drone_action_parameters p
+                              WHERE p.action_id = a.id
+                                AND p.parameter_name IN ('system', 'system_name', 'rom_name', 'rom_path', 'rom_file')
+                                AND p.parameter_value ILIKE %s
+                          )
+                      )
+                    ORDER BY a.created_at DESC
+                    LIMIT %s
+                    """,
+                    (like, like, like, like, like, like, like, max(1, int(limit))),
+                )
+                rows = []
+                for action_id, action, action_status, created_at, device_id, device_name, email, username, full_name, system_val, rom_val in cur.fetchall():
+                    rows.append({
+                        "id": action_id,
+                        "action": action,
+                        "status": "in_progress" if action_status == "claimed" else (action_status or "pending"),
+                        "created_at": created_at,
+                        "device_id": device_id,
+                        "device_name": device_name,
+                        "email": email,
+                        "username": username,
+                        "full_name": full_name,
+                        "system": _coerce_param_text(system_val),
+                        "rom": _coerce_param_text(rom_val),
+                    })
+                return rows
 
     def get_pending_drone_connection(self, user_id: str, device_id: str) -> Optional[dict]:
         conn = self._core_connection()
@@ -5041,6 +5178,23 @@ def _decode_state(value):
     if isinstance(value, list):
         return [_decode_state(item) for item in value]
     return value
+
+
+def _coerce_param_text(value) -> str:
+    """Render a stored drone-action parameter (JSON text) as a plain display string."""
+    if value is None:
+        return ""
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return str(value)
+    if isinstance(decoded, str):
+        return decoded
+    if isinstance(decoded, bool) or isinstance(decoded, (int, float)):
+        return str(decoded)
+    if isinstance(decoded, (list, dict)):
+        return json.dumps(decoded)
+    return "" if decoded is None else str(decoded)
 
 
 def _merge_state_dicts(base: dict, overlay: dict) -> None:

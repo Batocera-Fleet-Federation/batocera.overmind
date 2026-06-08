@@ -4121,35 +4121,20 @@
                         <div class="device-card mb-3">
                             <h4 class="h5">Users</h4>
                             <div class="table-responsive"><table class="table table-sm align-middle">
-                                <thead><tr><th>Email</th><th>Name</th><th>Provider</th><th>Status</th><th>Swarms</th><th>Drones</th><th></th></tr></thead>
+                                <thead><tr><th>Email</th><th>Name</th><th>Swarm</th><th>Provider</th><th>Status</th><th>Drones</th><th></th></tr></thead>
                                 <tbody>${users.map(user => `
                                     <tr>
                                         <td>${escapeHtml(user.email)}</td>
                                         <td>${escapeHtml(user.full_name || user.username || '')}</td>
+                                        <td>${escapeHtml(user.swarm_name || '')}</td>
                                         <td>${escapeHtml(user.auth_provider || 'password')}</td>
                                         <td>${user.is_active ? '<span class="badge text-bg-success">active</span>' : '<span class="badge text-bg-warning">inactive</span>'}</td>
-                                        <td>${Number(user.swarm_count || 0)} (${Number(user.owned_swarm_count || 0)} owned)</td>
                                         <td>${Number(user.drone_count || 0)}</td>
                                         <td class="text-end">${user.is_super_admin ? '<span class="badge text-bg-secondary">super admin</span>' : `<button class="btn btn-outline-danger btn-sm" onclick="deleteSuperAdminRecord('users', '${escapeHtml(user.id)}')">Delete</button>`}</td>
                                     </tr>`).join('') || '<tr><td colspan="7" class="text-muted">No users.</td></tr>'}</tbody>
                             </table></div>
                         </div>
                         <div class="device-card mb-3">
-                            <h4 class="h5">Swarms</h4>
-                            <div class="table-responsive"><table class="table table-sm align-middle">
-                                <thead><tr><th>Name</th><th>Owner</th><th>Members</th><th>Drones</th><th>Created</th><th></th></tr></thead>
-                                <tbody>${swarms.map(swarm => `
-                                    <tr>
-                                        <td>${escapeHtml(swarm.name)}</td>
-                                        <td>${escapeHtml(swarm.owner_email || swarm.owner_id)}</td>
-                                        <td>${Number(swarm.member_count || 0)}</td>
-                                        <td>${Number(swarm.drone_count || 0)}</td>
-                                        <td>${formatAdminDate(swarm.created_at)}</td>
-                                        <td class="text-end"><button class="btn btn-outline-danger btn-sm" onclick="deleteSuperAdminRecord('swarms', '${escapeHtml(swarm.id)}')">Delete</button></td>
-                                    </tr>`).join('') || '<tr><td colspan="6" class="text-muted">No swarms.</td></tr>'}</tbody>
-                            </table></div>
-                        </div>
-                        <div class="device-card">
                             <h4 class="h5">Drones</h4>
                             <div class="table-responsive"><table class="table table-sm align-middle">
                                 <thead><tr><th>Name</th><th>Drone ID</th><th>Owner</th><th>Swarm</th><th>Status</th><th>Last Seen</th><th></th></tr></thead>
@@ -4165,10 +4150,54 @@
                                     </tr>`).join('') || '<tr><td colspan="7" class="text-muted">No drones.</td></tr>'}</tbody>
                             </table></div>
                         </div>
+                        <div class="device-card">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <h4 class="h5 mb-0">Queued Sync Actions</h4>
+                                <div class="d-flex gap-2">
+                                    <input id="sync-actions-search" class="form-control form-control-sm" type="text" placeholder="Search user / email / drone / system / rom" style="min-width: 260px;" onkeydown="if(event.key==='Enter'){event.preventDefault();loadSuperAdminSyncActions();}">
+                                    <button class="btn btn-primary btn-sm" type="button" onclick="loadSuperAdminSyncActions()">Search</button>
+                                    <button class="btn btn-outline-secondary btn-sm" type="button" onclick="(function(){const i=document.getElementById('sync-actions-search');if(i)i.value='';loadSuperAdminSyncActions();})()">Clear</button>
+                                </div>
+                            </div>
+                            <div id="sync-actions-results"><div class="empty-state">Loading sync actions…</div></div>
+                        </div>
                     `;
+                    loadSuperAdminSyncActions();
                 } catch (error) {
                     console.error('Error loading super admin data:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load super admin data.</div>';
+                }
+            }
+
+            async function loadSuperAdminSyncActions() {
+                const results = document.getElementById('sync-actions-results');
+                if (!results || !isSuperAdmin()) return;
+                const input = document.getElementById('sync-actions-search');
+                const query = input ? input.value.trim() : '';
+                results.innerHTML = '<div class="empty-state">Loading sync actions…</div>';
+                try {
+                    const response = await apiGet(`/api/admin/sync-actions${query ? `?q=${encodeURIComponent(query)}` : ''}`, { showLoader: false });
+                    if (!response.ok) throw new Error('Failed to load sync actions');
+                    const data = await response.json();
+                    const actions = data.sync_actions || [];
+                    results.innerHTML = `
+                        <div class="table-responsive"><table class="table table-sm align-middle">
+                            <thead><tr><th>User</th><th>Email</th><th>Drone</th><th>System</th><th>ROM</th><th>Action</th><th>Status</th><th>Queued</th></tr></thead>
+                            <tbody>${actions.map(action => `
+                                <tr>
+                                    <td>${escapeHtml(action.full_name || action.username || '')}</td>
+                                    <td>${escapeHtml(action.email || '')}</td>
+                                    <td class="mono">${escapeHtml(action.device_name || action.device_id || '')}</td>
+                                    <td>${escapeHtml(action.system || '')}</td>
+                                    <td>${escapeHtml(action.rom || '')}</td>
+                                    <td>${escapeHtml(action.action || '')}</td>
+                                    <td><span class="badge ${action.status === 'in_progress' ? 'text-bg-info' : 'text-bg-secondary'}">${escapeHtml(action.status || '')}</span></td>
+                                    <td>${formatAdminDate(action.created_at)}</td>
+                                </tr>`).join('') || `<tr><td colspan="8" class="text-muted">${query ? 'No sync actions match your search.' : 'No queued sync actions.'}</td></tr>`}</tbody>
+                        </table></div>`;
+                } catch (error) {
+                    console.error('Error loading sync actions:', error);
+                    results.innerHTML = '<div class="empty-state">Unable to load sync actions.</div>';
                 }
             }
 
