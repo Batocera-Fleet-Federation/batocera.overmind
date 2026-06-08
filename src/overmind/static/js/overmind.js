@@ -3133,7 +3133,7 @@
                         <div class="card"><div class="card-body py-2">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                                 <div class="d-flex gap-2 align-items-center">
-                                    <strong>ROMs (Master List)</strong>
+                                    <strong>ROM Files (All Drones)</strong>
                                     <div class="small text-muted">${total} ROMs · ${missingCount} missing here</div>
                                 </div>
                                 <div class="d-flex gap-2">
@@ -3320,7 +3320,7 @@
                         <div class="card"><div class="card-body py-2">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                                 <div class="d-flex gap-2 align-items-center">
-                                    <strong>BIOS (Master List)</strong>
+                                    <strong>BIOS (All Drones)</strong>
                                     <div class="small text-muted">${total} files · ${missingCount} missing here</div>
                                 </div>
                                 ${pagination}
@@ -3605,7 +3605,7 @@
                         <div class="card"><div class="card-body py-2">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                                 <div class="d-flex gap-2 align-items-center">
-                                    <strong>Artwork (Master List)</strong>
+                                    <strong>Artwork (All Drones)</strong>
                                     <div class="small text-muted">${total} assets · ${missingCount} missing here</div>
                                 </div>
                                 ${pagination}
