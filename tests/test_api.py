@@ -4063,7 +4063,9 @@ def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
     assert "ROMs: ${Number(device.rom_count || 0).toLocaleString()}" in tile_renderer
     assert "'Resolvable'" in tile_renderer
     assert "'Not Resolvable'" in tile_renderer
-    assert "text-bg-warning" in tile_renderer
+    # Swarm tile Resolvable/Not Resolvable badge is driven by Overmind's own public
+    # reachability probe, not peer-to-peer checks.
+    assert "device.public_reachability && device.public_reachability.resolvable" in tile_renderer
 
 
 def test_profile_swarm_access_exposes_remove_overseer_action():

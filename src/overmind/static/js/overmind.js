@@ -1688,11 +1688,11 @@
                                         <i class="bi bi-hdd-network text-muted"></i>
                                     </div>
                                     <div class="small text-muted mb-1">Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}</div>
-                                    <div class="small text-muted mb-3">ROMs: ${Number(device.rom_count || 0).toLocaleString()}</div>
+                                    <div class="small text-muted mb-3">ROM Files: ${Number(device.rom_count || 0).toLocaleString()}</div>
                                     <div class="mt-3 d-flex flex-wrap gap-1">
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
-                                        <span class="badge ${device.peer_resolvable ? 'text-bg-success' : ((device.peer_checks && device.peer_checks.some && device.peer_checks.some(c => c.target_drone_id === device.device_id)) || (device.peer_resolved_by && device.peer_resolved_by.length > 0) ? 'text-bg-warning' : 'text-bg-secondary')}">${device.peer_resolvable ? 'Resolvable' : 'Not Resolvable'}</span>
+                                        <span class="badge ${(device.public_reachability && device.public_reachability.resolvable) ? 'text-bg-success' : 'text-bg-secondary'}" title="Overmind public reachability probe (TCP connect to the registered public IP)">${(device.public_reachability && device.public_reachability.resolvable) ? 'Resolvable' : 'Not Resolvable'}</span>
                                     </div>
                                     <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>

@@ -1986,7 +1986,7 @@ class PostgresMetadataStore:
         oldest_checked_first: bool = True,
     ) -> Optional[list[dict]]:
         """Return all approved Drones, ordered for round-robin reachability polling."""
-        order = "n.checked_at ASC NULLS FIRST, d.registered_at ASC" if oldest_checked_first else "d.registered_at ASC"
+        order = "ns.checked_at ASC NULLS FIRST, d.registered_at ASC" if oldest_checked_first else "d.registered_at ASC"
         limit_clause = f"LIMIT {max(1, int(limit))}" if limit else ""
 
         def _query():
