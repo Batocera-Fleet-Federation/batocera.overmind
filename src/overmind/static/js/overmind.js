@@ -2200,7 +2200,7 @@
                     ].filter(Boolean).join(' | ');
                     return `${when} ${details}`.trim();
                 });
-                sources.unshift({id: 'game_logs', label: 'Game Logs', path: 'Overmind gameplay history', content: gameLines.join('\n') || 'No game logs reported yet.'});
+                sources.unshift({id: 'game_logs', label: 'Gameplay Logs', path: 'Overmind gameplay history', content: gameLines.join('\n') || 'No gameplay logs reported yet.'});
                 return sources;
             }
 
@@ -2208,11 +2208,11 @@
                 const container = document.getElementById('gamelogs-list');
                 if (!container) return;
                 container.innerHTML = `
-                    ${renderPassiveUpdateNotice('Logs')}
+                    ${renderPassiveUpdateNotice('Gameplay logs')}
                     <div class="row">
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
-                                    <div class="card-header">Log Sources</div>
+                                    <div class="card-header">Gameplay Sources</div>
                                     <div class="list-group list-group-flush source-selector" id="overmindLogSources"></div>
                             </div>
                         </div>
@@ -2221,7 +2221,7 @@
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                     <span id="overmindLogTitle">Select a log source</span>
                                     <div class="d-flex flex-wrap align-items-center gap-2">
-                                        <label for="overmindLogLineLimit" class="small text-muted mb-0">Logs</label>
+                                        <label for="overmindLogLineLimit" class="small text-muted mb-0">Lines</label>
                                         <select id="overmindLogLineLimit" class="form-select form-select-sm" style="width:6rem;" onchange="setOvermindLogLineLimit(this.value)">
                                             ${[10, 20, 50, 100].map(value => `<option value="${value}" ${getOvermindLogLineLimit() === value ? 'selected' : ''}>${value}</option>`).join('')}
                                         </select>
@@ -3060,7 +3060,7 @@
                 container.innerHTML = `
                     <div class="card"><div class="card-body py-2">
                         <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3 mutate-only">
-                            <strong>Device Controls</strong>
+                            <strong>Settings</strong>
                             <div class="d-flex flex-wrap align-items-center gap-2">
                                 <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart', {refreshActions:false})"><i class="bi bi-arrow-clockwise me-1"></i>Remote Restart</button>
                                 <div class="form-check form-switch mb-0 d-flex align-items-center gap-2" title="${kioskKnown ? '' : 'Current Kiosk mode has not been reported by this Drone yet.'}">

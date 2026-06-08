@@ -288,7 +288,11 @@ class OvermindDatabase:
             return
         internal_id = internal_device["id"]
         existing = self.gamelogs.get(internal_id, [])
-        self.gamelogs[internal_id] = append_game_log_sessions(existing, device_id, sessions)
+        updated = append_game_log_sessions(existing, device_id, sessions)
+        self.gamelogs[internal_id] = updated
+        if len(updated) != len(existing):
+            self.update_device_last_seen(internal_id)
+            self._persist_state()
 
     def _device_label(self, device: Optional[dict], fallback: Optional[str] = None) -> str:
         if not device:
