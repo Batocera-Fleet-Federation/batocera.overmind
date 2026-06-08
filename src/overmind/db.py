@@ -1474,12 +1474,15 @@ class OvermindDatabase:
         visible.sort(key=lambda row: row.get("last_seen"), reverse=True)
         return visible
 
-    def list_all_sync_actions(self, search: Optional[str] = None, limit: int = 200) -> List[dict]:
-        """Return queued sync actions across all users/drones (super-admin view)."""
+    def list_all_sync_actions(self, search: Optional[str] = None, limit: int = 20, offset: int = 0) -> dict:
+        """Return a page of all sync actions across all users/drones (super-admin view).
+
+        Returns ``{"actions": [...], "total": N}`` ordered newest first.
+        """
         if postgres_store.available():
-            rows = postgres_store.list_all_sync_actions(search, limit)
-            if rows is not None:
-                return rows
+            page = postgres_store.list_all_sync_actions(search, limit, offset)
+            if page is not None:
+                return page
         term = str(search or "").strip().lower()
         results: List[dict] = []
         for internal_id, actions in self.device_actions.items():
@@ -1489,8 +1492,6 @@ class OvermindDatabase:
             owner = self.get_user(device.get("user_id")) or {}
             for action in actions:
                 if not str(action.get("action") or "").startswith("sync"):
-                    continue
-                if str(action.get("status") or "pending") not in {"pending", "claimed", "in_progress"}:
                     continue
                 payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
                 row = {
@@ -1510,7 +1511,9 @@ class OvermindDatabase:
                     continue
                 results.append(row)
         results.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
-        return results[:max(1, int(limit))]
+        limit = max(1, int(limit))
+        offset = max(0, int(offset))
+        return {"actions": results[offset:offset + limit], "total": len(results)}
 
     def admin_assign_pending_drone_connection(self, device_id: str, swarm_id: str) -> Optional[dict]:
         """Assign an unclaimed pending Drone request to a swarm and approve its current token."""

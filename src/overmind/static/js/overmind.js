@@ -93,6 +93,8 @@
             let notificationsInFlight = false;
             let systemFilterOptionsRequestId = 0;
             let superAdminMetricsTimer = null;
+            let syncActionsOffset = 0;
+            let syncActionsPageSize = 20;
             let notificationsRefreshTimer = null;
             let inactivityTimer = null;
             let lastAuthRefreshAt = 0;
@@ -4152,16 +4154,24 @@
                         </div>
                         <div class="device-card">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <h4 class="h5 mb-0">Queued Sync Actions</h4>
-                                <div class="d-flex gap-2">
-                                    <input id="sync-actions-search" class="form-control form-control-sm" type="text" placeholder="Search user / email / drone / system / rom" style="min-width: 260px;" onkeydown="if(event.key==='Enter'){event.preventDefault();loadSuperAdminSyncActions();}">
-                                    <button class="btn btn-primary btn-sm" type="button" onclick="loadSuperAdminSyncActions()">Search</button>
-                                    <button class="btn btn-outline-secondary btn-sm" type="button" onclick="(function(){const i=document.getElementById('sync-actions-search');if(i)i.value='';loadSuperAdminSyncActions();})()">Clear</button>
+                                <h4 class="h5 mb-0">Sync Actions</h4>
+                                <div class="d-flex flex-wrap align-items-center gap-2">
+                                    <input id="sync-actions-search" class="form-control form-control-sm" type="text" placeholder="Search user / email / drone / system / rom" style="min-width: 260px;" onkeydown="if(event.key==='Enter'){event.preventDefault();searchSuperAdminSyncActions();}">
+                                    <button class="btn btn-primary btn-sm" type="button" onclick="searchSuperAdminSyncActions()">Search</button>
+                                    <button class="btn btn-outline-secondary btn-sm" type="button" onclick="clearSuperAdminSyncActionsSearch()">Clear</button>
+                                    <select id="sync-actions-page-size" class="form-select form-select-sm" style="width: auto;" onchange="changeSyncActionsPageSize(this.value)" title="Rows per page">
+                                        <option value="20">20</option>
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                    </select>
                                 </div>
                             </div>
                             <div id="sync-actions-results"><div class="empty-state">Loading sync actions…</div></div>
                         </div>
                     `;
+                    syncActionsOffset = 0;
+                    const pageSizeSelect = document.getElementById('sync-actions-page-size');
+                    if (pageSizeSelect) pageSizeSelect.value = String(syncActionsPageSize);
                     loadSuperAdminSyncActions();
                 } catch (error) {
                     console.error('Error loading super admin data:', error);
@@ -4169,20 +4179,67 @@
                 }
             }
 
+            function syncActionStatusBadge(status) {
+                const map = {
+                    completed: 'text-bg-success',
+                    failed: 'text-bg-danger',
+                    error: 'text-bg-danger',
+                    in_progress: 'text-bg-info',
+                    claimed: 'text-bg-info',
+                    pending: 'text-bg-secondary',
+                    cancelled: 'text-bg-warning',
+                    canceled: 'text-bg-warning',
+                };
+                return map[String(status || '').toLowerCase()] || 'text-bg-secondary';
+            }
+
+            function searchSuperAdminSyncActions() {
+                syncActionsOffset = 0;
+                loadSuperAdminSyncActions();
+            }
+
+            function clearSuperAdminSyncActionsSearch() {
+                const input = document.getElementById('sync-actions-search');
+                if (input) input.value = '';
+                syncActionsOffset = 0;
+                loadSuperAdminSyncActions();
+            }
+
+            function changeSyncActionsPageSize(value) {
+                const size = Number(value) || 20;
+                syncActionsPageSize = [20, 50, 100].includes(size) ? size : 20;
+                syncActionsOffset = 0;
+                loadSuperAdminSyncActions();
+            }
+
+            function gotoSyncActionsPage(offset) {
+                syncActionsOffset = Math.max(0, Number(offset) || 0);
+                loadSuperAdminSyncActions();
+            }
+
             async function loadSuperAdminSyncActions() {
                 const results = document.getElementById('sync-actions-results');
                 if (!results || !isSuperAdmin()) return;
                 const input = document.getElementById('sync-actions-search');
                 const query = input ? input.value.trim() : '';
+                const limit = syncActionsPageSize;
+                const offset = syncActionsOffset;
                 results.innerHTML = '<div class="empty-state">Loading sync actions…</div>';
                 try {
-                    const response = await apiGet(`/api/admin/sync-actions${query ? `?q=${encodeURIComponent(query)}` : ''}`, { showLoader: false });
+                    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+                    if (query) params.set('q', query);
+                    const response = await apiGet(`/api/admin/sync-actions?${params.toString()}`, { showLoader: false });
                     if (!response.ok) throw new Error('Failed to load sync actions');
                     const data = await response.json();
                     const actions = data.sync_actions || [];
+                    const total = Number(data.total || 0);
+                    const start = total ? offset + 1 : 0;
+                    const end = offset + actions.length;
+                    const hasPrev = offset > 0;
+                    const hasNext = end < total;
                     results.innerHTML = `
                         <div class="table-responsive"><table class="table table-sm align-middle">
-                            <thead><tr><th>User</th><th>Email</th><th>Drone</th><th>System</th><th>ROM</th><th>Action</th><th>Status</th><th>Queued</th></tr></thead>
+                            <thead><tr><th>User</th><th>Email</th><th>Drone</th><th>System</th><th>ROM</th><th>Action</th><th>Status</th><th>Created</th></tr></thead>
                             <tbody>${actions.map(action => `
                                 <tr>
                                     <td>${escapeHtml(action.full_name || action.username || '')}</td>
@@ -4191,10 +4248,17 @@
                                     <td>${escapeHtml(action.system || '')}</td>
                                     <td>${escapeHtml(action.rom || '')}</td>
                                     <td>${escapeHtml(action.action || '')}</td>
-                                    <td><span class="badge ${action.status === 'in_progress' ? 'text-bg-info' : 'text-bg-secondary'}">${escapeHtml(action.status || '')}</span></td>
+                                    <td><span class="badge ${syncActionStatusBadge(action.status)}">${escapeHtml(action.status || '')}</span></td>
                                     <td>${formatAdminDate(action.created_at)}</td>
-                                </tr>`).join('') || `<tr><td colspan="8" class="text-muted">${query ? 'No sync actions match your search.' : 'No queued sync actions.'}</td></tr>`}</tbody>
-                        </table></div>`;
+                                </tr>`).join('') || `<tr><td colspan="8" class="text-muted">${query ? 'No sync actions match your search.' : 'No sync actions yet.'}</td></tr>`}</tbody>
+                        </table></div>
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
+                            <span class="small text-muted">${total ? `Showing ${start}–${end} of ${total}` : 'No results'}</span>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary" type="button" ${hasPrev ? '' : 'disabled'} onclick="gotoSyncActionsPage(${Math.max(0, offset - limit)})">Previous</button>
+                                <button class="btn btn-outline-secondary" type="button" ${hasNext ? '' : 'disabled'} onclick="gotoSyncActionsPage(${offset + limit})">Next</button>
+                            </div>
+                        </div>`;
                 } catch (error) {
                     console.error('Error loading sync actions:', error);
                     results.innerHTML = '<div class="empty-state">Unable to load sync actions.</div>';

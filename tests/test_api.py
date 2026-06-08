@@ -850,18 +850,29 @@ def test_super_admin_sync_actions_listing_and_search(client):
     db.create_device(owner["id"], "sync-drone", "Sync Drone", {"ip_address": "10.0.0.5"}, raw_token="t1")
     db.create_device_action(owner["id"], "sync-drone", "sync_rom", {"system": "snes", "rom_name": "Chrono Trigger"})
     db.create_device_action(owner["id"], "sync-drone", "sync_artwork", {"system": "gba", "rom_name": "Metroid Fusion"})
+    # A finished action must still appear (full history, not just queued).
+    done = db.create_device_action(owner["id"], "sync-drone", "sync_bios", {"system": "psx", "rom_name": "scph"})
+    done["status"] = "completed"
 
     resp = client.get("/api/admin/sync-actions", headers={"Authorization": f"Bearer {admin_token}"})
     assert resp.status_code == 200
-    actions = resp.json()["sync_actions"]
-    assert {a["system"] for a in actions} == {"snes", "gba"}
-    assert all(a["email"] == "owner@example.com" for a in actions)
+    body = resp.json()
+    assert body["total"] == 3
+    assert {a["system"] for a in body["sync_actions"]} == {"snes", "gba", "psx"}
+    assert any(a["status"] == "completed" for a in body["sync_actions"])
+    assert all(a["email"] == "owner@example.com" for a in body["sync_actions"])
+
+    # Pagination: first page of 2, then the remaining 1.
+    page1 = client.get("/api/admin/sync-actions?limit=2&offset=0", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert len(page1["sync_actions"]) == 2 and page1["total"] == 3
+    page2 = client.get("/api/admin/sync-actions?limit=2&offset=2", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert len(page2["sync_actions"]) == 1 and page2["total"] == 3
 
     by_rom = client.get("/api/admin/sync-actions?q=chrono", headers={"Authorization": f"Bearer {admin_token}"}).json()["sync_actions"]
     assert len(by_rom) == 1 and by_rom[0]["system"] == "snes"
 
-    by_email = client.get("/api/admin/sync-actions?q=owner@example", headers={"Authorization": f"Bearer {admin_token}"}).json()["sync_actions"]
-    assert len(by_email) == 2
+    by_email = client.get("/api/admin/sync-actions?q=owner@example", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert by_email["total"] == 3
 
     none_match = client.get("/api/admin/sync-actions?q=zzzznope", headers={"Authorization": f"Bearer {admin_token}"}).json()["sync_actions"]
     assert none_match == []
@@ -869,6 +880,44 @@ def test_super_admin_sync_actions_listing_and_search(client):
     client.post("/api/auth/register", json={"email": "reg@example.com", "username": "reg-at-example.com", "password": "testpass123"})
     reg_token = client.post("/api/auth/login", json={"email": "reg@example.com", "password": "testpass123"}).json()["access_token"]
     assert client.get("/api/admin/sync-actions", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
+
+
+def test_runtime_logs_stderr_uses_shared_buffer(monkeypatch):
+    import logging
+    from overmind import cache, main as overmind_main
+
+    class _FakePipe:
+        def __init__(self, store):
+            self.store = store
+        def rpush(self, key, value):
+            self.store.setdefault(key, []).append(value)
+            return self
+        def ltrim(self, key, start, end):
+            vals = self.store.get(key, [])
+            self.store[key] = vals[start:] if end == -1 else vals[start:end + 1]
+            return self
+        def expire(self, key, ttl):
+            return self
+        def execute(self):
+            return None
+
+    class _FakeRedis:
+        def __init__(self):
+            self.store = {}
+        def pipeline(self):
+            return _FakePipe(self.store)
+        def lrange(self, key, start, end):
+            vals = self.store.get(key, [])
+            return vals[start:] if end == -1 else vals[start:end + 1]
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake)
+    overmind_main.install_stream_log_capture()
+
+    logging.getLogger("overmind.test").error("SHARED-STDERR-MARKER")
+    # The shared buffer holds it (cross-instance), and the snapshot reflects it.
+    assert any("SHARED-STDERR-MARKER" in line for line in cache.read_log_tail("stderr"))
+    assert "SHARED-STDERR-MARKER" in overmind_main.stream_log_snapshot()["stderr"]
 
 
 def test_super_admin_can_recover_untrusted_pending_drone_connection(client):

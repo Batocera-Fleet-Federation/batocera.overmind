@@ -3240,23 +3240,51 @@ class PostgresMetadataStore:
                     if conn_row
                 ]
 
-    def list_all_sync_actions(self, search: Optional[str] = None, limit: int = 200) -> Optional[list[dict]]:
-        """Return queued sync actions across all users and drones for the admin view.
+    def list_all_sync_actions(self, search: Optional[str] = None, limit: int = 20, offset: int = 0) -> Optional[dict]:
+        """Return a page of sync actions (any status) across all users and drones.
 
-        Optionally filtered by a search term matched against owner email/username,
-        drone id, and the action's system/rom parameters.
+        Newest first, optionally filtered by a search term matched against owner
+        email/username, drone id, and the action's system/rom parameters. Returns
+        ``{"actions": [...], "total": N}`` so the admin UI can paginate.
         """
         conn = self._core_connection()
         if conn is None:
             return None
         term = str(search or "").strip()
         like = f"%{term}%" if term else None
+        limit = max(1, int(limit))
+        offset = max(0, int(offset))
+        # Shared filter: all sync actions, optionally narrowed by the search term.
+        where = """
+            FROM drone_actions a
+            JOIN drones d ON d.id = a.drone_id
+            LEFT JOIN users u ON u.id = d.user_id
+            LEFT JOIN user_profiles up ON up.user_id = u.id
+            WHERE a.action LIKE 'sync%%'
+              AND (
+                  %s IS NULL
+                  OR u.email ILIKE %s
+                  OR up.username ILIKE %s
+                  OR up.full_name ILIKE %s
+                  OR d.device_id ILIKE %s
+                  OR d.device_name ILIKE %s
+                  OR EXISTS (
+                      SELECT 1 FROM drone_action_parameters p
+                      WHERE p.action_id = a.id
+                        AND p.parameter_name IN ('system', 'system_name', 'rom_name', 'rom_path', 'rom_file')
+                        AND p.parameter_value ILIKE %s
+                  )
+              )
+        """
+        filter_params = (like, like, like, like, like, like, like)
         with conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT count(*) " + where, filter_params)
+                total = int(cur.fetchone()[0])
                 cur.execute(
                     """
                     SELECT a.id, a.action, a.status, a.created_at,
-                           d.device_id, d.device_name, u.email, u.username, u.full_name,
+                           d.device_id, d.device_name, u.email, up.username, up.full_name,
                            COALESCE(
                                (SELECT parameter_value FROM drone_action_parameters
                                 WHERE action_id = a.id AND parameter_name = 'system' LIMIT 1),
@@ -3271,33 +3299,15 @@ class PostgresMetadataStore:
                                (SELECT parameter_value FROM drone_action_parameters
                                 WHERE action_id = a.id AND parameter_name = 'rom_file' LIMIT 1)
                            ) AS rom_val
-                    FROM drone_actions a
-                    JOIN drones d ON d.id = a.drone_id
-                    LEFT JOIN users u ON u.id = d.user_id
-                    WHERE a.action LIKE 'sync%%'
-                      AND a.status IN ('pending', 'claimed')
-                      AND (
-                          %s IS NULL
-                          OR u.email ILIKE %s
-                          OR u.username ILIKE %s
-                          OR u.full_name ILIKE %s
-                          OR d.device_id ILIKE %s
-                          OR d.device_name ILIKE %s
-                          OR EXISTS (
-                              SELECT 1 FROM drone_action_parameters p
-                              WHERE p.action_id = a.id
-                                AND p.parameter_name IN ('system', 'system_name', 'rom_name', 'rom_path', 'rom_file')
-                                AND p.parameter_value ILIKE %s
-                          )
-                      )
+                    """ + where + """
                     ORDER BY a.created_at DESC
-                    LIMIT %s
+                    LIMIT %s OFFSET %s
                     """,
-                    (like, like, like, like, like, like, like, max(1, int(limit))),
+                    filter_params + (limit, offset),
                 )
-                rows = []
+                actions = []
                 for action_id, action, action_status, created_at, device_id, device_name, email, username, full_name, system_val, rom_val in cur.fetchall():
-                    rows.append({
+                    actions.append({
                         "id": action_id,
                         "action": action,
                         "status": "in_progress" if action_status == "claimed" else (action_status or "pending"),
@@ -3310,7 +3320,7 @@ class PostgresMetadataStore:
                         "system": _coerce_param_text(system_val),
                         "rom": _coerce_param_text(rom_val),
                     })
-                return rows
+                return {"actions": actions, "total": total}
 
     def get_pending_drone_connection(self, user_id: str, device_id: str) -> Optional[dict]:
         conn = self._core_connection()

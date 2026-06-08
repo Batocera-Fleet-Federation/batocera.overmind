@@ -37,6 +37,7 @@ from overmind.models import (
 )
 from overmind.db import db
 from overmind import auth
+from overmind import cache
 from overmind import emailer
 from overmind import networking
 from overmind import notification_delivery
@@ -238,6 +239,9 @@ def _current_drone_log_stream(device_id: str) -> Optional[dict]:
         return dict(payload) if isinstance(payload, dict) else None
 
 
+_LOG_TAIL_REENTRY = threading.local()
+
+
 class CapturedLoggingHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if _STREAM_LOG_CAPTURE is None:
@@ -248,8 +252,19 @@ class CapturedLoggingHandler(logging.Handler):
             # informational logs go to stdout, while warnings/errors stay on
             # stderr. Per-query PostgreSQL timing noise still reaches the real
             # stream but is excluded from the bounded tail shown in the UI.
-            target = _STREAM_LOG_CAPTURE.stderr if record.levelno >= logging.WARNING else _STREAM_LOG_CAPTURE.stdout
-            target.write(message + "\n", capture=not _is_db_query_log_record(record))
+            is_error = record.levelno >= logging.WARNING
+            captured = not _is_db_query_log_record(record)
+            target = _STREAM_LOG_CAPTURE.stderr if is_error else _STREAM_LOG_CAPTURE.stdout
+            target.write(message + "\n", capture=captured)
+            # Mirror warnings/errors to a shared buffer so the admin UI shows a
+            # consistent error history regardless of which Lambda instance logged
+            # it. Guarded against reentrancy (the Redis client may log on failure).
+            if is_error and captured and not getattr(_LOG_TAIL_REENTRY, "active", False):
+                _LOG_TAIL_REENTRY.active = True
+                try:
+                    cache.append_log_tail("stderr", [message])
+                finally:
+                    _LOG_TAIL_REENTRY.active = False
         except Exception:
             pass
 
@@ -285,13 +300,19 @@ def install_stream_log_capture() -> None:
 
 
 def stream_log_snapshot() -> dict:
-    return _STREAM_LOG_CAPTURE.snapshot() if _STREAM_LOG_CAPTURE else {
+    snapshot = _STREAM_LOG_CAPTURE.snapshot() if _STREAM_LOG_CAPTURE else {
         "stdout": "",
         "stderr": "",
         "max_lines": OVERMIND_LOG_CAPTURE_LINES,
         "captured_at": datetime.utcnow().isoformat() + "Z",
         "capture_active": False,
     }
+    # Prefer the shared cross-instance error tail so the admin stderr view stays
+    # stable instead of flickering as different Lambda instances answer each poll.
+    shared_stderr = cache.read_log_tail("stderr", OVERMIND_LOG_CAPTURE_LINES)
+    if shared_stderr is not None:
+        snapshot["stderr"] = "\n".join(shared_stderr)
+    return snapshot
 
 
 def mark_device_seen_fast(device: dict) -> None:
@@ -1303,12 +1324,19 @@ async def admin_assign_drone_connection(device_id: str, payload: dict, authoriza
 
 
 @app.get("/api/admin/sync-actions")
-async def admin_sync_actions(q: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
-    """List queued sync actions across all users and drones (super admin only)."""
+async def admin_sync_actions(
+    q: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+    authorization: Optional[str] = Header(default=None),
+):
+    """List sync actions (any status) across all users and drones (super admin only)."""
     require_super_admin(authorization)
     db.refresh_admin_overview_state()
-    actions = db.list_all_sync_actions(search=q, limit=500)
-    return {"sync_actions": actions}
+    limit = max(1, min(int(limit or 20), 100))
+    offset = max(0, int(offset or 0))
+    page = db.list_all_sync_actions(search=q, limit=limit, offset=offset)
+    return {"sync_actions": page["actions"], "total": page["total"], "limit": limit, "offset": offset}
 
 
 @app.get("/api/admin/runtime-metrics")

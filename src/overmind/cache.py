@@ -60,6 +60,42 @@ def set(key: str, value: Any, ttl: int = 30) -> None:
         pass
 
 
+_LOG_TAIL_MAX = 1000
+
+
+def append_log_tail(stream: str, lines: list[str]) -> None:
+    """Append lines to a shared, capped log buffer. Best-effort; never raises or logs.
+
+    Lets the admin runtime-logs view stay consistent across Lambda instances instead
+    of flickering as different instances (each with their own in-memory capture) serve
+    successive polls.
+    """
+    try:
+        client = _get_client()
+        if not client or not lines:
+            return
+        key = _key("logtail", stream)
+        pipe = client.pipeline()
+        for line in lines:
+            pipe.rpush(key, str(line))
+        pipe.ltrim(key, -_LOG_TAIL_MAX, -1)
+        pipe.expire(key, 86400)
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def read_log_tail(stream: str, max_lines: int = _LOG_TAIL_MAX) -> Optional[list[str]]:
+    """Return the shared log tail for a stream, or None if Redis is unavailable."""
+    try:
+        client = _get_client()
+        if not client:
+            return None
+        return client.lrange(_key("logtail", stream), -int(max_lines), -1)
+    except Exception:
+        return None
+
+
 def delete_pattern(pattern: str) -> None:
     try:
         client = _get_client()
