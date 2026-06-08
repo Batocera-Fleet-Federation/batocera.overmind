@@ -2731,7 +2731,33 @@ class OvermindDatabase:
         if not device:
             return 0
         return len(self.roms.get(device["id"], []))
-    
+
+    def count_device_games(self, device_id: str) -> int:
+        """Distinct games (gamelist entries per system, falling back to rom files
+        for systems with no gamelist) — the number EmulationStation actually shows."""
+        if postgres_store.assets_enabled():
+            result = postgres_store.count_device_games(device_id)
+            if result is not None:
+                return result
+        if postgres_store.available():
+            result = postgres_store.count_device_games_relational(device_id)
+            if result is not None:
+                return result
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return 0
+        by_system: Dict[str, dict] = {}
+        for rom in self.roms.get(device["id"], []):
+            if not isinstance(rom, dict):
+                continue
+            system = str(rom.get("system_name") or rom.get("system") or "")
+            source = str(rom.get("metadata_source") or rom.get("source") or "").lower()
+            bucket = by_system.setdefault(system, {"total": 0, "gamelist": 0})
+            bucket["total"] += 1
+            if source == "gamelist.xml":
+                bucket["gamelist"] += 1
+        return sum((bucket["gamelist"] or bucket["total"]) for bucket in by_system.values())
+
     # ROM operations
     def _clean_rom_rows(self, device_id: str, system_name: str, roms: list) -> list:
         cleaned = []

@@ -5137,7 +5137,17 @@ class PostgresMetadataStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT system_name, count(*), count(DISTINCT device_internal_id)
+                    SELECT system_name, count(*),
+                        CASE
+                            WHEN count(*) FILTER (
+                                WHERE lower(coalesce(payload->>'metadata_source', payload->>'source', '')) = 'gamelist.xml'
+                            ) = 0
+                            THEN count(*)
+                            ELSE count(*) FILTER (
+                                WHERE lower(coalesce(payload->>'metadata_source', payload->>'source', '')) = 'gamelist.xml'
+                            )
+                        END,
+                        count(DISTINCT device_internal_id)
                     FROM overmind_device_assets
                     WHERE device_internal_id = ANY(%s) AND asset_type = 'rom' AND system_name IS NOT NULL
                     GROUP BY system_name
@@ -5147,7 +5157,7 @@ class PostgresMetadataStore:
                 )
                 rows = cur.fetchall()
         result = [
-            {"system_name": row[0], "rom_count": int(row[1]), "device_count": int(row[2])}
+            {"system_name": row[0], "rom_count": int(row[1]), "game_count": int(row[2]), "device_count": int(row[3])}
             for row in rows
         ]
         if _cache:
@@ -5174,6 +5184,63 @@ class PostgresMetadataStore:
         if _cache:
             _cache.set(cache_key, result, ttl=60)
         return result
+
+    def count_device_games(self, device_id: str) -> Optional[int]:
+        """Count distinct games for a device: gamelist entries per system, falling
+        back to the rom-file count for systems that have no gamelist. This is the
+        number EmulationStation shows, as opposed to the raw rom-file count."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT coalesce(sum(games), 0) FROM (
+                        SELECT CASE
+                            WHEN count(*) FILTER (
+                                WHERE lower(coalesce(payload->>'metadata_source', payload->>'source', '')) = 'gamelist.xml'
+                            ) = 0
+                            THEN count(*)
+                            ELSE count(*) FILTER (
+                                WHERE lower(coalesce(payload->>'metadata_source', payload->>'source', '')) = 'gamelist.xml'
+                            )
+                        END AS games
+                        FROM overmind_device_assets
+                        WHERE device_id = %s AND asset_type = 'rom'
+                        GROUP BY coalesce(system_name, '')
+                    ) per_system
+                    """,
+                    (device_id,),
+                )
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+
+    def count_device_games_relational(self, device_id: str) -> Optional[int]:
+        """Games count from the relational ``drone_roms`` table (asset store disabled)."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT coalesce(sum(games), 0) FROM (
+                        SELECT CASE
+                            WHEN count(*) FILTER (WHERE lower(coalesce(r.metadata_source, '')) = 'gamelist.xml') = 0
+                            THEN count(*)
+                            ELSE count(*) FILTER (WHERE lower(coalesce(r.metadata_source, '')) = 'gamelist.xml')
+                        END AS games
+                        FROM drone_roms r
+                        JOIN drones d ON d.id = r.drone_id
+                        WHERE d.device_id = %s
+                        GROUP BY coalesce(r.system_name, '')
+                    ) per_system
+                    """,
+                    (device_id,),
+                )
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
 
     def update_rom_hashes(self, device_internal_id: str, patches: Iterable[dict]) -> None:
         if not self.assets_enabled():

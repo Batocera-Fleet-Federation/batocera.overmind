@@ -939,6 +939,36 @@ def test_reachability_poll_emits_notification_on_status_flip(monkeypatch):
     assert captured == {}
 
 
+def test_device_game_count_vs_rom_file_count(client):
+    user_id = db.create_user("games@example.com", auth_utils.hash_password("testpass123"), verified=True, username="games-at-example.com")
+    db.create_device(user_id, "games-drone", "Games Drone", {"ip_address": "10.0.0.9"}, raw_token="t")
+    token = client.post("/api/auth/login", json={"email": "games@example.com", "password": "testpass123"}).json()["access_token"]
+
+    # snes: 2 gamelist games but 5 rom files (e.g. multi-track/multi-disc).
+    db.add_roms("games-drone", "snes", [
+        {"rom_name": "Game A", "file_path": "a.sfc", "metadata_source": "gamelist.xml"},
+        {"rom_name": "Game B", "file_path": "b.sfc", "metadata_source": "gamelist.xml"},
+        {"rom_name": "b-track2", "file_path": "b2.bin", "metadata_source": "filesystem"},
+        {"rom_name": "b-track3", "file_path": "b3.bin", "metadata_source": "filesystem"},
+        {"rom_name": "b-track4", "file_path": "b4.bin", "metadata_source": "filesystem"},
+    ])
+    # psx: no gamelist at all -> games falls back to the file count (2).
+    db.add_roms("games-drone", "psx", [
+        {"rom_name": "Disc1", "file_path": "d1.chd", "metadata_source": "filesystem"},
+        {"rom_name": "Disc2", "file_path": "d2.chd", "metadata_source": "filesystem"},
+    ])
+
+    assert db.count_device_roms("games-drone") == 7
+    # snes -> 2 gamelist games; psx -> 2 (fallback). Total games = 4.
+    assert db.count_device_games("games-drone") == 4
+
+    response = client.get("/api/devices/games-drone", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rom_count"] == 7
+    assert body["game_count"] == 4
+
+
 def test_managed_config_registry_merge():
     from overmind.managed_configs import merge_managed_configs, MANAGED_CONFIG_REGISTRY
 
@@ -4260,7 +4290,8 @@ def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
 
     assert "Drone ID" not in tile_renderer
     assert "Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}" in tile_renderer
-    assert "ROMs: ${Number(device.rom_count || 0).toLocaleString()}" in tile_renderer
+    assert "ROM Files: ${Number(device.rom_count || 0).toLocaleString()}" in tile_renderer
+    assert "Games: ${Number(device.game_count" in tile_renderer
     assert "'Resolvable'" in tile_renderer
     assert "'Not Resolvable'" in tile_renderer
     # Swarm tile Resolvable/Not Resolvable badge is driven by Overmind's own public

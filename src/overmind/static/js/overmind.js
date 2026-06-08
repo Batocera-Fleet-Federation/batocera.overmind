@@ -1690,7 +1690,7 @@
                                         <i class="bi bi-hdd-network text-muted"></i>
                                     </div>
                                     <div class="small text-muted mb-1">Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}</div>
-                                    <div class="small text-muted mb-3">ROM Files: ${Number(device.rom_count || 0).toLocaleString()}</div>
+                                    <div class="small text-muted mb-3">Games: ${Number(device.game_count ?? device.rom_count ?? 0).toLocaleString()} &middot; ROM Files: ${Number(device.rom_count || 0).toLocaleString()}</div>
                                     <div class="mt-3 d-flex flex-wrap gap-1">
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
@@ -2533,7 +2533,7 @@
                     systems.forEach(s => {
                         const opt = document.createElement('option');
                         opt.value = s.system_name;
-                        opt.text = `${s.system_name} (${s.rom_count})`;
+                        opt.text = `${s.system_name} (${Number(s.game_count ?? s.rom_count ?? 0)} games / ${Number(s.rom_count ?? 0)} files)`;
                         opt.selected = s.system_name === currentSelection;
                         select.appendChild(opt);
                     });
@@ -2863,9 +2863,10 @@
                     <div class="tree-view">
                         ${entries.map(([systemName, summary]) => {
                             const count = Number(summary.rom_count || 0);
+                            const games = Number(summary.game_count ?? count);
                             return `
                                 <details ontoggle="if (this.open) loadSystemRomPage(${JSON.stringify(systemName)})">
-                                    <summary>${escapeHtml(systemName)} (${count} ROMs)</summary>
+                                    <summary>${escapeHtml(systemName)} (${games.toLocaleString()} games &middot; ${count.toLocaleString()} ROM files)</summary>
                                     <div id="system-rom-page-${cssSafeId(systemName)}" class="system-rom-page">
                                         <div class="small text-muted ms-3 mt-2">Open to load ROMs.</div>
                                     </div>

@@ -159,6 +159,15 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
             rom_count = len(data_store.get_device_roms(device.get("device_id")))
     except Exception:
         rom_count = 0
+    # "Games" = distinct titles EmulationStation shows (gamelist entries), as opposed
+    # to "ROM files" (rom_count) which counts every file on disk.
+    game_count = rom_count
+    try:
+        count_device_games = getattr(data_store, "count_device_games", None)
+        if callable(count_device_games):
+            game_count = int(count_device_games(device.get("device_id")) or 0)
+    except Exception:
+        game_count = rom_count
     emulator_configs = device.get("emulator_configs")
     try:
         load_configs = getattr(data_store, "get_device_emulator_configs", None)
@@ -182,6 +191,7 @@ def device_response(device: dict, *, data_store: Any, offline_threshold_seconds:
         "swarm_connected": bool(device.get("swarm_connected")),
         "rom_systems": device.get("rom_systems") or [],
         "rom_count": rom_count,
+        "game_count": game_count,
         "auto_sync_policy": device.get("auto_sync_policy") or {"enabled": False, "systems": []},
         "last_speed_sample": device.get("last_speed_sample"),
         "emulator_configs": emulator_configs,
