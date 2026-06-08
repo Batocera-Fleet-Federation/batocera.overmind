@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 from functools import partial
 from pathlib import Path
@@ -37,6 +38,7 @@ from overmind.models import (
 from overmind.db import db
 from overmind import auth
 from overmind import emailer
+from overmind import networking
 from overmind import notification_delivery
 from overmind.access_policy import (
     ensure_active_user as _ensure_active_user,
@@ -99,6 +101,15 @@ DEVICE_STATUS_MAX_DEVICES_PER_RUN = max(0, int(os.getenv(
     "DEVICE_STATUS_MAX_DEVICES_PER_RUN",
     "50" if _LAMBDA_RUNTIME_ENV else "0",
 )))
+# Public-reachability probe: bounded so a single 60s run can never back up.
+# Per-probe TCP timeout, worker fan-out, and a hard wall-clock budget that keeps
+# every run well under the EventBridge 60s cadence (which has retries disabled).
+PUBLIC_REACHABILITY_PROBE_TIMEOUT_SECONDS = max(0.1, float(os.getenv("PUBLIC_REACHABILITY_PROBE_TIMEOUT_SECONDS", "3")))
+PUBLIC_REACHABILITY_MAX_WORKERS = max(1, int(os.getenv("PUBLIC_REACHABILITY_MAX_WORKERS", "20")))
+PUBLIC_REACHABILITY_RUN_BUDGET_SECONDS = max(1.0, float(os.getenv("PUBLIC_REACHABILITY_RUN_BUDGET_SECONDS", "45")))
+# 0 = probe every approved Drone each run; a positive value caps work per run and
+# relies on oldest-checked-first ordering to round-robin a very large fleet.
+PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN = max(0, int(os.getenv("PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN", "0")))
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
@@ -380,6 +391,64 @@ def poll_device_status_notifications_once() -> None:
     )
 
 
+def poll_public_reachability_once() -> dict:
+    """TCP-probe each approved Drone's public IP:port and persist status changes.
+
+    Runs entirely off the lean ``postgres_store`` path (no full app-state refresh),
+    fans out probes across a bounded thread pool with a short per-probe timeout, and
+    stops issuing work once a hard wall-clock budget is hit so a single run can never
+    exceed the 60s EventBridge cadence and back up. Only Drones whose Resolvable /
+    Not Resolvable status actually changed are written back, keeping RDS writes minimal.
+    """
+    limit = PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN
+    devices = postgres_store.list_all_approved_devices(limit=limit, oldest_checked_first=True) or []
+    if not devices:
+        return {"job": "public-reachability", "status": "ok", "checked": 0, "changed": 0}
+
+    deadline = time.monotonic() + PUBLIC_REACHABILITY_RUN_BUDGET_SECONDS
+    checked = 0
+    changed = 0
+
+    def _probe(device: dict) -> tuple[dict, Optional[str], bool]:
+        network = device.get("network") if isinstance(device.get("network"), dict) else {}
+        reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
+        public_ip = network.get("public_ip") or network.get("public") or reachability.get("public_ip")
+        port = int(device.get("api_port") or 443)
+        resolvable = bool(public_ip) and networking.tcp_port_open(
+            str(public_ip), port, PUBLIC_REACHABILITY_PROBE_TIMEOUT_SECONDS
+        )
+        return device, (str(public_ip) if public_ip else None), resolvable
+
+    pool = ThreadPoolExecutor(max_workers=PUBLIC_REACHABILITY_MAX_WORKERS)
+    try:
+        futures = {pool.submit(_probe, device): device for device in devices}
+        for future in as_completed(futures):
+            if time.monotonic() >= deadline:
+                logger.warning("Public reachability run budget reached; deferring remaining Drones to next run")
+                break
+            try:
+                device, public_ip, resolvable = future.result()
+            except Exception as error:
+                logger.warning("Public reachability probe failed: %s", error)
+                continue
+            checked += 1
+            previous = bool((device.get("public_reachability") or {}).get("resolvable"))
+            if resolvable == previous:
+                continue
+            result = {
+                "resolvable": resolvable,
+                "public_ip": public_ip,
+                "api_port": int(device.get("api_port") or 443) if resolvable else None,
+                "checked_at": datetime.utcnow(),
+            }
+            if postgres_store.update_device_reachability(str(device.get("id") or ""), result):
+                changed += 1
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    return {"job": "public-reachability", "status": "ok", "checked": checked, "changed": changed}
+
+
 def run_scheduled_job(job_name: str) -> dict:
     """Run a single background job by name for EventBridge or local scripts."""
     job = str(job_name or "").strip().lower().replace("_", "-")
@@ -389,6 +458,8 @@ def run_scheduled_job(job_name: str) -> dict:
     if job in {"device-status", "offline-status", "status-notifications"}:
         poll_device_status_notifications_once()
         return {"job": job, "status": "ok"}
+    if job in {"public-reachability", "reachability"}:
+        return poll_public_reachability_once()
     raise ValueError(f"Unknown Overmind scheduled job: {job_name}")
 
 

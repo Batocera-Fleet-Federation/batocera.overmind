@@ -3,7 +3,32 @@
 from __future__ import annotations
 
 import ipaddress
+import socket
 from typing import Any
+
+
+def tcp_port_open(host: str, port: int, timeout: float) -> bool:
+    """Return True if a TCP connection to ``host:port`` succeeds within ``timeout``.
+
+    Used by Overmind's public-reachability probe: a successful connect to the
+    Drone's registered public IP and HTTPS port means it is reachable from the
+    internet. Plain TCP connect only (no TLS handshake) to stay lean; the call is
+    bounded by ``timeout`` so probes can never hang and back up.
+    """
+    host = str(host or "").strip().split("%", 1)[0]
+    if not host:
+        return False
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not 0 < port < 65536:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=max(0.1, float(timeout))):
+            return True
+    except OSError:
+        return False
 
 
 def resolve_reported_network(network: dict[str, Any] | None) -> dict[str, Any]:
