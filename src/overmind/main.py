@@ -412,6 +412,32 @@ def poll_device_status_notifications_once() -> None:
     )
 
 
+def _emit_reachability_notification(device: dict, resolvable: bool) -> None:
+    """Record a swarm notification when a Drone flips Resolvable <-> Not Resolvable.
+
+    Persisted directly to Postgres (delivery_pending) so the digest job emails users
+    who enabled the ``drone_reachability`` notification type; the in-app notification
+    shows immediately. Best-effort: a failure here must not break the probe loop.
+    """
+    swarm_id = str(device.get("swarm_id") or "")
+    if not swarm_id:
+        return
+    label = str(device.get("device_name") or device.get("device_id") or "A Drone")
+    status = "Resolvable" if resolvable else "Not Resolvable"
+    event_type = "drone_resolvable" if resolvable else "drone_unresolvable"
+    title = "Drone became resolvable" if resolvable else "Drone became unresolvable"
+    message = f"{label} is now {status} from Overmind."
+    details = {
+        "device": {"device_id": device.get("device_id"), "device_name": label},
+        "status": status,
+        "nature": status,
+    }
+    try:
+        postgres_store.insert_swarm_notification(swarm_id, event_type, title, message, details)
+    except Exception as error:
+        logger.warning("Failed to record reachability notification for %s: %s", label, error)
+
+
 def poll_public_reachability_once() -> dict:
     """TCP-probe each approved Drone's public IP:port and persist status changes.
 
@@ -464,6 +490,7 @@ def poll_public_reachability_once() -> dict:
             }
             if postgres_store.update_device_reachability(str(device.get("id") or ""), result):
                 changed += 1
+                _emit_reachability_notification(device, resolvable)
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 

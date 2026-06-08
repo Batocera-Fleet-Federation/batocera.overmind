@@ -952,6 +952,46 @@ class PostgresMetadataStore:
                 )
                 return {notification_id: completed_at for notification_id, completed_at in cur.fetchall()}
 
+    def insert_swarm_notification(
+        self,
+        swarm_id: str,
+        event_type: str,
+        title: str,
+        message: str,
+        details: Optional[dict] = None,
+        delivery_pending: bool = True,
+    ) -> Optional[str]:
+        """Insert a single swarm notification straight into Postgres (lean path).
+
+        Used by stateless scheduled jobs (e.g. the reachability probe) that must not
+        round-trip the whole in-memory app state. Defaults to delivery_pending so the
+        digest job picks it up; the in-app notification is visible immediately.
+        """
+        if not self.url or not swarm_id:
+            return None
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return None
+        notification_id = str(uuid.uuid4())
+        details = details if isinstance(details, dict) else {}
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO notifications (id, swarm_id, event_type, title, message, created_at, delivery_pending)
+                    VALUES (%s, %s, %s, %s, %s, now(), %s)
+                    """,
+                    (notification_id, swarm_id, event_type, title or "", message or "", bool(delivery_pending)),
+                )
+                for key, value in details.items():
+                    cur.execute(
+                        "INSERT INTO notification_fields (notification_id, field_name, field_value) "
+                        "VALUES (%s, %s, %s) ON CONFLICT (notification_id, field_name) DO UPDATE SET field_value = EXCLUDED.field_value",
+                        (notification_id, str(key), self._json(value)),
+                    )
+        return notification_id
+
     def load_pending_notifications(self, limit: int = 500) -> Optional[list[dict]]:
         """Return notifications still awaiting delivery, with their detail fields.
 

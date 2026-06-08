@@ -882,6 +882,63 @@ def test_super_admin_sync_actions_listing_and_search(client):
     assert client.get("/api/admin/sync-actions", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
 
 
+def test_drone_reachability_notification_type_registered():
+    from overmind import notification_delivery as nd
+    from pathlib import Path as _Path
+
+    assert nd.EVENT_TYPE_TO_SETTING["drone_resolvable"] == "drone_reachability"
+    assert nd.EVENT_TYPE_TO_SETTING["drone_unresolvable"] == "drone_reachability"
+    assert nd.DEFAULT_NOTIFICATION_TYPES["drone_reachability"] is True
+    assert nd._TEMPLATE_BY_EVENT_TYPE["drone_resolvable"] == "notification_drone_reachability.html"
+    # Default-on, but respects an explicit opt-out.
+    assert nd.notification_type_enabled({}, "drone_resolvable") is True
+    assert nd.notification_type_enabled({"types": {"drone_reachability": False}}, "drone_unresolvable") is False
+    # The profile page exposes a checkbox for it.
+    html = _Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    assert 'data-notify-type="drone_reachability"' in html
+
+
+def test_reachability_poll_emits_notification_on_status_flip(monkeypatch):
+    from overmind import main as overmind_main
+
+    device = {
+        "id": "dev-1", "device_id": "drone-x", "device_name": "Drone X",
+        "swarm_id": "swarm-1", "api_port": 443,
+        "network": {"public_ip": "1.2.3.4"},
+        "public_reachability": {"resolvable": False},
+    }
+    monkeypatch.setattr(overmind_main.postgres_store, "list_all_approved_devices", lambda **kwargs: [device])
+    monkeypatch.setattr(overmind_main.postgres_store, "update_device_reachability", lambda did, result: True)
+    captured = {}
+
+    def fake_insert(swarm_id, event_type, title, message, details=None, delivery_pending=True):
+        captured.clear()
+        captured.update({"swarm_id": swarm_id, "event_type": event_type, "message": message, "details": details})
+        return "nid"
+
+    monkeypatch.setattr(overmind_main.postgres_store, "insert_swarm_notification", fake_insert)
+
+    # Not Resolvable -> Resolvable
+    monkeypatch.setattr(overmind_main.networking, "tcp_port_open", lambda host, port, timeout: True)
+    result = overmind_main.poll_public_reachability_once()
+    assert result["changed"] == 1
+    assert captured["event_type"] == "drone_resolvable"
+    assert captured["swarm_id"] == "swarm-1"
+    assert "Drone X" in captured["message"]
+
+    # Resolvable -> Not Resolvable
+    device["public_reachability"]["resolvable"] = True
+    monkeypatch.setattr(overmind_main.networking, "tcp_port_open", lambda host, port, timeout: False)
+    overmind_main.poll_public_reachability_once()
+    assert captured["event_type"] == "drone_unresolvable"
+
+    # No change -> no notification.
+    device["public_reachability"]["resolvable"] = False
+    captured.clear()
+    overmind_main.poll_public_reachability_once()
+    assert captured == {}
+
+
 def test_managed_config_registry_merge():
     from overmind.managed_configs import merge_managed_configs, MANAGED_CONFIG_REGISTRY
 
