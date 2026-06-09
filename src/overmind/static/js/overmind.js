@@ -2553,6 +2553,40 @@
                 }
             }
 
+            async function refreshSystemsAndRoms(triggerEl) {
+                // The old "Refresh systems" button only repopulated the filter dropdown
+                // (which already happens on panel load), so it looked like a no-op. Reload
+                // both the systems filter and the master ROM table, with visible feedback.
+                if (!selectedDeviceId) return;
+                const btn = triggerEl || (typeof event !== 'undefined' ? event.target : null);
+                const original = btn ? btn.innerHTML : null;
+                if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Refreshing'; }
+                try {
+                    await Promise.all([
+                        populateSystemFilterOptions(),
+                        loadSwarmRomAvailabilityPanel(),
+                    ]);
+                    showMessage('Systems & ROMs refreshed from Overmind.', 'success');
+                } catch (err) {
+                    console.error('Error refreshing systems:', err);
+                    showMessage('Failed to refresh systems.', 'danger');
+                } finally {
+                    if (btn) { btn.disabled = false; btn.innerHTML = original; }
+                }
+            }
+
+            async function rescanDroneMetadata() {
+                // Force the Drone to re-scan its library and re-upload (roms + bios + md5).
+                // Uses collect_rom_metadata so the Drone reuses cached md5 where possible.
+                if (!selectedDeviceId) return;
+                try {
+                    await queueDeviceAction('collect_rom_metadata', { confirm: true, notify: false });
+                    showMessage('Drone rescan queued — systems, ROMs, BIOS and md5 will resync shortly.', 'success');
+                } catch (err) {
+                    // queueDeviceAction already surfaced the error.
+                }
+            }
+
             async function syncSystemFromFilter(systemParam) {
                 const system = systemParam || document.getElementById('device-rom-system-filter')?.value || '';
                 if (!system) return alert('Select a system to sync');
@@ -3167,7 +3201,8 @@
                                     <div class="small text-muted">${total} ROMs · ${missingCount} missing here</div>
                                 </div>
                                 <div class="d-flex gap-2">
-                                    <button class="btn btn-outline-secondary btn-sm" onclick="populateSystemFilterOptions()">Refresh systems</button>
+                                    <button class="btn btn-outline-secondary btn-sm" onclick="refreshSystemsAndRoms(this)"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                                    <button class="btn btn-outline-primary btn-sm mutate-only" onclick="rescanDroneMetadata()"><i class="bi bi-database-down me-1"></i>Rescan drone</button>
                                 </div>
                             </div>
                             <div id="sync-system-buttons" class="d-flex flex-wrap gap-2 mb-3"></div>

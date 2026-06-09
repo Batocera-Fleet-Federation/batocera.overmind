@@ -345,11 +345,11 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     UPDATE drones
-                    SET rom_inventory_fingerprint = COALESCE(%s, rom_inventory_fingerprint),
-                        drone_rom_inventory_fingerprint = COALESCE(%s, drone_rom_inventory_fingerprint),
-                        rom_inventory_fingerprint_algorithm = COALESCE(%s, rom_inventory_fingerprint_algorithm),
-                        rom_inventory_fingerprint_at = CASE WHEN %s IS NULL THEN rom_inventory_fingerprint_at ELSE now() END,
-                        drone_rom_inventory_fingerprint_at = CASE WHEN %s IS NULL THEN drone_rom_inventory_fingerprint_at ELSE now() END
+                    SET rom_inventory_fingerprint = COALESCE(%s::text, rom_inventory_fingerprint),
+                        drone_rom_inventory_fingerprint = COALESCE(%s::text, drone_rom_inventory_fingerprint),
+                        rom_inventory_fingerprint_algorithm = COALESCE(%s::text, rom_inventory_fingerprint_algorithm),
+                        rom_inventory_fingerprint_at = CASE WHEN %s::text IS NULL THEN rom_inventory_fingerprint_at ELSE now() END,
+                        drone_rom_inventory_fingerprint_at = CASE WHEN %s::text IS NULL THEN drone_rom_inventory_fingerprint_at ELSE now() END
                     WHERE id = %s
                     """,
                     (overmind_fingerprint, drone_fingerprint, algorithm, overmind_fingerprint, drone_fingerprint, internal_id),
