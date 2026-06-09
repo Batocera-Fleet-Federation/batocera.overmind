@@ -104,15 +104,15 @@ def seed_test_fleet():
             [
                 {
                     "rom_name": f"{system.upper()} Game {number}",
-                    "rom_md5": f"{index}{number}".ljust(32, "0")[:32],
+                    "rom_fingerprint": f"{index}{number}".ljust(32, "0")[:32],
                     "file_path": f"/roms/{system}/{system}-game-{number}.zip",
                     "file_size": index * 100 + number,
                 }
                 for number in range(1, 6)
             ],
         )
-    db.add_roms("raspberry-pi-001", "snes", [{"rom_name": "SNES Game 1", "rom_md5": "1" * 32, "file_path": "/roms/snes/snes-game-1.zip", "file_size": 1}])
-    db.add_roms("arcade-cabinet-002", "genesis", [{"rom_name": "GENESIS Game 1", "rom_md5": "2" * 32, "file_path": "/roms/genesis/genesis-game-1.zip", "file_size": 2}])
+    db.add_roms("raspberry-pi-001", "snes", [{"rom_name": "SNES Game 1", "rom_fingerprint": "1" * 32, "file_path": "/roms/snes/snes-game-1.zip", "file_size": 1}])
+    db.add_roms("arcade-cabinet-002", "genesis", [{"rom_name": "GENESIS Game 1", "rom_fingerprint": "2" * 32, "file_path": "/roms/genesis/genesis-game-1.zip", "file_size": 2}])
     db.log_gameplay("arcade-cabinet-001", "snes", "Super Mario World", 1200)
     db.create_pending_drone_connection("rogue-signal-001", "Basement Recon Drone", {"network": {"ipv4": ["127.0.0.2"]}}, user_id)
     db.create_pending_drone_connection("rogue-signal-002", "Workshop Handheld Drone", {"network": {"ipv4": ["127.0.0.3"]}}, user_id)
@@ -304,8 +304,8 @@ def test_notifications_capture_master_list_add_and_read(client):
 
     db.store_rom_metadata("notify-drone", {
         "systems": [{"name": "snes"}],
-        "roms": [{"system": "snes", "rom_name": "Chrono Trigger", "file_path": "Chrono Trigger.zip", "rom_md5": "abc"}],
-        "bios": [{"file_path": "dc/flash.bin", "md5": "bios-md5"}],
+        "roms": [{"system": "snes", "rom_name": "Chrono Trigger", "file_path": "Chrono Trigger.zip", "rom_fingerprint": "abc"}],
+        "bios": [{"file_path": "dc/flash.bin", "bios_md5": "bios-fingerprint"}],
         "artwork": [{"system": "snes", "rom_path": "Chrono Trigger.zip", "artwork_types": ["image"]}],
     })
 
@@ -337,7 +337,7 @@ def test_notifications_capture_drone_status_transition_and_sync_trigger(client):
     db.create_device(user["id"], "source-drone", "Source Drone", {"ip_address": "10.0.0.2"}, raw_token="source-token")
     db.create_device(user["id"], "target-drone", "Target Drone", {"ip_address": "10.0.0.3"}, raw_token="target-token")
     mark_source_resolvable("source-drone")
-    db.add_roms("source-drone", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8}])
+    db.add_roms("source-drone", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8}])
     db.devices[db.get_device_by_device_id("target-drone")["id"]]["last_seen"] = datetime.utcnow() - timedelta(seconds=999)
 
     devices = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
@@ -347,7 +347,7 @@ def test_notifications_capture_drone_status_transition_and_sync_trigger(client):
     sync = client.post(
         "/api/devices/target-drone/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8},
+        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
     )
     assert sync.status_code == 200
     notifications = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]
@@ -2559,7 +2559,7 @@ def test_drone_self_disconnect_removes_from_swarm_without_pending_connection(cli
     assert all(conn["device_id"] != "disconnect-drone" for conn in pending_response.json()["connections"])
 
 
-def test_swarm_master_list_deduplicates_by_md5_and_activity_search(client):
+def test_swarm_master_list_deduplicates_by_fingerprint_and_activity_search(client):
     client.post("/api/auth/register", json={"email": "test@example.com", "username": "test-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
@@ -2568,14 +2568,14 @@ def test_swarm_master_list_deduplicates_by_md5_and_activity_search(client):
     user = db.get_user_by_email("test@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="a")
     db.create_device(user["id"], "drone-b", "Drone B", {"ip_address": "10.0.0.3"}, raw_token="b")
-    db.add_roms("drone-a", "snes", [{"rom_name": "Same Game.zip", "file_path": "Same Game.zip", "rom_md5": "abc", "file_size": 3}])
-    db.add_roms("drone-b", "snes", [{"rom_name": "Renamed Game.zip", "file_path": "Renamed Game.zip", "rom_md5": "abc", "file_size": 3}])
+    db.add_roms("drone-a", "snes", [{"rom_name": "Same Game.zip", "file_path": "Same Game.zip", "rom_fingerprint": "abc", "file_size": 3}])
+    db.add_roms("drone-b", "snes", [{"rom_name": "Renamed Game.zip", "file_path": "Renamed Game.zip", "rom_fingerprint": "abc", "file_size": 3}])
     db.add_rom_sync_activity("drone-b", {
         "source_drone_id": "drone-a",
         "target_drone_id": "drone-b",
         "system": "snes",
         "rom_name": "Renamed Game.zip",
-        "rom_md5": "abc",
+        "rom_fingerprint": "abc",
         "status": "completed",
         "duration_ms": 2400,
     })
@@ -2649,21 +2649,21 @@ def test_device_master_rom_presence_survives_grouping_when_selected_row_is_not_f
         return [
             {
                 "_device_internal_id": source_id,
-                "_master_key": "md5:abc123",
+                "_master_key": "fingerprint:abc123",
                 "_present_on_selected": False,
                 "system_name": "fbneo",
                 "rom_name": "1942.zip",
                 "file_path": "1942.zip",
-                "rom_md5": "abc123",
+                "rom_fingerprint": "abc123",
             },
             {
                 "_device_internal_id": target_id,
-                "_master_key": "md5:abc123",
+                "_master_key": "fingerprint:abc123",
                 "_present_on_selected": True,
                 "system_name": "fbneo",
                 "rom_name": "1942.zip",
                 "file_path": "1942.zip",
-                "rom_md5": "abc123",
+                "rom_fingerprint": "abc123",
             },
         ], 1
 
@@ -2712,7 +2712,7 @@ def test_drone_sync_activity_endpoint_upserts_by_sync_id(client):
             "status": "completed",
             "bytes_transferred": 8,
             "file_size": 8,
-            "rom_md5": "abc",
+            "rom_fingerprint": "abc",
             "duration_ms": 1000,
         },
     )
@@ -2725,7 +2725,7 @@ def test_drone_sync_activity_endpoint_upserts_by_sync_id(client):
     assert rows[0]["id"] == "sync-1"
     assert rows[0]["status"] == "completed"
     assert rows[0]["bytes_transferred"] == 8
-    assert rows[0]["rom_md5"] == "abc"
+    assert rows[0]["rom_fingerprint"] == "abc"
 
 
 def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
@@ -2739,12 +2739,12 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     db.create_device(user["id"], "source-with-rom", "Source With ROM", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
     mark_source_resolvable("source-with-rom")
-    db.add_roms("source-with-rom", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8}])
+    db.add_roms("source-with-rom", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8}])
 
     response = client.post(
         "/api/devices/target-c/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8},
+        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
     )
     assert response.status_code == 200
 
@@ -2768,7 +2768,7 @@ def test_sync_rom_does_not_queue_associated_artwork_by_default(client):
     db.create_device(user["id"], "source-with-assets", "Source Assets", {"ip_address": "10.0.0.2"}, raw_token="a")
     db.create_device(user["id"], "target-without-assets", "Target Assets", {"ip_address": "10.0.0.3"}, raw_token="b")
     mark_source_resolvable("source-with-assets")
-    db.add_roms("source-with-assets", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc"}])
+    db.add_roms("source-with-assets", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "abc"}])
     db.add_artwork("source-with-assets", [{
         "system": "snes",
         "rom_path": "/userdata/roms/snes/Game.zip",
@@ -2779,7 +2779,7 @@ def test_sync_rom_does_not_queue_associated_artwork_by_default(client):
     response = client.post(
         "/api/devices/target-without-assets/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc"},
+        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"},
     )
 
     assert response.status_code == 200
@@ -2806,12 +2806,12 @@ def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):
     user = db.get_user_by_email("blocked@example.com")
     db.create_device(user["id"], "unresolved-source", "Unresolved Source", {"ip_address": "10.0.0.2"}, raw_token="a")
     db.create_device(user["id"], "blocked-target", "Blocked Target", {"ip_address": "10.0.0.3"}, raw_token="b")
-    db.add_roms("unresolved-source", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "abc", "file_size": 8}])
+    db.add_roms("unresolved-source", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8}])
 
     response = client.post(
         "/api/devices/blocked-target/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc"},
+        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"},
     )
 
     assert response.status_code == 400
@@ -2819,7 +2819,7 @@ def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):
     assert db.get_device_actions(user["id"], "blocked-target") == []
 
 
-def test_sync_folder_rom_payload_matches_by_path_without_md5(client):
+def test_sync_folder_rom_payload_matches_by_path_without_fingerprint(client):
     client.post("/api/auth/register", json={"email": "folder@example.com", "username": "folder-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
@@ -2846,7 +2846,7 @@ def test_sync_folder_rom_payload_matches_by_path_without_md5(client):
     assert claim.status_code == 200
     action = claim.json()["actions"][0]
     assert action["payload"]["entry_type"] == "folder"
-    assert action["payload"].get("rom_md5") is None
+    assert action["payload"].get("rom_fingerprint") is None
     assert action["payload"]["devices"] == [{"device_id": "source-with-folder", "device_name": "Source Folder"}]
 
 
@@ -2868,7 +2868,7 @@ def test_rom_metadata_upload_persists_bios_and_master_bios(client):
             "type": "rom_metadata",
             "roms": [],
             "systems": [],
-            "bios": [{"name": "flash.bin", "path": "dc/flash.bin", "byte_count": 9, "md5": "bios-md5"}],
+            "bios": [{"name": "flash.bin", "path": "dc/flash.bin", "byte_count": 9, "bios_md5": "bios-fingerprint"}],
             "gamelists": [],
         },
     )
@@ -2878,7 +2878,7 @@ def test_rom_metadata_upload_persists_bios_and_master_bios(client):
     bios_response = client.get("/api/devices/drone-a/bios", headers={"Authorization": f"Bearer {token}"})
     assert bios_response.status_code == 200
     assert bios_response.json()["bios"][0]["file_path"] == "dc/flash.bin"
-    assert bios_response.json()["bios"][0]["bios_md5"] == "bios-md5"
+    assert bios_response.json()["bios"][0]["bios_md5"] == "bios-fingerprint"
 
     master_response = client.get("/api/devices/drone-b/master-bios", headers={"Authorization": f"Bearer {token}"})
     assert master_response.status_code == 200
@@ -2944,7 +2944,7 @@ def test_rom_metadata_hash_patch_enriches_existing_inventory_without_replacing_r
                 {"system": "snes", "file_path": "Game One.zip", "rom_name": "Game One", "file_size": 3},
                 {"system": "snes", "file_path": "Game Two.zip", "rom_name": "Game Two", "file_size": 3},
             ],
-            "bios": [{"file_path": "dc/flash.bin", "md5": "bios-md5"}],
+            "bios": [{"file_path": "dc/flash.bin", "bios_md5": "bios-fingerprint"}],
             "artwork": [],
         },
     )
@@ -2957,7 +2957,7 @@ def test_rom_metadata_hash_patch_enriches_existing_inventory_without_replacing_r
             "device_id": "drone-a",
             "type": "asset_metadata",
             "update_mode": "rom_hash_patch",
-            "roms": [{"system": "snes", "file_path": "Game One.zip", "rom_md5": "hash-one", "md5": "hash-one"}],
+            "roms": [{"system": "snes", "file_path": "Game One.zip", "rom_fingerprint": "hash-one", "fingerprint": "hash-one"}],
             "hash_progress": {"processed": 1, "total": 2, "complete": False},
         },
     )
@@ -2966,9 +2966,9 @@ def test_rom_metadata_hash_patch_enriches_existing_inventory_without_replacing_r
     stored = db.get_device_roms("drone-a")
     assert len(stored) == 2
     by_path = {row["file_path"]: row for row in stored}
-    assert by_path["Game One.zip"]["rom_md5"] == "hash-one"
-    assert by_path["Game Two.zip"]["rom_md5"] is None
-    assert db.get_device_bios("drone-a")[0]["bios_md5"] == "bios-md5"
+    assert by_path["Game One.zip"]["rom_fingerprint"] == "hash-one"
+    assert by_path["Game Two.zip"]["rom_fingerprint"] is None
+    assert db.get_device_bios("drone-a")[0]["bios_md5"] == "bios-fingerprint"
 
 
 def test_asset_metadata_inventory_chunks_append_without_replacing_previous_chunks(client):
@@ -2990,7 +2990,7 @@ def test_asset_metadata_inventory_chunks_append_without_replacing_previous_chunk
             "inventory_counts": {"roms": 2, "bios": 1, "artwork": 0},
             "systems": [{"name": "snes", "rom_count": 2}],
             "roms": [{"system": "snes", "file_path": "Game One.zip", "rom_name": "Game One", "file_size": 3}],
-            "bios": [{"file_path": "dc/flash.bin", "md5": "bios-md5"}],
+            "bios": [{"file_path": "dc/flash.bin", "bios_md5": "bios-fingerprint"}],
             "artwork": [],
         },
     )
@@ -3019,7 +3019,7 @@ def test_asset_metadata_inventory_chunks_append_without_replacing_previous_chunk
     stored = db.get_device_roms("drone-a")
     assert len(stored) == 2
     assert {row["file_path"] for row in stored} == {"Game One.zip", "Game Two.zip"}
-    assert db.get_device_bios("drone-a")[0]["bios_md5"] == "bios-md5"
+    assert db.get_device_bios("drone-a")[0]["bios_md5"] == "bios-fingerprint"
     assert db.get_device_by_device_id("drone-a")["rom_metadata"]["inventory_complete"] is True
 
 
@@ -3116,7 +3116,7 @@ def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_la
             "update_mode": "inventory",
             "systems": [{"name": "snes", "rom_count": 1}],
             "roms": [{"system": "snes", "file_path": "Old Game.zip", "rom_name": "Old Game"}],
-            "bios": [{"file_path": "old/bios.bin", "md5": "old-bios"}],
+            "bios": [{"file_path": "old/bios.bin", "bios_md5": "old-bios"}],
             "artwork": [],
         },
     )
@@ -3136,7 +3136,7 @@ def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_la
             "inventory_complete": False,
             "systems": [{"name": "snes", "rom_count": 2}],
             "roms": [{"system": "snes", "file_path": "New One.zip", "rom_name": "New One"}],
-            "bios": [{"file_path": "new/bios.bin", "md5": "new-bios"}],
+            "bios": [{"file_path": "new/bios.bin", "bios_md5": "new-bios"}],
             "artwork": [],
         },
     )
@@ -3175,8 +3175,8 @@ def test_asset_metadata_final_chunk_stores_drone_rom_inventory_fingerprint(clien
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
     headers = {"Authorization": "Bearer drone-token-a"}
     expected = db_module.compute_rom_inventory_fingerprint([
-        {"system": "snes", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 8},
-        {"system": "snes", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 9},
+        {"system": "snes", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 8},
+        {"system": "snes", "file_path": "B.zip", "rom_fingerprint": "bbb", "file_size": 9},
     ])
 
     first = client.post(
@@ -3191,7 +3191,7 @@ def test_asset_metadata_final_chunk_stores_drone_rom_inventory_fingerprint(clien
             "chunk_index": 0,
             "chunk_total": 2,
             "inventory_complete": False,
-            "roms": [{"system": "snes", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 8}],
+            "roms": [{"system": "snes", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 8}],
         },
     )
     assert first.status_code == 200
@@ -3211,7 +3211,7 @@ def test_asset_metadata_final_chunk_stores_drone_rom_inventory_fingerprint(clien
             "inventory_complete": True,
             "rom_inventory_fingerprint": expected,
             "rom_inventory_fingerprint_algorithm": db_module.ROM_INVENTORY_FINGERPRINT_ALGORITHM,
-            "roms": [{"system": "snes", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 9}],
+            "roms": [{"system": "snes", "file_path": "B.zip", "rom_fingerprint": "bbb", "file_size": 9}],
         },
     )
 
@@ -3226,7 +3226,7 @@ def test_heartbeat_queues_metadata_rebuild_when_rom_inventory_fingerprint_differ
     user = db.get_user_by_email("fingerprint-heartbeat@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
     headers = {"Authorization": "Bearer drone-token-a"}
-    db.add_roms("drone-a", "snes", [{"rom_name": "Old.zip", "file_path": "Old.zip", "rom_md5": "old", "file_size": 1}])
+    db.add_roms("drone-a", "snes", [{"rom_name": "Old.zip", "file_path": "Old.zip", "rom_fingerprint": "old", "file_size": 1}])
     db.update_device_rom_inventory_fingerprint("drone-a", compute_overmind=True)
 
     response = client.post(
@@ -3259,7 +3259,7 @@ def test_heartbeat_does_not_queue_metadata_rebuild_when_rom_inventory_fingerprin
     user = db.get_user_by_email("fingerprint-match@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
     headers = {"Authorization": "Bearer drone-token-a"}
-    db.add_roms("drone-a", "snes", [{"rom_name": "Same.zip", "file_path": "Same.zip", "rom_md5": "same", "file_size": 1}])
+    db.add_roms("drone-a", "snes", [{"rom_name": "Same.zip", "file_path": "Same.zip", "rom_fingerprint": "same", "file_size": 1}])
     device = db.update_device_rom_inventory_fingerprint("drone-a", compute_overmind=True)
 
     response = client.post(
@@ -3297,7 +3297,7 @@ def test_rom_hash_patch_completion_recomputes_overmind_fingerprint(client):
             "device_id": "drone-a",
             "type": "asset_metadata",
             "update_mode": "rom_hash_patch",
-            "roms": [{"system": "snes", "file_path": "A.zip", "rom_md5": "abc", "file_size": 1}],
+            "roms": [{"system": "snes", "file_path": "A.zip", "rom_fingerprint": "abc", "file_size": 1}],
             "hash_progress": {"processed": 1, "total": 1, "complete": True},
         },
     )
@@ -3324,7 +3324,7 @@ def test_asset_metadata_delta_only_upserts_and_deletes_listed_assets(client):
                 {"system": "snes", "file_path": "Keep.zip", "rom_name": "Keep"},
                 {"system": "snes", "file_path": "Remove.zip", "rom_name": "Remove"},
             ],
-            "bios": [{"file_path": "keep/bios.bin", "md5": "keep-bios"}],
+            "bios": [{"file_path": "keep/bios.bin", "bios_md5": "keep-bios"}],
             "artwork": [],
             "deleted": {"roms": [], "bios": [], "artwork": []},
         },
@@ -3373,12 +3373,12 @@ def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client)
     db.create_device(user["id"], "source-with-bios", "Source With BIOS", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
     mark_source_resolvable("source-with-bios")
-    db.add_bios("source-with-bios", [{"bios_name": "flash.bin", "file_path": "dc/flash.bin", "bios_md5": "bios-md5", "file_size": 8}])
+    db.add_bios("source-with-bios", [{"bios_name": "flash.bin", "file_path": "dc/flash.bin", "bios_md5": "bios-fingerprint", "file_size": 8}])
 
     response = client.post(
         "/api/devices/target-c/sync-bios",
         headers={"Authorization": f"Bearer {token}"},
-        json={"file_path": "dc/flash.bin", "bios_md5": "bios-md5", "file_size": 8},
+        json={"file_path": "dc/flash.bin", "bios_md5": "bios-fingerprint", "file_size": 8},
     )
     assert response.status_code == 200
 
@@ -3529,9 +3529,9 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     db.create_device(user["id"], "drone-c", "Drone C", {"ip_address": "10.0.0.4"}, raw_token="c")
     mark_source_resolvable("drone-a", "8.8.8.8")
     mark_source_resolvable("drone-b", "1.1.1.1")
-    db.add_roms("drone-a", "snes", [{"rom_name": "A.zip", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 8}])
-    db.add_roms("drone-b", "snes", [{"rom_name": "B.zip", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 9}])
-    db.add_roms("drone-c", "snes", [{"rom_name": "C.zip", "file_path": "C.zip", "rom_md5": "ccc", "file_size": 10}])
+    db.add_roms("drone-a", "snes", [{"rom_name": "A.zip", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 8}])
+    db.add_roms("drone-b", "snes", [{"rom_name": "B.zip", "file_path": "B.zip", "rom_fingerprint": "bbb", "file_size": 9}])
+    db.add_roms("drone-c", "snes", [{"rom_name": "C.zip", "file_path": "C.zip", "rom_fingerprint": "ccc", "file_size": 10}])
     db.add_artwork("drone-b", [{
         "system": "snes",
         "rom_path": "B.zip",
@@ -3581,8 +3581,8 @@ def test_sync_system_queues_only_roms_from_resolvable_sources(client):
     db.create_device(user["id"], "blocked-source", "Blocked Source", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-system", "Target System", {"ip_address": "10.0.0.4"}, raw_token="c")
     mark_source_resolvable("good-source")
-    db.add_roms("good-source", "snes", [{"rom_name": "Good.zip", "file_path": "Good.zip", "rom_md5": "good"}])
-    db.add_roms("blocked-source", "snes", [{"rom_name": "Blocked.zip", "file_path": "Blocked.zip", "rom_md5": "blocked"}])
+    db.add_roms("good-source", "snes", [{"rom_name": "Good.zip", "file_path": "Good.zip", "rom_fingerprint": "good"}])
+    db.add_roms("blocked-source", "snes", [{"rom_name": "Blocked.zip", "file_path": "Blocked.zip", "rom_fingerprint": "blocked"}])
 
     response = client.post(
         "/api/devices/target-system/sync-system",
@@ -3605,7 +3605,7 @@ def test_sync_system_uses_peer_check_resolvability_for_sources(client):
     user = db.get_user_by_email("probe-sync@example.com")
     db.create_device(user["id"], "fresh-source", "Fresh Source", {"network": {"public_ip": "8.8.8.8"}, "api_port": 443, "scheme": "https"}, raw_token="a")
     db.create_device(user["id"], "fresh-target", "Fresh Target", {"ip_address": "10.0.0.4"}, raw_token="b")
-    db.add_roms("fresh-source", "fbneo", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_md5": "good"}])
+    db.add_roms("fresh-source", "fbneo", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "good"}])
 
     # Without a peer check, the source should not be offered
     response_before = client.post(
@@ -3840,7 +3840,7 @@ def test_game_log_upload_stores_sessions_for_game_log_list(client):
                 "system_name": "snes",
                 "game_name": "Game.sfc",
                 "rom_path": "/userdata/roms/snes/Game.sfc",
-                "rom_md5": "abc123",
+                "rom_fingerprint": "abc123",
             }],
         },
     )
@@ -3851,7 +3851,7 @@ def test_game_log_upload_stores_sessions_for_game_log_list(client):
     assert len(logs) == 1
     assert logs[0]["system_name"] == "snes"
     assert logs[0]["game_name"] == "Game.sfc"
-    assert logs[0]["rom_md5"] == "abc123"
+    assert logs[0]["rom_fingerprint"] == "abc123"
     assert logs[0]["played_at"] == "2026-05-26T10:15:00+00:00"
 
 
@@ -3987,7 +3987,7 @@ def test_selected_drone_config_view_reads_relational_store(client, monkeypatch):
                 "root": "/userdata/system/configs",
                 "relative_path": "retroarch/retroarch.cfg",
                 "content": "video_driver = vulkan",
-                "md5": "hash-2",
+                "fingerprint": "hash-2",
                 "fingerprint": "hash-2",
                 "versions": [{"content": "video_driver = vulkan", "fingerprint": "hash-2"}],
             },
@@ -3995,14 +3995,14 @@ def test_selected_drone_config_view_reads_relational_store(client, monkeypatch):
                 "root": "/userdata/system/configs",
                 "relative_path": "retroarch/log/runtime.cfg",
                 "content": "runtime log",
-                "md5": "hash-log",
+                "fingerprint": "hash-log",
                 "fingerprint": "hash-log",
             },
             {
                 "root": "/userdata/system/configs",
                 "relative_path": "retroarch/logs/trace.cfg",
                 "content": "runtime logs",
-                "md5": "hash-logs",
+                "fingerprint": "hash-logs",
                 "fingerprint": "hash-logs",
             }
         ],
@@ -4682,8 +4682,8 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
             "roms_root": "/userdata/roms",
             "systems": [{"name": "snes", "rom_count": 2}],
             "roms": [
-                {"system": "snes", "name": "Super Metroid", "rom_file": "Super Metroid (USA).zip", "byte_count": 32, "rom_md5": "aaa"},
-                {"system": "snes", "name": "Chrono Trigger", "rom_file": "Chrono Trigger (USA).zip", "byte_count": 32, "rom_md5": "bbb"},
+                {"system": "snes", "name": "Super Metroid", "rom_file": "Super Metroid (USA).zip", "byte_count": 32, "rom_fingerprint": "aaa"},
+                {"system": "snes", "name": "Chrono Trigger", "rom_file": "Chrono Trigger (USA).zip", "byte_count": 32, "rom_fingerprint": "bbb"},
             ],
             "gamelists": [],
         },
@@ -4700,8 +4700,8 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
             "roms_root": "/userdata/roms",
             "systems": [{"name": "snes", "rom_count": 2}],
             "roms": [
-                {"system": "snes", "name": "Super Metroid", "rom_file": "Super Metroid (USA).zip", "byte_count": 32, "rom_md5": "aaa"},
-                {"system": "snes", "name": "Chrono Trigger", "rom_file": "Chrono Trigger (USA).zip", "byte_count": 32, "rom_md5": "bbb"},
+                {"system": "snes", "name": "Super Metroid", "rom_file": "Super Metroid (USA).zip", "byte_count": 32, "rom_fingerprint": "aaa"},
+                {"system": "snes", "name": "Chrono Trigger", "rom_file": "Chrono Trigger (USA).zip", "byte_count": 32, "rom_fingerprint": "bbb"},
             ],
             "gamelists": [],
         },
@@ -4714,7 +4714,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
     )
     snes_roms = roms_response.json()["systems"]["snes"]
     assert len(snes_roms) == 2
-    assert {rom["rom_md5"] for rom in snes_roms} == {"aaa", "bbb"}
+    assert {rom["rom_fingerprint"] for rom in snes_roms} == {"aaa", "bbb"}
     assert {rom["file_path"] for rom in snes_roms} == {"Super Metroid (USA).zip", "Chrono Trigger (USA).zip"}
     assert len(roms_response.json()["systems"]["snes"]) != before_snes_count
 
@@ -5197,7 +5197,7 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
         "gamelogs": {"d1": [{"id": "g1", "game_name": "Game", "system_name": "snes"}]},
         "download_states": {"d1": {"active": [{"job_id": "j1", "status": "downloading"}], "queued": [], "recent": []}},
     })
-    store._upsert_domain_assets(cur, "d1", "rom", [{"system_name": "snes", "file_path": "Game.zip", "rom_md5": "abc"}])
+    store._upsert_domain_assets(cur, "d1", "rom", [{"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"}])
     store._upsert_domain_assets(cur, "d1", "bios", [{"file_path": "bios.bin", "bios_md5": "def"}])
     store._upsert_domain_assets(cur, "d1", "artwork", [{"system_name": "snes", "rom_path": "Game.zip", "artwork_types": ["image"]}])
 

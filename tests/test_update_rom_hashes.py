@@ -1,9 +1,9 @@
-"""Tests for deferred ROM md5 hash patches landing on both asset stores.
+"""Tests for deferred ROM fingerprint hash patches landing on both asset stores.
 
-The drone uploads the ROM inventory first without md5, then sends md5 in a
+The drone uploads the ROM inventory first without fingerprint, then sends fingerprint in a
 separate ``rom_hash_patch``. That patch must update both the jsonb
 ``overmind_device_assets`` store and the relational ``drone_roms`` table;
-otherwise md5 stays NULL in ``drone_roms`` (master-list dedup, games count).
+otherwise fingerprint stays NULL in ``drone_roms`` (master-list dedup, games count).
 """
 
 import sys
@@ -59,7 +59,7 @@ def test_update_rom_hashes_patches_both_asset_stores():
 
     store.update_rom_hashes(
         "device-internal-1",
-        [{"system": "snes", "file_path": "Game One.zip", "rom_md5": "ABC123"}],
+        [{"system": "snes", "file_path": "Game One.zip", "rom_fingerprint": "ABC123"}],
     )
 
     tables = {sql for sql, _ in executed}
@@ -67,11 +67,11 @@ def test_update_rom_hashes_patches_both_asset_stores():
     assert any("drone_roms" in sql for sql in tables)
 
     drone_params = [params for sql, params in executed if "drone_roms" in sql][0]
-    # (md5, drone_id, system_name, normalized_path) with a lowercased path.
+    # (fingerprint, drone_id, system_name, normalized_path) with a lowercased path.
     assert drone_params == [("ABC123", "device-internal-1", "snes", "game one.zip")]
 
 
-def test_update_rom_hashes_skips_patches_without_md5():
+def test_update_rom_hashes_skips_patches_without_fingerprint():
     executed: list = []
     store = _store_with_fake_conn(executed)
 

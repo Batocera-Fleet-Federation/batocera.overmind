@@ -136,7 +136,7 @@ def append_game_log_sessions(existing: list, device_id: str, sessions: list, max
             str(row.get("system_name") or ""),
             str(row.get("game_name") or ""),
             str(row.get("rom_path") or ""),
-            str(row.get("rom_md5") or ""),
+            str(row.get("rom_fingerprint") or ""),
         )
         for row in bucket
         if isinstance(row, dict)
@@ -154,7 +154,7 @@ def append_game_log_sessions(existing: list, device_id: str, sessions: list, max
             system_name,
             game_name,
             str(session.get("rom_path") or ""),
-            str(session.get("rom_md5") or session.get("md5") or ""),
+            str(session.get("rom_fingerprint") or session.get("fingerprint") or ""),
         )
         if key in seen:
             continue
@@ -164,7 +164,7 @@ def append_game_log_sessions(existing: list, device_id: str, sessions: list, max
             "system_name": system_name,
             "game_name": game_name,
             "rom_path": session.get("rom_path"),
-            "rom_md5": session.get("rom_md5") or session.get("md5"),
+            "rom_fingerprint": session.get("rom_fingerprint") or session.get("fingerprint"),
             "played_at": played_at,
             "duration_seconds": session.get("duration_seconds"),
         })

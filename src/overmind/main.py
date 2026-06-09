@@ -2359,7 +2359,7 @@ async def get_swarm_master_roms(
     per_page: int = 100,
     authorization: Optional[str] = Header(default=None),
 ):
-    """Return a swarm-wide approved-Drone ROM master list deduplicated by md5 when available."""
+    """Return a swarm-wide approved-Drone ROM master list deduplicated by fingerprint when available."""
     user = get_current_user(authorization)
     result = db.get_swarm_master_roms_page(user["id"], query=q, system_name=system, page=page, per_page=per_page)
     return {"roms": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
@@ -2457,18 +2457,18 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name and rom path are required")
     source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
     if not source_devices:
-        requested_md5 = str(payload.get("rom_md5") or payload.get("md5") or "").strip().lower()
+        requested_fingerprint = str(payload.get("rom_fingerprint") or payload.get("fingerprint") or "").strip().lower()
         requested_path = rom_path.replace("\\", "/").strip().lstrip("./").lower()
         for row in db.get_master_roms_for_device(device["user_id"], device_id) or []:
             row_system = str(row.get("system_name") or "").strip().lower()
             row_path = str(row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-            row_md5 = str(row.get("rom_md5") or "").strip().lower()
+            row_fingerprint = str(row.get("rom_fingerprint") or "").strip().lower()
             if row_system != system_name.lower():
                 continue
-            if requested_md5 and row_md5 == requested_md5:
+            if requested_fingerprint and row_fingerprint == requested_fingerprint:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                 break
-            if not requested_md5 and row_path == requested_path:
+            if not requested_fingerprint and row_path == requested_path:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                 break
     source_devices = resolvable_asset_sources(source_devices, device_id)
@@ -2480,7 +2480,7 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
         "system_name": system_name,
         "rom_name": payload.get("rom_name") or rom_path,
         "file_path": rom_path,
-        "rom_md5": payload.get("rom_md5"),
+        "rom_fingerprint": payload.get("rom_fingerprint"),
         "file_size": payload.get("file_size"),
         "entry_type": payload.get("entry_type") or "file",
         "devices": source_devices,
@@ -2495,7 +2495,7 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
         "action": "download",
         "status": "pending",
         "file_size": payload.get("file_size"),
-        "rom_md5": payload.get("rom_md5"),
+        "rom_fingerprint": payload.get("rom_fingerprint"),
         "entry_type": payload.get("entry_type") or "file",
     })
     notify_sync_triggered(user, device, "ROM", f"ROM sync for {system_name}/{rom_path}", [device], source_devices, action)
@@ -2514,15 +2514,15 @@ async def sync_device_bios(device_id: str, payload: dict, authorization: Optiona
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="BIOS path is required")
     source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
     if not source_devices:
-        requested_md5 = str(payload.get("bios_md5") or payload.get("md5") or "").strip().lower()
+        requested_fingerprint = str(payload.get("bios_md5") or payload.get("md5") or "").strip().lower()
         requested_path = bios_path.replace("\\", "/").strip().lstrip("./").lower()
         for row in db.get_master_bios_for_device(device["user_id"], device_id) or []:
             row_path = str(row.get("file_path") or row.get("bios_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-            row_md5 = str(row.get("bios_md5") or row.get("md5") or "").strip().lower()
-            if requested_md5 and row_md5 == requested_md5:
+            row_fingerprint = str(row.get("bios_md5") or row.get("md5") or "").strip().lower()
+            if requested_fingerprint and row_fingerprint == requested_fingerprint:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                 break
-            if not requested_md5 and row_path == requested_path:
+            if not requested_fingerprint and row_path == requested_path:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                 break
     source_devices = resolvable_asset_sources(source_devices, device_id)
@@ -2744,7 +2744,7 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
             "action": "download",
             "status": "pending",
             "file_size": row.get("file_size"),
-            "rom_md5": row.get("rom_md5"),
+            "rom_fingerprint": row.get("rom_fingerprint"),
         })
     notify_sync_triggered(user, device, "System", f"{system_name} system sync ({len(missing)} ROM item(s))", [device], [source for row in missing for source in (row.get("devices") or [])], action)
     return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
@@ -2793,7 +2793,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
                 "system_name": rom.get("system_name"),
                 "rom_name": rom.get("rom_name") or rom.get("file_path"),
                 "file_path": rom.get("file_path") or rom.get("rom_name"),
-                "rom_md5": rom.get("rom_md5"),
+                "rom_fingerprint": rom.get("rom_fingerprint"),
                 "file_size": rom.get("file_size"),
                 "entry_type": rom.get("entry_type") or "file",
                 "devices": [],
@@ -2804,8 +2804,8 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
                     "device_id": source_id,
                     "device_name": devices[source_id].get("device_name") or info.get("hostname") or source_id,
                 })
-            if not row.get("rom_md5") and rom.get("rom_md5"):
-                row["rom_md5"] = rom.get("rom_md5")
+            if not row.get("rom_fingerprint") and rom.get("rom_fingerprint"):
+                row["rom_fingerprint"] = rom.get("rom_fingerprint")
             if not row.get("file_size") and rom.get("file_size"):
                 row["file_size"] = rom.get("file_size")
 
@@ -2850,7 +2850,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
                         "action": "download",
                         "status": "pending",
                         "file_size": row.get("file_size"),
-                        "rom_md5": row.get("rom_md5"),
+                        "rom_fingerprint": row.get("rom_fingerprint"),
                     })
                 notify_sync_triggered(
                     user,
@@ -2945,7 +2945,7 @@ async def log_gameplay(
         gameplay_data.game_name,
         gameplay_data.duration_seconds,
         rom_path=gameplay_data.rom_path,
-        rom_md5=gameplay_data.rom_md5,
+        rom_fingerprint=gameplay_data.rom_fingerprint,
         played_at=gameplay_data.played_at,
     )
     

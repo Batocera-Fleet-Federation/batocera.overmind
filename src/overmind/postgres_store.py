@@ -22,15 +22,15 @@ except Exception:
 def _compute_asset_keys(asset_type: str, payload: dict, system_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Return (master_key, sort_key) for a ROM or BIOS asset row, or (None, None) for artwork."""
     if asset_type == "rom":
-        md5 = str(payload.get("rom_md5") or "").strip().lower()
+        fingerprint = str(payload.get("rom_fingerprint") or "").strip().lower()
         sys = str(system_name or "").strip().lower()
         path = str(payload.get("file_path") or payload.get("rom_name") or "").strip().lower()
-        mk = f"md5:{md5}" if md5 else f"path:{sys}:{path}"
+        mk = f"fingerprint:{fingerprint}" if fingerprint else f"path:{sys}:{path}"
         return mk, f"{sys}:{path}"
     if asset_type == "bios":
-        md5 = str(payload.get("bios_md5") or payload.get("md5") or "").strip().lower()
+        fingerprint = str(payload.get("bios_md5") or payload.get("md5") or "").strip().lower()
         path = str(payload.get("file_path") or payload.get("relative_path") or payload.get("bios_name") or "").strip().lower()
-        mk = f"md5:{md5}" if md5 else f"path:{path}"
+        mk = f"fingerprint:{fingerprint}" if fingerprint else f"path:{path}"
         return mk, path
     return None, None
 
@@ -1362,7 +1362,7 @@ class PostgresMetadataStore:
 
         cur.execute(
             """
-            SELECT g.id, g.drone_id, g.system_name, g.game_name, g.rom_path, g.rom_md5,
+            SELECT g.id, g.drone_id, g.system_name, g.game_name, g.rom_path, g.rom_fingerprint,
                    g.played_at, g.duration_seconds, g.received_at
             FROM (
                 SELECT g.*, row_number() OVER (PARTITION BY g.drone_id ORDER BY g.played_at DESC NULLS LAST, g.received_at DESC, g.id DESC) AS rn
@@ -1374,14 +1374,14 @@ class PostgresMetadataStore:
             """,
             (active_drone_ids, history_limit),
         )
-        for gameplay_id, drone_id, system_name, game_name, rom_path, rom_md5, played_at, duration_seconds, received_at in cur.fetchall():
+        for gameplay_id, drone_id, system_name, game_name, rom_path, rom_fingerprint, played_at, duration_seconds, received_at in cur.fetchall():
             state["gamelogs"].setdefault(drone_id, []).append({
                 "id": gameplay_id,
                 "system_name": system_name,
                 "game_name": game_name,
                 "name": game_name,
                 "rom_path": rom_path,
-                "rom_md5": rom_md5,
+                "rom_fingerprint": rom_fingerprint,
                 "played_at": played_at,
                 "duration_seconds": duration_seconds,
                 "received_at": received_at,
@@ -1550,7 +1550,7 @@ class PostgresMetadataStore:
         cur.execute(
             """
             SELECT a.id, a.target_drone_id, td.device_id, a.source_drone_id, a.asset_type, a.action,
-                   a.status, a.system_name, a.file_path, a.rom_md5, a.bios_md5, a.artwork_type,
+                   a.status, a.system_name, a.file_path, a.rom_fingerprint, a.bios_md5, a.artwork_type,
                    a.bytes_transferred, a.file_size, a.started_at, a.completed_at, a.failure_reason,
                    a.received_at
             FROM (
@@ -1564,7 +1564,7 @@ class PostgresMetadataStore:
             """,
             (active_drone_ids, history_limit),
         )
-        for sync_id, target_internal_id, target_device_id, source_drone_id, asset_type, action, activity_status, system_name, file_path, rom_md5, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at, failure_reason, received_at in cur.fetchall():
+        for sync_id, target_internal_id, target_device_id, source_drone_id, asset_type, action, activity_status, system_name, file_path, rom_fingerprint, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at, failure_reason, received_at in cur.fetchall():
             if not target_internal_id:
                 continue
             state["rom_sync_activity"].setdefault(target_internal_id, []).append({
@@ -1583,7 +1583,7 @@ class PostgresMetadataStore:
                 "status": activity_status or "pending",
                 "bytes_transferred": bytes_transferred,
                 "file_size": file_size,
-                "rom_md5": rom_md5,
+                "rom_fingerprint": rom_fingerprint,
                 "bios_md5": bios_md5,
                 "download_started_at": started_at,
                 "download_completed_at": completed_at,
@@ -4130,13 +4130,13 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     INSERT INTO gameplay_sessions
-                        (id, drone_id, system_name, game_name, rom_path, rom_md5, played_at, duration_seconds, received_at)
+                        (id, drone_id, system_name, game_name, rom_path, rom_fingerprint, played_at, duration_seconds, received_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
                     ON CONFLICT (id) DO UPDATE SET
                         system_name = EXCLUDED.system_name,
                         game_name = EXCLUDED.game_name,
                         rom_path = EXCLUDED.rom_path,
-                        rom_md5 = EXCLUDED.rom_md5,
+                        rom_fingerprint = EXCLUDED.rom_fingerprint,
                         played_at = EXCLUDED.played_at,
                         duration_seconds = EXCLUDED.duration_seconds
                     """,
@@ -4146,7 +4146,7 @@ class PostgresMetadataStore:
                         row.get("system_name"),
                         row.get("game_name") or row.get("name") or "Unknown game",
                         row.get("rom_path"),
-                        row.get("rom_md5"),
+                        row.get("rom_fingerprint"),
                         self._dt(row.get("played_at")),
                         row.get("duration_seconds"),
                     ),
@@ -4375,7 +4375,7 @@ class PostgresMetadataStore:
             """
             INSERT INTO sync_activity
                 (id, target_drone_id, source_drone_id, asset_type, action, status, system_name, file_path,
-                 rom_md5, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at,
+                 rom_fingerprint, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at,
                  failure_reason, received_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
             ON CONFLICT (id) DO UPDATE SET
@@ -4395,7 +4395,7 @@ class PostgresMetadataStore:
                 row.get("status") or "pending",
                 row.get("system") or row.get("system_name"),
                 row.get("relative_path") or row.get("rom_path") or row.get("bios_name") or row.get("file_path"),
-                row.get("rom_md5") or row.get("md5"),
+                row.get("rom_fingerprint") or row.get("fingerprint"),
                 row.get("bios_md5"),
                 row.get("artwork_type"),
                 row.get("bytes_transferred"),
@@ -4508,14 +4508,14 @@ class PostgresMetadataStore:
                     SELECT device_internal_id, device_id, asset_type, item_key, system_name, payload,
                         CASE
                             WHEN asset_type = 'rom' THEN
-                                CASE WHEN nullif(lower(coalesce(payload->>'rom_md5', '')), '') IS NOT NULL
-                                     THEN 'md5:' || lower(payload->>'rom_md5')
+                                CASE WHEN nullif(lower(coalesce(payload->>'rom_fingerprint', '')), '') IS NOT NULL
+                                     THEN 'fingerprint:' || lower(payload->>'rom_fingerprint')
                                 ELSE 'path:' || lower(coalesce(system_name, '')) || ':' ||
                                                 lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
                                 END
                             WHEN asset_type = 'bios' THEN
                                 CASE WHEN nullif(lower(coalesce(payload->>'bios_md5', payload->>'md5', '')), '') IS NOT NULL
-                                     THEN 'md5:' || lower(coalesce(payload->>'bios_md5', payload->>'md5'))
+                                     THEN 'fingerprint:' || lower(coalesce(payload->>'bios_md5', payload->>'md5'))
                                 ELSE 'path:' || lower(coalesce(payload->>'file_path',
                                                        payload->>'relative_path', payload->>'bios_name', ''))
                                 END
@@ -4757,14 +4757,14 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     INSERT INTO drone_roms
-                        (drone_id, system_id, system_name, file_path, normalized_path, rom_name, rom_md5,
+                        (drone_id, system_id, system_name, file_path, normalized_path, rom_name, rom_fingerprint,
                          file_size, entry_type, metadata_source, last_seen)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
                     ON CONFLICT (drone_id, system_name, normalized_path) DO UPDATE SET
                         system_id = EXCLUDED.system_id,
                         file_path = EXCLUDED.file_path,
                         rom_name = EXCLUDED.rom_name,
-                        rom_md5 = EXCLUDED.rom_md5,
+                        rom_fingerprint = EXCLUDED.rom_fingerprint,
                         file_size = EXCLUDED.file_size,
                         entry_type = EXCLUDED.entry_type,
                         metadata_source = EXCLUDED.metadata_source,
@@ -4777,7 +4777,7 @@ class PostgresMetadataStore:
                         row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_name"),
                         path,
                         row.get("rom_name") or row.get("name"),
-                        row.get("rom_md5") or row.get("md5"),
+                        row.get("rom_fingerprint") or row.get("fingerprint"),
                         row.get("file_size") or row.get("byte_count"),
                         row.get("entry_type") or "file",
                         row.get("metadata_source") or row.get("source"),
@@ -5254,19 +5254,19 @@ class PostgresMetadataStore:
         for patch in patches:
             if not isinstance(patch, dict):
                 continue
-            md5_value = patch.get("rom_md5") or patch.get("md5") or patch.get("hash")
-            if not md5_value:
+            fingerprint_value = patch.get("rom_fingerprint") or patch.get("fingerprint") or patch.get("hash")
+            if not fingerprint_value:
                 continue
             item_key = _asset_key("rom", patch)
             if item_key:
-                updates.append((str(md5_value), device_internal_id, item_key))
+                updates.append((str(fingerprint_value), device_internal_id, item_key))
             # The deferred hash patch must also land on the relational drone_roms
-            # table; otherwise md5 stays NULL there (master list dedup, games count)
-            # because the initial inventory wrote those rows before md5 existed.
+            # table; otherwise fingerprint stays NULL there (master list dedup, games count)
+            # because the initial inventory wrote those rows before fingerprint existed.
             system_name = str(patch.get("system_name") or patch.get("system") or "").strip()
             normalized_path = _domain_path(patch, "rom")
             if system_name and normalized_path:
-                domain_updates.append((str(md5_value), device_internal_id, system_name, normalized_path))
+                domain_updates.append((str(fingerprint_value), device_internal_id, system_name, normalized_path))
         if not updates and not domain_updates:
             return
         with conn:
@@ -5275,17 +5275,17 @@ class PostgresMetadataStore:
                     cur.executemany(
                         """
                         UPDATE overmind_device_assets
-                        SET payload = jsonb_set(jsonb_set(payload, '{rom_md5}', to_jsonb(%s::text), true), '{md5}', to_jsonb(%s::text), true),
+                        SET payload = jsonb_set(jsonb_set(payload, '{rom_fingerprint}', to_jsonb(%s::text), true), '{fingerprint}', to_jsonb(%s::text), true),
                             updated_at = now()
                         WHERE device_internal_id = %s AND asset_type = 'rom' AND item_key = %s
                         """,
-                        [(md5, md5, internal_id, key) for md5, internal_id, key in updates],
+                        [(fingerprint, fingerprint, internal_id, key) for fingerprint, internal_id, key in updates],
                     )
                 if domain_updates:
                     cur.executemany(
                         """
                         UPDATE drone_roms
-                        SET rom_md5 = %s, last_seen = now()
+                        SET rom_fingerprint = %s, last_seen = now()
                         WHERE drone_id = %s AND lower(system_name) = lower(%s) AND normalized_path = %s
                         """,
                         domain_updates,
@@ -5375,9 +5375,9 @@ def _asset_key(asset_type: str, row: dict) -> str:
         path = str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_file") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
         return f"{system}:{path}" if system and path else ""
     if asset_type == "bios":
-        md5 = str(row.get("bios_md5") or row.get("md5") or row.get("hash") or "").strip().lower()
+        fingerprint = str(row.get("bios_md5") or row.get("md5") or row.get("hash") or "").strip().lower()
         path = str(row.get("file_path") or row.get("relative_path") or row.get("path") or row.get("bios_name") or row.get("name") or "").replace("\\", "/").strip().lstrip("./").lower()
-        return f"md5:{md5}" if md5 else f"path:{path}" if path else ""
+        return f"fingerprint:{fingerprint}" if fingerprint else f"path:{path}" if path else ""
     if asset_type == "artwork":
         system = str(row.get("system_name") or row.get("system") or "").strip().lower()
         path = str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()

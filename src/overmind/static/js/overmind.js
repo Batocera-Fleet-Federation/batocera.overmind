@@ -1906,7 +1906,7 @@
                         <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
                             <div style="flex:1;min-width:240px">
                                 <label class="form-label" for="swarm-sync-search">Search Sync Activity</label>
-                                <input id="swarm-sync-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="Drone, file, md5, status, date, error">
+                                <input id="swarm-sync-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="Drone, file, fingerprint, status, date, error">
                             </div>
                             <div style="min-width:160px">
                                 <label class="form-label" for="swarm-sync-status">Status</label>
@@ -1921,7 +1921,7 @@
                             <button class="btn btn-primary" onclick="showSwarmSyncActivity(false)">Search</button>
                         </div>
                         <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
-                            <th>Status</th><th>Transfer</th><th>Asset</th><th>MD5</th><th>Duration</th><th>Time</th>
+                            <th>Status</th><th>Transfer</th><th>Asset</th><th>Fingerprint</th><th>Duration</th><th>Time</th>
                         </tr></thead><tbody>
                             ${rows.map(row => {
                                 const duration = formatDuration(row);
@@ -1932,7 +1932,7 @@
                                     <td><span class="badge ${statusClass}">${escapeHtml(row.status || 'pending')}</span></td>
                                     <td class="small">${escapeHtml(row.source_drone_id || 'source n/a')} &rarr; ${escapeHtml(row.target_drone_id || 'target n/a')}</td>
                                     <td class="small">${escapeHtml(assetParts.filter(Boolean).join(' / '))}${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}</td>
-                                    <td class="small mono">${escapeHtml(row.rom_md5 || row.bios_md5 || row.md5 || '')}</td>
+                                    <td class="small mono">${escapeHtml(row.rom_fingerprint || row.bios_md5 || row.fingerprint || '')}</td>
                                     <td class="small">${duration ? escapeHtml(row.status === 'failed' ? `Failed after ${duration}` : row.status === 'completed' ? `Completed in ${duration}` : duration) : ''}</td>
                                     <td class="small text-muted">${escapeHtml(row.completed_at || row.started_at || row.received_at || '')}</td>
                                 </tr>`;
@@ -2012,7 +2012,7 @@
                         <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
                             <div style="flex:1;min-width:240px">
                                 <label class="form-label" for="swarm-master-search">Search Master List</label>
-                                <input id="swarm-master-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="System, ROM, md5, Drone">
+                                <input id="swarm-master-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="System, ROM, fingerprint, Drone">
                             </div>
                             <button class="btn btn-primary" onclick="submitSwarmMasterSearch()">Search</button>
                         </div>
@@ -2059,7 +2059,7 @@
                                 const sizeText = row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '';
                                 return `<tr>
                                     <td>${escapeHtml(row.system_name || '')}</td>
-                                    <td>${escapeHtml(row.rom_name || row.file_path || '')}${row.rom_md5 ? `<div class="small fst-italic text-muted mono">md5: ${escapeHtml(row.rom_md5)}</div>` : ''}${filenames}</td>
+                                    <td>${escapeHtml(row.rom_name || row.file_path || '')}${row.rom_fingerprint ? `<div class="small fst-italic text-muted mono">fingerprint: ${escapeHtml(row.rom_fingerprint)}</div>` : ''}${filenames}</td>
                                     <td class="small text-muted">${escapeHtml(sizeText)}</td>
                                     <td class="small">${escapeHtml(devices)}</td>
                                 </tr>`;
@@ -2196,7 +2196,7 @@
                     const details = [
                         log.system_name || '',
                         log.game_name || log.rom_name || log.rom_path || '',
-                        log.rom_md5 ? `md5: ${log.rom_md5}` : '',
+                        log.rom_fingerprint ? `fingerprint: ${log.rom_fingerprint}` : '',
                     ].filter(Boolean).join(' | ');
                     return `${when} ${details}`.trim();
                 });
@@ -2576,12 +2576,12 @@
             }
 
             async function rescanDroneMetadata() {
-                // Force the Drone to re-scan its library and re-upload (roms + bios + md5).
-                // Uses collect_rom_metadata so the Drone reuses cached md5 where possible.
+                // Force the Drone to re-scan its library and re-upload (roms + bios + fingerprint).
+                // Uses collect_rom_metadata so the Drone reuses cached fingerprint where possible.
                 if (!selectedDeviceId) return;
                 try {
                     await queueDeviceAction('collect_rom_metadata', { confirm: true, notify: false });
-                    showMessage('Drone rescan queued — systems, ROMs, BIOS and md5 will resync shortly.', 'success');
+                    showMessage('Drone rescan queued — systems, ROMs, BIOS and fingerprint will resync shortly.', 'success');
                 } catch (err) {
                     // queueDeviceAction already surfaced the error.
                 }
@@ -2769,7 +2769,7 @@
                     ['System', row.system_name || row.system],
                     ['ROM', row.rom_name || fileName],
                     ['Path', fileName],
-                    ['MD5', row.rom_md5 || row.md5],
+                    ['Fingerprint', row.rom_fingerprint || row.fingerprint],
                     ['Size', sizeText || row.size || row.file_size],
                     ['Status', statusLabel],
                     ['Source', sources || row.preferred_source_name || row.preferred_source],
@@ -2794,8 +2794,8 @@
             }
 
             function masterRomRowKey(row) {
-                const md5 = String(row.rom_md5 || row.md5 || '').trim().toLowerCase();
-                if (md5) return `md5:${md5}`;
+                const fingerprint = String(row.rom_fingerprint || row.fingerprint || '').trim().toLowerCase();
+                if (fingerprint) return `fingerprint:${fingerprint}`;
                 const system = String(row.system_name || row.system || '').trim().toLowerCase();
                 const path = String(row.file_path || row.rom_name || row.relative_path || row.rom_path || '').trim().toLowerCase();
                 return `path:${system}:${path}`;
@@ -2860,7 +2860,7 @@
                             return `<tr>
                                 <td>
                                     <div class="fw-semibold">${escapeHtml(rom.rom_name || path)}</div>
-                                    <div class="text-muted small">${escapeHtml(path)}${rom.rom_md5 ? ` <span class="mono">md5: ${escapeHtml(rom.rom_md5)}</span>` : ''}</div>
+                                    <div class="text-muted small">${escapeHtml(path)}${rom.rom_fingerprint ? ` <span class="mono">fingerprint: ${escapeHtml(rom.rom_fingerprint)}</span>` : ''}</div>
                                 </td>
                                 <td class="small text-muted text-nowrap">${escapeHtml(size.trim() || 'n/a')}</td>
                                 <td>${renderRomArtworkAssets(artworkRows)}</td>

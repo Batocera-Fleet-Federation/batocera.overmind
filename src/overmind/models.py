@@ -169,7 +169,7 @@ class RomMetadata(BaseModel):
     device_id: str
     system_name: str
     rom_name: str
-    rom_md5: str = Field(..., description="MD5 hash of the ROM")
+    rom_fingerprint: str = Field(..., description="Content fingerprint of the ROM")
     file_path: Optional[str] = None
     file_size: Optional[int] = None
     added_at: datetime
@@ -191,7 +191,7 @@ class RomListUpdate(BaseModel):
     device_id: str
     system_name: str
     roms: list[dict] = Field(..., description="List of ROM metadata objects")
-    # Each ROM object should have: rom_name, rom_md5, file_path (optional), file_size (optional)
+    # Each ROM object should have: rom_name, rom_fingerprint, file_path (optional), file_size (optional)
 
 
 class GamePlayLog(BaseModel):
@@ -200,7 +200,7 @@ class GamePlayLog(BaseModel):
     system_name: str
     game_name: str
     rom_path: Optional[str] = None
-    rom_md5: Optional[str] = None
+    rom_fingerprint: Optional[str] = None
     played_at: Optional[datetime] = None
     duration_seconds: Optional[int] = None
 
@@ -279,8 +279,8 @@ class DroneRomAsset(ExtensibleContractModel):
     file_path: Optional[str] = None
     relative_path: Optional[str] = None
     rom_path: Optional[str] = None
-    rom_md5: Optional[str] = None
-    md5: Optional[str] = None
+    rom_fingerprint: Optional[str] = None
+    fingerprint: Optional[str] = None
     file_size: Optional[int] = None
     byte_count: Optional[int] = None
     entry_type: Optional[str] = None
@@ -293,7 +293,7 @@ class DroneBiosAsset(ExtensibleContractModel):
     file_path: Optional[str] = None
     relative_path: Optional[str] = None
     bios_md5: Optional[str] = None
-    md5: Optional[str] = None
+    fingerprint: Optional[str] = None
     file_size: Optional[int] = None
     byte_count: Optional[int] = None
 
@@ -374,7 +374,7 @@ class DroneGameSession(ExtensibleContractModel):
     system_name: Optional[str] = None
     game_name: Optional[str] = None
     rom_path: Optional[str] = None
-    rom_md5: Optional[str] = None
+    rom_fingerprint: Optional[str] = None
     duration_seconds: Optional[int] = None
 
 

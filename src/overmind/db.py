@@ -50,10 +50,10 @@ def compute_rom_inventory_fingerprint(roms: list[dict]) -> str:
         if not system or not path:
             continue
         entry_type = str(row.get("entry_type") or "file").strip().lower()
-        md5_value = str(row.get("rom_md5") or row.get("md5") or row.get("hash") or "").strip().lower()
+        fingerprint_value = str(row.get("rom_fingerprint") or row.get("fingerprint") or row.get("hash") or "").strip().lower()
         file_size = row.get("file_size") if row.get("file_size") is not None else row.get("byte_count")
         size_value = str(int(file_size)) if isinstance(file_size, (int, float)) else str(file_size or "").strip()
-        rows.append("\t".join((system, path, entry_type, md5_value, size_value)))
+        rows.append("\t".join((system, path, entry_type, fingerprint_value, size_value)))
     digest = hashlib.sha256()
     for value in sorted(rows):
         digest.update(value.encode("utf-8"))
@@ -483,7 +483,7 @@ class OvermindDatabase:
                         "system_name": rom.get("system_name"),
                         "name": rom.get("rom_name") or rom.get("file_path"),
                         "path": rom.get("file_path") or rom.get("rom_name"),
-                        "md5": rom.get("rom_md5"),
+                        "fingerprint": rom.get("rom_fingerprint"),
                         "devices": [],
                     })
                     row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
@@ -1925,7 +1925,7 @@ class OvermindDatabase:
                 return None
         # Use purge_asset_cache (not rebuild_asset_metadata): it forces the same
         # full re-scan and full Overmind re-upload but keeps the Drone's cached
-        # md5 values, so a routine fingerprint mismatch does not re-hash every ROM.
+        # fingerprint values, so a routine fingerprint mismatch does not re-hash every ROM.
         return self.create_device_action(
             device.get("user_id"),
             device_id,
@@ -2443,7 +2443,7 @@ class OvermindDatabase:
             file_path = str(item.get("file_path") or item.get("relative_path") or item.get("rom_path") or item.get("rom_file") or rom_name).strip()
             grouped.setdefault(system_name, []).append({
                 "rom_name": rom_name or file_path,
-                "rom_md5": item.get("rom_md5") or item.get("md5") or item.get("hash"),
+                "rom_fingerprint": item.get("rom_fingerprint") or item.get("fingerprint") or item.get("hash"),
                 "file_path": file_path,
                 "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
                 "entry_type": item.get("entry_type") or "file",
@@ -2556,7 +2556,7 @@ class OvermindDatabase:
             key = row_key(patch)
             if not key[0] or not key[1]:
                 continue
-            md5_value = patch.get("rom_md5") or patch.get("md5") or patch.get("hash")
+            fingerprint_value = patch.get("rom_fingerprint") or patch.get("fingerprint") or patch.get("hash")
             current = by_key.get(key)
             if current is None:
                 current = {
@@ -2571,7 +2571,7 @@ class OvermindDatabase:
                 }
                 rows.append(current)
                 by_key[key] = current
-            current["rom_md5"] = md5_value
+            current["rom_fingerprint"] = fingerprint_value
             current["last_seen"] = datetime.utcnow()
         summary = dict(device.get("rom_metadata") or {})
         summary["type"] = metadata.get("type") or summary.get("type") or "asset_metadata"
@@ -2773,7 +2773,7 @@ class OvermindDatabase:
                 "device_id": device_id,
                 "system_name": system_name,
                 "rom_name": rom.get("rom_name"),
-                "rom_md5": rom.get("rom_md5"),
+                "rom_fingerprint": rom.get("rom_fingerprint"),
                 "file_path": rom.get("file_path"),
                 "file_size": rom.get("file_size"),
                 "entry_type": rom.get("entry_type") or "file",
@@ -2835,9 +2835,9 @@ class OvermindDatabase:
 
     def _rom_key(self, rom: dict) -> tuple:
         system = str(rom.get("system_name") or "").strip().lower()
-        md5 = str(rom.get("rom_md5") or "").strip().lower()
-        if md5:
-            return ("md5", md5)
+        fingerprint = str(rom.get("rom_fingerprint") or "").strip().lower()
+        if fingerprint:
+            return ("fingerprint", fingerprint)
         path = str(rom.get("file_path") or rom.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
         return (system, path)
 
@@ -2893,9 +2893,9 @@ class OvermindDatabase:
         return row_ids
 
     def _bios_key(self, bios: dict) -> tuple:
-        md5 = str(bios.get("bios_md5") or bios.get("md5") or "").strip().lower()
-        if md5:
-            return ("md5", md5)
+        fingerprint = str(bios.get("bios_md5") or "").strip().lower()
+        if fingerprint:
+            return ("fingerprint", fingerprint)
         path = str(bios.get("file_path") or bios.get("relative_path") or bios.get("bios_name") or "").replace("\\", "/").strip().lstrip("./").lower()
         return ("path", path)
 
@@ -3097,7 +3097,7 @@ class OvermindDatabase:
                     "system_name": rom.get("system_name"),
                     "rom_name": rom.get("rom_name") or rom.get("file_path"),
                     "file_path": rom.get("file_path") or rom.get("rom_name"),
-                    "rom_md5": rom.get("rom_md5"),
+                    "rom_fingerprint": rom.get("rom_fingerprint"),
                     "file_size": rom.get("file_size"),
                     "entry_type": rom.get("entry_type") or "file",
                     "last_seen": rom.get("last_seen") or rom.get("added_at"),
@@ -3109,8 +3109,8 @@ class OvermindDatabase:
                     "device_id": device["device_id"],
                     "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
                 })
-                if not row.get("rom_md5") and rom.get("rom_md5"):
-                    row["rom_md5"] = rom.get("rom_md5")
+                if not row.get("rom_fingerprint") and rom.get("rom_fingerprint"):
+                    row["rom_fingerprint"] = rom.get("rom_fingerprint")
                 if not row.get("file_size") and rom.get("file_size"):
                     row["file_size"] = rom.get("file_size")
         rows = list(master.values())
@@ -3131,7 +3131,7 @@ class OvermindDatabase:
                     "rom_name": rom.get("rom_name") or rom.get("file_path"),
                     "file_path": rom.get("file_path") or rom.get("rom_name"),
                     "filenames": [],
-                    "rom_md5": rom.get("rom_md5"),
+                    "rom_fingerprint": rom.get("rom_fingerprint"),
                     "file_size": rom.get("file_size"),
                     "entry_type": rom.get("entry_type") or "file",
                     "metadata_source": rom.get("metadata_source"),
@@ -3147,8 +3147,8 @@ class OvermindDatabase:
                     "device_id": device["device_id"],
                     "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
                 })
-                if not row.get("rom_md5") and rom.get("rom_md5"):
-                    row["rom_md5"] = rom.get("rom_md5")
+                if not row.get("rom_fingerprint") and rom.get("rom_fingerprint"):
+                    row["rom_fingerprint"] = rom.get("rom_fingerprint")
                 if not row.get("file_size") and rom.get("file_size"):
                     row["file_size"] = rom.get("file_size")
         rows = list(master.values())
@@ -3174,7 +3174,7 @@ class OvermindDatabase:
                     row.get("system_name"),
                     row.get("rom_name"),
                     row.get("file_path") or row.get("rom_path"),
-                    row.get("rom_md5") or row.get("bios_md5"),
+                    row.get("rom_fingerprint") or row.get("bios_md5"),
                     row.get("title"),
                     row.get("artwork_type"),
                     " ".join(row.get("filenames") or []),
@@ -3214,7 +3214,7 @@ class OvermindDatabase:
                     "rom_name": item.get("rom_name") or item.get("file_path"),
                     "file_path": item.get("file_path") or item.get("rom_name"),
                     "filenames": [],
-                    "rom_md5": item.get("rom_md5"),
+                    "rom_fingerprint": item.get("rom_fingerprint"),
                     "file_size": item.get("file_size"),
                     "entry_type": item.get("entry_type") or "file",
                     "last_seen": item.get("last_seen") or item.get("added_at"),
@@ -3224,8 +3224,8 @@ class OvermindDatabase:
                 filename = item.get("file_path") or item.get("rom_name")
                 if filename and filename not in row["filenames"]:
                     row["filenames"].append(filename)
-                if not row.get("rom_md5") and item.get("rom_md5"):
-                    row["rom_md5"] = item.get("rom_md5")
+                if not row.get("rom_fingerprint") and item.get("rom_fingerprint"):
+                    row["rom_fingerprint"] = item.get("rom_fingerprint")
                 if not row.get("file_size") and item.get("file_size"):
                     row["file_size"] = item.get("file_size")
             elif asset_type == "bios":
@@ -3394,7 +3394,7 @@ class OvermindDatabase:
             "selected_peer_reason": payload.get("selected_peer_reason"),
             "bytes_transferred": payload.get("bytes_transferred"),
             "file_size": payload.get("file_size"),
-            "rom_md5": payload.get("rom_md5") or payload.get("md5"),
+            "rom_fingerprint": payload.get("rom_fingerprint") or payload.get("fingerprint"),
             "bios_md5": payload.get("bios_md5") or (payload.get("md5") if payload.get("asset_type") == "bios" else None),
             "download_started_at": payload.get("download_started_at") or payload.get("started_at"),
             "download_completed_at": payload.get("download_completed_at") or payload.get("completed_at"),
@@ -3499,7 +3499,7 @@ class OvermindDatabase:
             def haystack(row: dict) -> str:
                 return " ".join(str(row.get(field) or "") for field in (
                     "source_drone_id", "target_drone_id", "system", "rom_name", "relative_path",
-                    "rom_path", "artwork_type", "rom_md5", "bios_md5", "asset_type", "status", "failure_reason", "duration_ms", "duration_seconds",
+                    "rom_path", "artwork_type", "rom_fingerprint", "bios_md5", "asset_type", "status", "failure_reason", "duration_ms", "duration_seconds",
                     "started_at", "completed_at", "download_started_at", "download_completed_at",
                 )).lower()
             rows = [row for row in rows if q in haystack(row)]
@@ -3647,7 +3647,7 @@ class OvermindDatabase:
         game_name: str,
         duration_seconds: Optional[int] = None,
         rom_path: Optional[str] = None,
-        rom_md5: Optional[str] = None,
+        rom_fingerprint: Optional[str] = None,
         played_at: Optional[datetime] = None,
     ) -> Optional[str]:
         """Log a game play session."""
@@ -3666,7 +3666,7 @@ class OvermindDatabase:
             "system_name": system_name,
             "game_name": game_name,
             "rom_path": rom_path,
-            "rom_md5": rom_md5,
+            "rom_fingerprint": rom_fingerprint,
             "played_at": played_at or datetime.utcnow(),
             "duration_seconds": duration_seconds,
         }
