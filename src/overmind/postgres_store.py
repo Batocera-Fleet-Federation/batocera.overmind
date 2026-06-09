@@ -5250,26 +5250,46 @@ class PostgresMetadataStore:
         if conn is None:
             return
         updates = []
+        domain_updates = []
         for patch in patches:
             if not isinstance(patch, dict):
                 continue
-            item_key = _asset_key("rom", patch)
             md5_value = patch.get("rom_md5") or patch.get("md5") or patch.get("hash")
-            if item_key and md5_value:
+            if not md5_value:
+                continue
+            item_key = _asset_key("rom", patch)
+            if item_key:
                 updates.append((str(md5_value), device_internal_id, item_key))
-        if not updates:
+            # The deferred hash patch must also land on the relational drone_roms
+            # table; otherwise md5 stays NULL there (master list dedup, games count)
+            # because the initial inventory wrote those rows before md5 existed.
+            system_name = str(patch.get("system_name") or patch.get("system") or "").strip()
+            normalized_path = _domain_path(patch, "rom")
+            if system_name and normalized_path:
+                domain_updates.append((str(md5_value), device_internal_id, system_name, normalized_path))
+        if not updates and not domain_updates:
             return
         with conn:
             with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    UPDATE overmind_device_assets
-                    SET payload = jsonb_set(jsonb_set(payload, '{rom_md5}', to_jsonb(%s::text), true), '{md5}', to_jsonb(%s::text), true),
-                        updated_at = now()
-                    WHERE device_internal_id = %s AND asset_type = 'rom' AND item_key = %s
-                    """,
-                    [(md5, md5, internal_id, key) for md5, internal_id, key in updates],
-                )
+                if updates:
+                    cur.executemany(
+                        """
+                        UPDATE overmind_device_assets
+                        SET payload = jsonb_set(jsonb_set(payload, '{rom_md5}', to_jsonb(%s::text), true), '{md5}', to_jsonb(%s::text), true),
+                            updated_at = now()
+                        WHERE device_internal_id = %s AND asset_type = 'rom' AND item_key = %s
+                        """,
+                        [(md5, md5, internal_id, key) for md5, internal_id, key in updates],
+                    )
+                if domain_updates:
+                    cur.executemany(
+                        """
+                        UPDATE drone_roms
+                        SET rom_md5 = %s, last_seen = now()
+                        WHERE drone_id = %s AND lower(system_name) = lower(%s) AND normalized_path = %s
+                        """,
+                        domain_updates,
+                    )
 
 
 def _encode_state(value):
