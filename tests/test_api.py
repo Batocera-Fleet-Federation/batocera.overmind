@@ -3221,7 +3221,10 @@ def test_asset_metadata_final_chunk_stores_drone_rom_inventory_fingerprint(clien
     assert device["rom_inventory_fingerprint"] == expected
 
 
-def test_heartbeat_queues_metadata_rebuild_when_rom_inventory_fingerprint_differs(client):
+def test_heartbeat_does_not_queue_purge_when_rom_inventory_fingerprint_differs(client):
+    # Resync is now Drone-driven via echoed asset thumbprints; Overmind must NOT queue a
+    # server-side purge on a recomputed fingerprint mismatch (the old behavior produced an
+    # endless purge -> full-refresh loop whenever the two computations drifted).
     client.post("/api/auth/register", json={"email": "fingerprint-heartbeat@example.com", "username": "fingerprint-heartbeat-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("fingerprint-heartbeat@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
@@ -3241,17 +3244,47 @@ def test_heartbeat_queues_metadata_rebuild_when_rom_inventory_fingerprint_differ
 
     assert response.status_code == 200
     actions = response.json()["actions"]
-    assert len(actions) == 1
-    assert actions[0]["action"] == "purge_asset_cache"
-    assert actions[0]["payload"]["reason"] == "rom_inventory_fingerprint_mismatch"
+    assert all(action["action"] != "purge_asset_cache" for action in actions)
+    # The Drone-reported fingerprint is still recorded for display.
+    assert db.get_device_by_device_id("drone-a")["drone_rom_inventory_fingerprint"] == "different"
 
-    second = client.post(
-        "/api/devices/drone-a/heartbeat",
+
+def test_heartbeat_echoes_stored_asset_thumbprints(client):
+    client.post("/api/auth/register", json={"email": "thumbprint-echo@example.com", "username": "thumbprint-echo-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("thumbprint-echo@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    headers = {"Authorization": "Bearer drone-token-a"}
+
+    # Before any asset upload, Overmind has no stored thumbprints to echo.
+    first = client.post("/api/devices/drone-a/heartbeat", headers=headers, json={"device_id": "drone-a"})
+    assert first.status_code == 200
+    assert first.json()["romset_files_thumbprint"] is None
+    assert first.json()["bios_files_thumbprint"] is None
+
+    # A full inventory upload carrying thumbprints stores them verbatim...
+    upload = client.post(
+        "/api/devices/drone-a/rom-metadata",
         headers=headers,
-        json={"device_id": "drone-a", "rom_inventory_fingerprint": "different"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory",
+            "romset_files_thumbprint": "romset-tp-123",
+            "bios_files_thumbprint": "bios-tp-456",
+            "roms": [{"system": "snes", "file_path": "A.zip", "rom_name": "A", "file_size": 1}],
+            "bios": [{"file_path": "snes/bios.bin", "bios_md5": "deadbeef", "file_size": 2}],
+        },
     )
+    assert upload.status_code == 200
+
+    # ...and the next heartbeat echoes them back so the Drone can compare.
+    second = client.post("/api/devices/drone-a/heartbeat", headers=headers, json={"device_id": "drone-a"})
     assert second.status_code == 200
-    assert second.json()["actions"] == []
+    assert second.json()["romset_files_thumbprint"] == "romset-tp-123"
+    assert second.json()["bios_files_thumbprint"] == "bios-tp-456"
+    device = db.get_device_by_device_id("drone-a")
+    assert device["romset_files_thumbprint"] == "romset-tp-123"
+    assert device["bios_files_thumbprint"] == "bios-tp-456"
 
 
 def test_heartbeat_does_not_queue_metadata_rebuild_when_rom_inventory_fingerprint_matches(client):
@@ -4655,7 +4688,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         },
     )
     assert heartbeat_response.status_code == 200
-    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_stream_requested"}
+    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint"}
     assert "device" not in heartbeat_response.json()
     swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["drone_id"] == "arcade-cabinet-001")
     assert swarm_peer["reachable_url"] == "https://bff-drone-a:443"
@@ -4754,7 +4787,7 @@ def test_heartbeat_survives_noncritical_state_update_failure(client, monkeypatch
         json={"device_name": "Resilient Drone"},
     )
     assert response.status_code == 200
-    assert set(response.json()) == {"actions", "swarm", "log_stream_requested"}
+    assert set(response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint"}
 
 
 def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):
@@ -5297,6 +5330,7 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
                         "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
                         None, "token-hash", created_at, created_at,
                         None, None, None, None, None,
+                        None, None,
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                     None, None, None, None, None,
@@ -5355,6 +5389,7 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                         "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
                         None, "token-hash", received_at, received_at,
                         None, None, None, None, None,
+                        None, None,
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                     None, None, None, None, None,
@@ -5419,6 +5454,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
                         None, "target-hash", reported_at, reported_at,
                         None, None, None, None, None,
+                        None, None,
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                         None, None, None, None, None,
@@ -5426,6 +5462,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
                         None, "source-hash", reported_at, reported_at,
                         None, None, None, None, None,
+                        None, None,
                         443, "https", "https://drone-b:443", True, "198.51.100.2", reported_at,
                         None, None, None, None, None, None, None,
                     None, None, None, None, None,

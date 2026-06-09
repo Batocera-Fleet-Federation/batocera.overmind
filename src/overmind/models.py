@@ -258,6 +258,8 @@ class DroneHeartbeatRequest(StrictContractModel):
     downloads: Optional[DroneDownloadsReport] = None
     rom_inventory_fingerprint: Optional[str] = None
     rom_inventory_fingerprint_algorithm: Optional[str] = None
+    romset_files_thumbprint: Optional[str] = None
+    bios_files_thumbprint: Optional[str] = None
     rom_metadata: Optional[dict[str, Any]] = None
     rom_systems: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -327,6 +329,8 @@ class DroneAssetMetadataUpload(StrictContractModel):
     inventory_counts: dict[str, int] = Field(default_factory=dict)
     rom_inventory_fingerprint: Optional[str] = None
     rom_inventory_fingerprint_algorithm: Optional[str] = None
+    romset_files_thumbprint: Optional[str] = None
+    bios_files_thumbprint: Optional[str] = None
     collected_at: Optional[str] = None
     roms_root: Optional[str] = None
     bios_root: Optional[str] = None

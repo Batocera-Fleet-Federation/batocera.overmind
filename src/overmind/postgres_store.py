@@ -356,6 +356,34 @@ class PostgresMetadataStore:
                 )
                 return cur.rowcount > 0
 
+    def update_device_asset_thumbprints(
+        self,
+        internal_id: str,
+        *,
+        romset_thumbprint: Optional[str] = None,
+        bios_thumbprint: Optional[str] = None,
+    ) -> bool:
+        """Persist the Drone-supplied asset thumbprints verbatim (no recompute)."""
+        if not internal_id or (romset_thumbprint is None and bios_thumbprint is None):
+            return False
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE drones
+                    SET romset_files_thumbprint = COALESCE(%s::text, romset_files_thumbprint),
+                        bios_files_thumbprint = COALESCE(%s::text, bios_files_thumbprint),
+                        romset_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN romset_files_thumbprint_at ELSE now() END,
+                        bios_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN bios_files_thumbprint_at ELSE now() END
+                    WHERE id = %s
+                    """,
+                    (romset_thumbprint, bios_thumbprint, romset_thumbprint, bios_thumbprint, internal_id),
+                )
+                return cur.rowcount > 0
+
     def touch_device_last_seen(self, internal_id: str) -> bool:
         """Update a Drone's liveness timestamp with a minimal write path."""
         conn = self._core_connection()
@@ -1170,6 +1198,7 @@ class PostgresMetadataStore:
                    d.rom_inventory_fingerprint, d.drone_rom_inventory_fingerprint,
                    d.rom_inventory_fingerprint_algorithm, d.rom_inventory_fingerprint_at,
                    d.drone_rom_inventory_fingerprint_at,
+                   d.romset_files_thumbprint, d.bios_files_thumbprint,
                    n.api_port, n.scheme, n.reachable_url, n.public_resolvable, n.public_ip, n.checked_at,
                    s.hostname, s.model, s.system_name, s.architecture, s.cpu_model, s.cpu_cores, s.cpu_threads,
                    s.cpu_max_frequency, s.memory_available, s.memory_total, s.batocera_version, s.container
@@ -1186,6 +1215,7 @@ class PostgresMetadataStore:
                 rom_inventory_fingerprint, drone_rom_inventory_fingerprint,
                 rom_inventory_fingerprint_algorithm, rom_inventory_fingerprint_at,
                 drone_rom_inventory_fingerprint_at,
+                romset_files_thumbprint, bios_files_thumbprint,
                 api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
                 hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
                 cpu_max_frequency, memory_available, memory_total, batocera_version, container,
@@ -1207,6 +1237,8 @@ class PostgresMetadataStore:
                 "rom_inventory_fingerprint_algorithm": rom_inventory_fingerprint_algorithm,
                 "rom_inventory_fingerprint_at": rom_inventory_fingerprint_at,
                 "drone_rom_inventory_fingerprint_at": drone_rom_inventory_fingerprint_at,
+                "romset_files_thumbprint": romset_files_thumbprint,
+                "bios_files_thumbprint": bios_files_thumbprint,
                 "api_port": api_port,
                 "scheme": scheme or "https",
                 "reachable_url": reachable_url,
@@ -1697,6 +1729,7 @@ class PostgresMetadataStore:
             rom_inventory_fingerprint, drone_rom_inventory_fingerprint,
             rom_inventory_fingerprint_algorithm, rom_inventory_fingerprint_at,
             drone_rom_inventory_fingerprint_at,
+            romset_files_thumbprint, bios_files_thumbprint,
             api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
             hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
             cpu_max_frequency, memory_available, memory_total, batocera_version, container,
@@ -1746,6 +1779,8 @@ class PostgresMetadataStore:
             "rom_inventory_fingerprint_algorithm": rom_inventory_fingerprint_algorithm,
             "rom_inventory_fingerprint_at": rom_inventory_fingerprint_at,
             "drone_rom_inventory_fingerprint_at": drone_rom_inventory_fingerprint_at,
+            "romset_files_thumbprint": romset_files_thumbprint,
+            "bios_files_thumbprint": bios_files_thumbprint,
             "api_port": api_port,
             "scheme": scheme or "https",
             "reachable_url": reachable_url,
@@ -1817,6 +1852,7 @@ class PostgresMetadataStore:
                    d.rom_inventory_fingerprint, d.drone_rom_inventory_fingerprint,
                    d.rom_inventory_fingerprint_algorithm, d.rom_inventory_fingerprint_at,
                    d.drone_rom_inventory_fingerprint_at,
+                   d.romset_files_thumbprint, d.bios_files_thumbprint,
                    ns.api_port, ns.scheme, ns.reachable_url, ns.public_resolvable, ns.public_ip, ns.checked_at,
                    si.hostname, si.model, si.system_name, si.architecture, si.cpu_model, si.cpu_cores,
                    si.cpu_threads, si.cpu_max_frequency, si.memory_available, si.memory_total,
@@ -3678,8 +3714,9 @@ class PostgresMetadataStore:
                      authorization_token_id, drone_token_hash, rom_inventory_fingerprint,
                      drone_rom_inventory_fingerprint, rom_inventory_fingerprint_algorithm,
                      rom_inventory_fingerprint_at, drone_rom_inventory_fingerprint_at,
+                     romset_files_thumbprint, bios_files_thumbprint,
                      registered_at, last_seen)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()), %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()), %s)
                 ON CONFLICT (id) DO UPDATE SET
                     device_id = EXCLUDED.device_id,
                     device_name = EXCLUDED.device_name,
@@ -3694,6 +3731,8 @@ class PostgresMetadataStore:
                     rom_inventory_fingerprint_algorithm = EXCLUDED.rom_inventory_fingerprint_algorithm,
                     rom_inventory_fingerprint_at = EXCLUDED.rom_inventory_fingerprint_at,
                     drone_rom_inventory_fingerprint_at = EXCLUDED.drone_rom_inventory_fingerprint_at,
+                    romset_files_thumbprint = EXCLUDED.romset_files_thumbprint,
+                    bios_files_thumbprint = EXCLUDED.bios_files_thumbprint,
                     last_seen = EXCLUDED.last_seen
                 """,
                 (
@@ -3711,6 +3750,8 @@ class PostgresMetadataStore:
                     device.get("rom_inventory_fingerprint_algorithm"),
                     self._dt(device.get("rom_inventory_fingerprint_at")),
                     self._dt(device.get("drone_rom_inventory_fingerprint_at")),
+                    device.get("romset_files_thumbprint"),
+                    device.get("bios_files_thumbprint"),
                     self._dt(device.get("registered_at")),
                     self._dt(device.get("last_seen")),
                 ),

@@ -2066,12 +2066,18 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
             db.store_download_state(device_id, heartbeat["downloads"])
         except Exception:
             logger.exception("Heartbeat download state update failed device_id=%s", device_id)
+    # Record the Drone-reported ROM inventory fingerprint for display only. We deliberately
+    # do NOT queue a purge/resync from a server-side fingerprint comparison here: Overmind
+    # used to recompute its own fingerprint from stored rows and queue purge_asset_cache on
+    # any mismatch, which produced an endless purge -> 72MB full-refresh loop whenever the
+    # two computations drifted. Resync is now Drone-driven via the asset thumbprints echoed
+    # in this response (see below).
     rom_fingerprint = str(heartbeat.get("rom_inventory_fingerprint") or "").strip()
     if rom_fingerprint:
         try:
-            db.ensure_rom_metadata_sync_action_for_fingerprint(device_id, rom_fingerprint)
+            db.update_device_rom_inventory_fingerprint(device_id, drone_fingerprint=rom_fingerprint)
         except Exception:
-            logger.exception("Heartbeat ROM fingerprint comparison failed device_id=%s", device_id)
+            logger.exception("Heartbeat ROM fingerprint record failed device_id=%s", device_id)
     try:
         actions = db.claim_pending_device_actions(device_id)
     except Exception:
@@ -2091,6 +2097,11 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
         "actions": actions,
         "swarm": swarm,
         "log_stream_requested": _drone_log_stream_active(device_id),
+        # Echo the asset thumbprints Overmind last stored (verbatim from the Drone's last
+        # upload). The Drone compares these against what it holds on disk and pushes a
+        # resync only when they differ.
+        "romset_files_thumbprint": str((updated or {}).get("romset_files_thumbprint") or "") or None,
+        "bios_files_thumbprint": str((updated or {}).get("bios_files_thumbprint") or "") or None,
     }
 
 

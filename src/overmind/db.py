@@ -1881,6 +1881,39 @@ class OvermindDatabase:
                 reachable_url=reachable_url,
             )
 
+    def update_device_asset_thumbprints(
+        self,
+        device_id: str,
+        *,
+        romset_thumbprint: Optional[str] = None,
+        bios_thumbprint: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Store the Drone-supplied asset thumbprints verbatim.
+
+        Overmind deliberately does NOT recompute these from its own stored rows. It keeps
+        exactly what the Drone sent and echoes it back in the heartbeat response, so the
+        two sides can never disagree about the same asset set (the failure mode of the
+        legacy recomputed rom_inventory_fingerprint, which produced an endless
+        purge -> full-refresh loop).
+        """
+        device = self.get_device_by_device_id(device_id)
+        if not device:
+            return None
+        updated_at = datetime.utcnow()
+        if romset_thumbprint is not None:
+            device["romset_files_thumbprint"] = romset_thumbprint
+            device["romset_files_thumbprint_at"] = updated_at
+        if bios_thumbprint is not None:
+            device["bios_files_thumbprint"] = bios_thumbprint
+            device["bios_files_thumbprint_at"] = updated_at
+        if postgres_store.available():
+            postgres_store.update_device_asset_thumbprints(
+                device["id"],
+                romset_thumbprint=romset_thumbprint,
+                bios_thumbprint=bios_thumbprint,
+            )
+        return device
+
     def update_device_rom_inventory_fingerprint(
         self,
         device_id: str,
@@ -2500,6 +2533,18 @@ class OvermindDatabase:
                 metadata["rom_inventory_fingerprint"] = drone_fingerprint
                 metadata["rom_inventory_fingerprint_algorithm"] = (
                     row_metadata.get("rom_inventory_fingerprint_algorithm") or ROM_INVENTORY_FINGERPRINT_ALGORITHM
+                )
+        # Persist the Drone-supplied asset thumbprints verbatim once the inventory/delta
+        # has fully landed, so the next heartbeat echoes the value the Drone itself sent.
+        if should_compute_fingerprint:
+            romset_thumbprint = str(row_metadata.get("romset_files_thumbprint") or drone_fingerprint or "").strip() or None
+            bios_thumbprint = str(row_metadata.get("bios_files_thumbprint") or "").strip()
+            bios_thumbprint = bios_thumbprint or None
+            if romset_thumbprint is not None or bios_thumbprint is not None:
+                self.update_device_asset_thumbprints(
+                    device_id,
+                    romset_thumbprint=romset_thumbprint,
+                    bios_thumbprint=bios_thumbprint,
                 )
         after = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
