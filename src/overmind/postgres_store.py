@@ -316,18 +316,22 @@ class PostgresMetadataStore:
                                 " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
                                 (internal_id, addr_type, str(val)),
                             )
-                if any([api_port, scheme, reachable_url]):
+                reported_public_ip = None
+                if network and isinstance(network, dict):
+                    reported_public_ip = str(network.get("public_ip") or network.get("public") or "").strip() or None
+                if any([api_port, scheme, reachable_url, reported_public_ip]):
                     cur.execute(
                         """
-                        INSERT INTO drone_network_state (drone_id, api_port, scheme, reachable_url, updated_at)
-                        VALUES (%s, %s, %s, %s, now())
+                        INSERT INTO drone_network_state (drone_id, api_port, scheme, reachable_url, public_ip, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, now())
                         ON CONFLICT (drone_id) DO UPDATE SET
                             api_port     = COALESCE(EXCLUDED.api_port,     drone_network_state.api_port),
                             scheme       = COALESCE(EXCLUDED.scheme,       drone_network_state.scheme),
                             reachable_url = COALESCE(EXCLUDED.reachable_url, drone_network_state.reachable_url),
+                            public_ip    = COALESCE(EXCLUDED.public_ip,    drone_network_state.public_ip),
                             updated_at   = now()
                         """,
-                        (internal_id, api_port, scheme or None, reachable_url or None),
+                        (internal_id, api_port, scheme or None, reachable_url or None, reported_public_ip),
                     )
         return True
 

@@ -363,7 +363,15 @@ app = FastAPI(
 )
 _RUNTIME_SECRET_REFRESHER = None
 _NOTIFICATION_DELIVERY_THREAD = None
+_PUBLIC_REACHABILITY_THREAD = None
+_DEVICE_STATUS_THREAD = None
 _RUNTIME_INITIALIZED = False
+
+# Local/container cadence for the maintenance jobs that AWS drives via EventBridge.
+# Lambda never starts these in-process pollers (start_pollers is False there), so AWS
+# behavior is unchanged; this only makes drone reachability/status work in local runs.
+PUBLIC_REACHABILITY_POLL_INTERVAL_SECONDS = int(os.getenv("PUBLIC_REACHABILITY_POLL_INTERVAL_SECONDS", "60"))
+DEVICE_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("DEVICE_STATUS_POLL_INTERVAL_SECONDS", "60"))
 
 
 def is_lambda_runtime() -> bool:
@@ -530,6 +538,52 @@ def start_notification_delivery_poller() -> None:
     _NOTIFICATION_DELIVERY_THREAD.start()
 
 
+def start_public_reachability_poller() -> None:
+    """Run the public-reachability TCP probe in-process (container/local runtime).
+
+    On AWS this job is driven by an EventBridge schedule; the container runtime has no
+    scheduler, so without this in-process loop Drones are never probed and always show as
+    Not Resolvable locally. Lambda does not call this (start_pollers is False there).
+    """
+    global _PUBLIC_REACHABILITY_THREAD
+    interval_seconds = max(0, int(os.getenv("PUBLIC_REACHABILITY_POLL_INTERVAL_SECONDS", str(PUBLIC_REACHABILITY_POLL_INTERVAL_SECONDS))))
+    if interval_seconds == 0 or (_PUBLIC_REACHABILITY_THREAD and _PUBLIC_REACHABILITY_THREAD.is_alive()):
+        return
+
+    def loop() -> None:
+        while True:
+            time.sleep(max(5, interval_seconds))
+            try:
+                poll_public_reachability_once()
+            except Exception as error:
+                logger.warning("Public reachability poll failed: %s", error)
+
+    _PUBLIC_REACHABILITY_THREAD = threading.Thread(target=loop, name="public-reachability-poller", daemon=True)
+    _PUBLIC_REACHABILITY_THREAD.start()
+
+
+def start_device_status_poller() -> None:
+    """Run offline/online status detection in-process (container/local runtime).
+
+    Same rationale as the reachability poller: AWS uses EventBridge, the container does not.
+    """
+    global _DEVICE_STATUS_THREAD
+    interval_seconds = max(0, int(os.getenv("DEVICE_STATUS_POLL_INTERVAL_SECONDS", str(DEVICE_STATUS_POLL_INTERVAL_SECONDS))))
+    if interval_seconds == 0 or (_DEVICE_STATUS_THREAD and _DEVICE_STATUS_THREAD.is_alive()):
+        return
+
+    def loop() -> None:
+        while True:
+            time.sleep(max(5, interval_seconds))
+            try:
+                poll_device_status_notifications_once()
+            except Exception as error:
+                logger.warning("Device status poll failed: %s", error)
+
+    _DEVICE_STATUS_THREAD = threading.Thread(target=loop, name="device-status-poller", daemon=True)
+    _DEVICE_STATUS_THREAD.start()
+
+
 def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Optional[bool] = None) -> None:
     """Initialize runtime services once for local, container, or Lambda execution."""
     global _RUNTIME_SECRET_REFRESHER, _RUNTIME_INITIALIZED
@@ -587,6 +641,10 @@ def initialize_runtime(*, start_pollers: Optional[bool] = None, prepare_tls: Opt
 
     if start_pollers:
         start_notification_delivery_poller()
+        # AWS runs these via EventBridge; the container has no scheduler, so drive them
+        # in-process or Drones never get reachability/status updates outside Lambda.
+        start_public_reachability_poller()
+        start_device_status_poller()
 
     _RUNTIME_INITIALIZED = True
 
