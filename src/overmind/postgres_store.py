@@ -3437,7 +3437,7 @@ class PostgresMetadataStore:
             LEFT JOIN user_profiles up ON up.user_id = u.id
             WHERE a.action LIKE 'sync%%'
               AND (
-                  %s IS NULL
+                  %s::text IS NULL
                   OR u.email ILIKE %s
                   OR up.username ILIKE %s
                   OR up.full_name ILIKE %s
