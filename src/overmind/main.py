@@ -1590,6 +1590,11 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
             token_hash=token_hash,
             device_name=device_data.device_name,
         )
+        # Re-resolve the device: set_device_authorization_token reconciles it to the
+        # authoritative Postgres drones.id, which can differ from the id captured above.
+        # Using the stale id makes the heartbeat child writes (drone_system_info) violate
+        # the drone_id foreign key and 500 the whole registration.
+        device = db.get_device_by_device_id(device_data.device_id) or device
         db.update_device_last_seen(
             device["id"],
             network=batocera_info.get("network") if isinstance(batocera_info.get("network"), dict) else None,
