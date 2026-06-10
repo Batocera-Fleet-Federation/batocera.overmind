@@ -86,16 +86,21 @@ def test_load_admin_overview_state_includes_notification_settings(monkeypatch):
 def test_mirror_device_details_preserves_reachability_without_probe_data():
     store = PostgresMetadataStore()
     cursor = _FakeCursor([])
-    # Snapshot device WITHOUT probe data (no checked_at): the mirror must pass NULLs
-    # for the probe-owned columns so the COALESCE preserves the existing DB row.
+    # Snapshot device WITHOUT probe data (no checked_at): the mirror passes NULL for the
+    # probe-owned columns. A fresh INSERT must default public_resolvable to false (the column
+    # is NOT NULL) while a conflicting UPDATE preserves the existing value via COALESCE on the
+    # re-passed bind param — so the mirror never resets reachability and never NULL-violates.
     store._mirror_device_details(cursor, {"id": "drone-1", "public_reachability": {}})
     insert_sql, params = cursor.executed[0]
     assert "drone_network_state" in insert_sql
-    assert "COALESCE(EXCLUDED.public_resolvable" in insert_sql
-    # params order: drone_id, api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at
-    assert params[4] is None  # public_resolvable
+    assert "COALESCE(%s::boolean, false)" in insert_sql  # INSERT default avoids NOT NULL violation
+    assert "COALESCE(%s::boolean, drone_network_state.public_resolvable)" in insert_sql  # UPDATE preserves
+    # params order: drone_id, api_port, scheme, reachable_url, public_resolvable, public_ip,
+    # checked_at, public_resolvable (re-passed for the ON CONFLICT clause)
+    assert params[4] is None  # public_resolvable (VALUES) -> COALESCE(NULL, false) = false on insert
     assert params[5] is None  # public_ip
     assert params[6] is None  # checked_at
+    assert params[7] is None  # public_resolvable (UPDATE) -> COALESCE(NULL, existing) preserves
 
 
 def test_mirror_device_details_writes_fresh_probe_data():

@@ -3893,16 +3893,17 @@ class PostgresMetadataStore:
         # COALESCE-preserve the existing row so a snapshot can never silently reset a
         # Drone to "Not Resolvable" (which previously re-fired drone_resolvable).
         has_probe_data = bool(reachability.get("checked_at"))
+        resolvable_param = bool(reachability.get("resolvable")) if has_probe_data else None
         cur.execute(
             """
             INSERT INTO drone_network_state
                 (drone_id, api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (%s, %s, %s, %s, COALESCE(%s::boolean, false), %s, %s, now())
             ON CONFLICT (drone_id) DO UPDATE SET
                 api_port = EXCLUDED.api_port,
                 scheme = EXCLUDED.scheme,
                 reachable_url = EXCLUDED.reachable_url,
-                public_resolvable = COALESCE(EXCLUDED.public_resolvable, drone_network_state.public_resolvable),
+                public_resolvable = COALESCE(%s::boolean, drone_network_state.public_resolvable),
                 public_ip = COALESCE(EXCLUDED.public_ip, drone_network_state.public_ip),
                 checked_at = COALESCE(EXCLUDED.checked_at, drone_network_state.checked_at),
                 updated_at = now()
@@ -3912,9 +3913,14 @@ class PostgresMetadataStore:
                 device.get("api_port"),
                 device.get("scheme") or "https",
                 device.get("reachable_url"),
-                bool(reachability.get("resolvable")) if has_probe_data else None,
+                # public_resolvable is NOT NULL: a fresh insert with no probe data defaults to
+                # false (COALESCE in VALUES); on conflict we preserve the existing value when no
+                # probe data (COALESCE against the bind param, passed again below) so the mirror
+                # never resets a Drone to Not Resolvable.
+                resolvable_param,
                 (reachability.get("public_ip") or network.get("public_ip") or network.get("public")) if has_probe_data else None,
                 self._dt(reachability.get("checked_at")) if has_probe_data else None,
+                resolvable_param,
             ),
         )
         cur.execute("DELETE FROM drone_network_addresses WHERE drone_id = %s", (device.get("id"),))
