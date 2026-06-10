@@ -260,6 +260,7 @@ class DroneHeartbeatRequest(StrictContractModel):
     rom_inventory_fingerprint_algorithm: Optional[str] = None
     romset_files_thumbprint: Optional[str] = None
     bios_files_thumbprint: Optional[str] = None
+    saves_files_thumbprint: Optional[str] = None
     rom_metadata: Optional[dict[str, Any]] = None
     rom_systems: list[dict[str, Any]] = Field(default_factory=list)
 

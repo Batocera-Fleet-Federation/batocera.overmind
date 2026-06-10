@@ -1299,11 +1299,21 @@ async def list_swarms(authorization: Optional[str] = Header(default=None)):
 
 
 @app.get("/api/notifications")
-async def list_notifications(limit: int = 50, authorization: Optional[str] = Header(default=None)):
+async def list_notifications(limit: int = 50, offset: int = 0, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
-    rows = db.get_user_notifications(user["id"], limit=limit)
-    unread = sum(1 for row in rows if not row.get("read"))
-    return {"notifications": rows, "unread_count": unread}
+    limit = max(1, min(int(limit or 50), 500))
+    offset = max(0, int(offset or 0))
+    rows = db.get_user_notifications(user["id"], limit=limit, offset=offset)
+    # Counts come from a dedicated COUNT query so the unread badge and page count stay
+    # accurate without fetching every notification (and its detail fields) each load.
+    counts = db.count_user_notifications(user["id"])
+    return {
+        "notifications": rows,
+        "unread_count": int(counts.get("unread") or 0),
+        "total_count": int(counts.get("total") or 0),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.post("/api/notifications/read")

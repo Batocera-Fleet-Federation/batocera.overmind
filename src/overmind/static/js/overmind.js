@@ -96,6 +96,8 @@
             let syncActionsOffset = 0;
             let syncActionsPageSize = 20;
             let notificationsRefreshTimer = null;
+            let notificationsPageOffset = 0;
+            const notificationsPageSize = 25;
             let inactivityTimer = null;
             let lastAuthRefreshAt = 0;
             let authRefreshInFlight = false;
@@ -437,7 +439,9 @@
                 if (notificationsInFlight) return;
                 notificationsInFlight = true;
                 try {
-                    const response = await apiGet('/api/notifications', { showLoader: options.showLoader !== false });
+                    // Dropdown shows only the latest few; the badge count is authoritative
+                    // (server returns total unread regardless of page size).
+                    const response = await apiGet('/api/notifications?limit=5', { showLoader: options.showLoader !== false });
                     if (!response.ok) throw new Error('Failed to load notifications');
                     renderNotifications(await response.json());
                 } catch (error) {
@@ -538,18 +542,37 @@
                 }
             }
 
-            async function loadNotificationsPage() {
+            async function loadNotificationsPage(offset = notificationsPageOffset) {
                 const container = document.getElementById('notifications-page-content');
                 if (!container || !authToken) return;
+                notificationsPageOffset = Math.max(0, Number(offset) || 0);
                 container.innerHTML = '<div class="empty-state">Loading notifications...</div>';
                 try {
-                    const response = await apiGet('/api/notifications?limit=250');
+                    // Page through the database with LIMIT/OFFSET instead of pulling every
+                    // notification, so the tab loads fast regardless of history size.
+                    const response = await apiGet(`/api/notifications?limit=${notificationsPageSize}&offset=${notificationsPageOffset}`);
                     if (!response.ok) throw new Error('Failed to load notifications');
-                    const rows = (await response.json()).notifications || [];
+                    const data = await response.json();
+                    const rows = data.notifications || [];
+                    const total = Number(data.total_count || 0);
                     if (!rows.length) {
+                        // An out-of-range page (e.g. after dismissals) snaps back to the first.
+                        if (notificationsPageOffset > 0) { return loadNotificationsPage(0); }
                         container.innerHTML = '<div class="empty-state">No notifications to show.</div>';
                         return;
                     }
+                    const pageStart = notificationsPageOffset + 1;
+                    const pageEnd = notificationsPageOffset + rows.length;
+                    const hasPrev = notificationsPageOffset > 0;
+                    const hasNext = pageEnd < total;
+                    const pager = `
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
+                            <div class="small text-muted">Showing ${pageStart}–${pageEnd} of ${total}</div>
+                            <div class="btn-group">
+                                <button class="btn btn-outline-secondary btn-sm" type="button" ${hasPrev ? '' : 'disabled'} onclick="loadNotificationsPage(${Math.max(0, notificationsPageOffset - notificationsPageSize)})"><i class="bi bi-chevron-left"></i> Previous</button>
+                                <button class="btn btn-outline-secondary btn-sm" type="button" ${hasNext ? '' : 'disabled'} onclick="loadNotificationsPage(${notificationsPageOffset + notificationsPageSize})">Next <i class="bi bi-chevron-right"></i></button>
+                            </div>
+                        </div>`;
                     container.innerHTML = `
                         <div class="table-responsive">
                             <table class="table table-sm align-middle notifications-table">
@@ -586,6 +609,7 @@
                                 </tbody>
                             </table>
                         </div>
+                        ${pager}
                     `;
                 } catch (error) {
                     console.error('Error loading notifications page:', error);

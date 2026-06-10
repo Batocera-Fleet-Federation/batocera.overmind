@@ -296,6 +296,30 @@ def test_auth_refresh_requires_and_returns_valid_token(client):
     assert refreshed.json()["user"]["email"] == "refresh@example.com"
 
 
+def test_notifications_endpoint_pages_with_limit_offset_and_counts(client):
+    client.post("/api/auth/register", json={"email": "paged@example.com", "username": "paged-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "paged@example.com", "username": "paged-at-example.com", "password": "testpass123"}).json()["access_token"]
+    user = db.get_user_by_email("paged@example.com")
+    swarm_id = db.default_swarm_id(user["id"])
+    for i in range(7):
+        db.add_swarm_notification(swarm_id, "sync_triggered", f"Event {i}", f"message {i}", {})
+
+    page1 = client.get("/api/notifications?limit=3&offset=0", headers={"Authorization": f"Bearer {token}"}).json()
+    assert len(page1["notifications"]) == 3
+    assert page1["total_count"] == 7
+    assert page1["unread_count"] == 7  # accurate total, not limited to the page
+    assert page1["limit"] == 3 and page1["offset"] == 0
+
+    page2 = client.get("/api/notifications?limit=3&offset=3", headers={"Authorization": f"Bearer {token}"}).json()
+    assert len(page2["notifications"]) == 3
+    page3 = client.get("/api/notifications?limit=3&offset=6", headers={"Authorization": f"Bearer {token}"}).json()
+    assert len(page3["notifications"]) == 1  # last page
+
+    # Pages are disjoint and newest-first ordering is stable across pages.
+    ids = [r["id"] for r in page1["notifications"] + page2["notifications"] + page3["notifications"]]
+    assert len(set(ids)) == 7
+
+
 def test_notifications_capture_master_list_add_and_read(client):
     client.post("/api/auth/register", json={"email": "notify@example.com", "username": "notify-at-example.com", "password": "testpass123"})
     token = client.post("/api/auth/login", json={"email": "notify@example.com", "username": "notify-at-example.com", "password": "testpass123"}).json()["access_token"]
@@ -3340,6 +3364,33 @@ def test_heartbeat_does_not_queue_purge_when_rom_inventory_fingerprint_differs(c
     assert all(action["action"] != "purge_asset_cache" for action in actions)
     # The Drone-reported fingerprint is still recorded for display.
     assert db.get_device_by_device_id("drone-a")["drone_rom_inventory_fingerprint"] == "different"
+
+
+def test_heartbeat_accepts_saves_files_thumbprint_and_updates_last_seen(client):
+    # Regression: the Drone sends saves_files_thumbprint in its heartbeat. The request
+    # model is strict (extra="forbid"), so a missing field made every heartbeat 422 ->
+    # last_seen never updated -> the Drone showed permanently offline despite heartbeats.
+    client.post("/api/auth/register", json={"email": "hb-saves@example.com", "username": "hb-saves-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("hb-saves@example.com")
+    db.create_device(user["id"], "drone-hb", "Drone HB", {"ip_address": "10.0.0.2"}, raw_token="drone-token-hb")
+    stale_device = db.get_device_by_device_id("drone-hb")
+    stale_device["last_seen"] = datetime.utcnow() - timedelta(hours=1)
+
+    response = client.post(
+        "/api/devices/drone-hb/heartbeat",
+        headers={"Authorization": "Bearer drone-token-hb"},
+        json={
+            "device_id": "drone-hb",
+            "device_name": "Drone HB",
+            "romset_files_thumbprint": "r1",
+            "bios_files_thumbprint": "b1",
+            "saves_files_thumbprint": "s1",
+        },
+    )
+    assert response.status_code == 200, response.text
+    # last_seen refreshed -> device reads online (not the stale 1h-old timestamp).
+    refreshed = db.get_device_by_device_id("drone-hb")
+    assert (datetime.utcnow() - refreshed["last_seen"]).total_seconds() < 60
 
 
 def test_heartbeat_echoes_stored_asset_thumbprints(client):

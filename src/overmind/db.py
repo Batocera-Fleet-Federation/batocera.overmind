@@ -425,11 +425,8 @@ class OvermindDatabase:
                     notification["delivery_completed_at"] = claimed[notification_id]
         return claimed_ids
 
-    def get_user_notifications(self, user_id: str, limit: int = 50) -> List[dict]:
-        if postgres_store.available():
-            relational = postgres_store.list_user_notifications(user_id, limit=limit)
-            if relational is not None:
-                return relational
+    def _user_notification_rows(self, user_id: str) -> List[dict]:
+        """In-memory (non-Postgres) fallback: all non-dismissed rows, newest first."""
         swarm_ids = {row["id"] for row in self.get_user_swarms(user_id)}
         rows = []
         for swarm_id in swarm_ids:
@@ -447,7 +444,25 @@ class OvermindDatabase:
                     "read": bool(read_by.get(user_id)),
                 })
         rows.sort(key=lambda row: row.get("created_at") or datetime.min, reverse=True)
-        return rows[: max(1, int(limit))]
+        return rows
+
+    def get_user_notifications(self, user_id: str, limit: int = 50, offset: int = 0) -> List[dict]:
+        offset = max(0, int(offset or 0))
+        limit = max(1, int(limit or 50))
+        if postgres_store.available():
+            relational = postgres_store.list_user_notifications(user_id, limit=limit, offset=offset)
+            if relational is not None:
+                return relational
+        rows = self._user_notification_rows(user_id)
+        return rows[offset:offset + limit]
+
+    def count_user_notifications(self, user_id: str) -> dict:
+        if postgres_store.available():
+            counts = postgres_store.count_user_notifications(user_id)
+            if counts is not None:
+                return counts
+        rows = self._user_notification_rows(user_id)
+        return {"total": len(rows), "unread": sum(1 for row in rows if not row.get("read"))}
 
     def mark_notifications_read(self, user_id: str, notification_ids: Optional[list] = None) -> int:
         if postgres_store.available():

@@ -2293,11 +2293,37 @@ class PostgresMetadataStore:
                 row = cur.fetchone()
                 return int(row[0] or 0) if row else 0
 
-    def list_user_notifications(self, user_id: str, limit: int = 50) -> Optional[list[dict]]:
+    def count_user_notifications(self, user_id: str) -> Optional[dict]:
+        """Return {"total", "unread"} for a user's non-dismissed notifications.
+
+        A single COUNT lets the UI page through notifications and show an accurate
+        unread badge / page count without ever fetching every row + detail field.
+        """
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT count(*) AS total,
+                           count(*) FILTER (WHERE r.read_at IS NULL) AS unread
+                    FROM notifications n
+                    JOIN swarm_memberships m ON m.swarm_id = n.swarm_id AND m.user_id = %s
+                    LEFT JOIN notification_recipients r ON r.notification_id = n.id AND r.user_id = %s
+                    WHERE r.dismissed_at IS NULL
+                    """,
+                    (user_id, user_id),
+                )
+                row = cur.fetchone()
+        return {"total": int(row[0] or 0), "unread": int(row[1] or 0)} if row else {"total": 0, "unread": 0}
+
+    def list_user_notifications(self, user_id: str, limit: int = 50, offset: int = 0) -> Optional[list[dict]]:
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
         row_limit = max(1, min(int(limit or 50), 500))
+        row_offset = max(0, int(offset or 0))
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2311,9 +2337,9 @@ class PostgresMetadataStore:
                     LEFT JOIN notification_recipients r ON r.notification_id = n.id AND r.user_id = %s
                     WHERE r.dismissed_at IS NULL
                     ORDER BY n.created_at DESC, n.id DESC
-                    LIMIT %s
+                    LIMIT %s OFFSET %s
                     """,
-                    (user_id, user_id, row_limit),
+                    (user_id, user_id, row_limit, row_offset),
                 )
                 rows = cur.fetchall()
                 ids = [row[0] for row in rows]
