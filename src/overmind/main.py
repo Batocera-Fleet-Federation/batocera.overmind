@@ -863,90 +863,11 @@ def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = No
     return eligible
 
 
-def _normalized_rom_path_variants(value: object, system_name: object = "") -> set[str]:
-    raw = str(value or "").replace("\\", "/").strip().lstrip("./")
-    if not raw:
-        return set()
-    lowered = raw.lower().lstrip("/")
-    system = str(system_name or "").strip().lower().strip("/")
-    variants = {lowered}
-    userdata_prefix = "/userdata/roms/"
-    if lowered.startswith(userdata_prefix.lstrip("/")):
-        variants.add(lowered[len(userdata_prefix.lstrip("/")) :])
-    if lowered.startswith(userdata_prefix):
-        variants.add(lowered[len(userdata_prefix) :])
-    if system:
-        for candidate in list(variants):
-            if candidate.startswith(f"{system}/"):
-                variants.add(candidate[len(system) + 1 :])
-            else:
-                variants.add(f"{system}/{candidate}")
-    for candidate in list(variants):
-        parts = [part for part in candidate.split("/") if part]
-        if parts:
-            variants.add(parts[-1])
-    return {item for item in variants if item}
-
-
-def _rom_artwork_matches(system_name: str, rom_path: str, artwork_row: dict) -> bool:
-    row_system = str(artwork_row.get("system_name") or artwork_row.get("system") or "").strip().lower()
-    if row_system and row_system != str(system_name or "").strip().lower():
-        return False
-    requested = _normalized_rom_path_variants(rom_path, system_name)
-    available = _normalized_rom_path_variants(
-        artwork_row.get("rom_path") or artwork_row.get("file_path") or artwork_row.get("relative_path") or artwork_row.get("rom_name"),
-        system_name,
-    )
-    return bool(requested & available)
-
-
-def queue_associated_artwork_syncs(user: dict, device: dict, system_name: str, rom_path: str, rom_name: Optional[str] = None) -> list[dict]:
-    """Queue artwork downloads that correspond to a ROM sync."""
-    actions: list[dict] = []
-    artwork_rows = db.get_master_artwork_for_device(device["user_id"], device["device_id"]) or []
-    for row in artwork_rows:
-        if row.get("present_on_selected"):
-            continue
-        artwork_type = str(row.get("artwork_type") or "").strip()
-        row_path = str(row.get("rom_path") or row.get("file_path") or row.get("relative_path") or row.get("rom_name") or rom_path).strip()
-        target_rom_path = str(rom_path or row_path).replace("\\", "/").strip()
-        if target_rom_path.startswith("/userdata/roms/"):
-            prefix = f"/userdata/roms/{str(system_name or '').strip()}/"
-            if target_rom_path.lower().startswith(prefix.lower()):
-                target_rom_path = target_rom_path[len(prefix):]
-        target_rom_path = target_rom_path.lstrip("./")
-        if not artwork_type or not target_rom_path or not _rom_artwork_matches(system_name, rom_path, row):
-            continue
-        source_devices = resolvable_asset_sources(row.get("devices") if isinstance(row.get("devices"), list) else [], device.get("device_id"))
-        if not source_devices:
-            continue
-        action = db.create_device_action(device["user_id"], device["device_id"], "sync_artwork", {
-            "asset_type": "artwork",
-            "system_name": system_name,
-            "system": system_name,
-            "rom_name": rom_name or row.get("rom_name") or target_rom_path,
-            "rom_path": target_rom_path,
-            "file_path": target_rom_path,
-            "artwork_type": artwork_type,
-            "devices": source_devices,
-            "triggered_by": "sync_rom",
-        })
-        if not action:
-            continue
-        actions.append(action)
-        db.add_rom_sync_activity(device["device_id"], {
-            "sync_id": action["id"],
-            "asset_type": "artwork",
-            "target_drone_id": device["device_id"],
-            "system": system_name,
-            "rom_name": rom_name or row.get("rom_name") or target_rom_path,
-            "rom_path": target_rom_path,
-            "relative_path": target_rom_path,
-            "artwork_type": artwork_type,
-            "action": "download",
-            "status": "pending",
-        })
-    return actions
+# NOTE: ROM sync intentionally does NOT pull associated artwork. The previous
+# "queue_associated_artwork_syncs" machinery (which queued sync_artwork actions tagged
+# triggered_by="sync_rom") has been removed so that triggering a ROM sync transfers only
+# the ROM. Artwork is synced solely through the explicit artwork-sync endpoints
+# (/api/devices/{id}/sync-artwork and /sync-artwork-bulk).
 
 
 # ==================== Authentication ====================
