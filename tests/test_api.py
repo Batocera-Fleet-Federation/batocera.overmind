@@ -3218,6 +3218,40 @@ def test_asset_metadata_upload_stores_and_lists_game_saves(client):
     assert heartbeat.json()["saves_files_thumbprint"] == "saves-thumb-1"
 
 
+def test_device_saves_endpoint_pages_and_searches(client):
+    client.post("/api/auth/register", json={"email": "saves-page@example.com", "username": "saves-page-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("saves-page@example.com")
+    db.create_device(user["id"], "drone-sp", "Drone SP", {"ip_address": "10.0.0.2"}, raw_token="drone-token-sp")
+    token = client.post("/api/auth/login", json={"email": "saves-page@example.com", "username": "saves-page-at-example.com", "password": "testpass123"}).json()["access_token"]
+
+    saves = [
+        {"system": "snes", "save_name": f"Game {i}.srm", "file_path": f"snes/Game {i}.srm", "fingerprint": f"fp-{i}", "file_size": 1000 + i, "modified_time": 1717000000 + i}
+        for i in range(7)
+    ]
+    saves.append({"system": "gba", "save_name": "Metroid.sav", "file_path": "gba/Metroid.sav", "fingerprint": "fp-mf", "file_size": 4096, "modified_time": 1717009999})
+    upload = client.post(
+        "/api/devices/drone-sp/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-sp"},
+        json={"device_id": "drone-sp", "type": "asset_metadata", "update_mode": "inventory", "replace_all": True, "saves": saves},
+    )
+    assert upload.status_code == 200, upload.text
+
+    auth = {"Authorization": f"Bearer {token}"}
+    # Paging: page 1 of 3 with per_page=3, total=8.
+    p1 = client.get("/api/devices/drone-sp/saves?page=1&per_page=3", headers=auth).json()
+    assert p1["total"] == 8 and p1["page"] == 1 and p1["per_page"] == 3
+    assert len(p1["saves"]) == 3
+    p3 = client.get("/api/devices/drone-sp/saves?page=3&per_page=3", headers=auth).json()
+    assert len(p3["saves"]) == 2  # last page
+    ids = [r["file_path"] for r in (p1["saves"] + client.get("/api/devices/drone-sp/saves?page=2&per_page=3", headers=auth).json()["saves"] + p3["saves"])]
+    assert len(set(ids)) == 8  # disjoint pages
+
+    # Search narrows results (across system/name/path).
+    search = client.get("/api/devices/drone-sp/saves?q=metroid", headers=auth).json()
+    assert search["total"] == 1
+    assert search["saves"][0]["file_path"] == "gba/Metroid.sav"
+
+
 def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_last_chunk(client):
     client.post("/api/auth/register", json={"email": "refresh@example.com", "username": "refresh-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("refresh@example.com")

@@ -2319,13 +2319,39 @@ async def get_device_bios(device_id: str, authorization: Optional[str] = Header(
 
 
 @app.get("/api/devices/{device_id}/saves")
-async def get_device_saves(device_id: str, authorization: Optional[str] = Header(default=None)):
-    """List the game-save files a Drone has reported, for the Saves tab."""
+async def get_device_saves(
+    device_id: str,
+    q: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 100,
+    authorization: Optional[str] = Header(default=None),
+):
+    """List the game-save files a Drone has reported, for the Saves tab.
+
+    Paginated + searchable, mirroring the master-ROM table contract
+    ({rows, total, page, per_page}) so the UI can use the same paging pattern.
+    """
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    return {"saves": db.get_device_saves(device_id)}
+    saves = db.get_device_saves(device_id)
+    term = str(q or "").strip().lower()
+    if term:
+        def _haystack(row: dict) -> str:
+            return " ".join(str(row.get(key) or "") for key in (
+                "system_name", "system", "save_name", "name", "file_path", "relative_path",
+            )).lower()
+        saves = [row for row in saves if term in _haystack(row)]
+    saves.sort(key=lambda row: (
+        str(row.get("system_name") or row.get("system") or "").lower(),
+        str(row.get("file_path") or row.get("relative_path") or row.get("save_name") or "").lower(),
+    ))
+    total = len(saves)
+    per_page = max(1, min(int(per_page or 100), 500))
+    page = max(1, int(page or 1))
+    start = (page - 1) * per_page
+    return {"saves": saves[start:start + per_page], "total": total, "page": page, "per_page": per_page}
 
 
 @app.get("/api/devices/{device_id}/master-bios")

@@ -69,6 +69,10 @@
             let masterRomPage = 1;
             let swarmMasterPage = 1;
             let selectedMasterRomKey = null;
+            let savesSearchQuery = '';
+            let savesPage = 1;
+            let selectedSaveKey = null;
+            const SAVES_PAGE_SIZE = 100;
             let biosSearchQuery = '';
             let biosStatusFilter = '';
             let masterBiosPage = 1;
@@ -2143,6 +2147,9 @@
                 systemPageState = {};
                 deviceRomSearchQuery = '';
                 selectedMasterRomKey = null;
+                savesSearchQuery = '';
+                savesPage = 1;
+                selectedSaveKey = null;
                 displayDevices();
                 updateSelectedDeviceSummary();
                 updateSelectedDeviceWorkspace();
@@ -3905,7 +3912,9 @@
 
             function startSelectedDeviceDataAutoRefresh(viewName) {
                 stopSelectedDeviceDataAutoRefresh();
-                if (!selectedDeviceId || !['gamelogs', 'configs', 'saves'].includes(viewName)) return;
+                // Saves are near-static and paged/searchable, so they are NOT auto-refreshed
+                // (a periodic reload previously wiped the table mid-view). Use the Refresh button.
+                if (!selectedDeviceId || !['gamelogs', 'configs'].includes(viewName)) return;
                 selectedDeviceDataRefreshTimer = setInterval(() => {
                     if (!selectedDeviceId || currentTab !== 'devices') {
                         stopSelectedDeviceDataAutoRefresh();
@@ -3913,7 +3922,6 @@
                     }
                     if (currentDeviceView === 'gamelogs') loadGameLogs();
                     if (currentDeviceView === 'configs') loadDeviceConfigs();
-                    if (currentDeviceView === 'saves') loadDeviceSavesPanel();
                 }, 30000);
             }
 
@@ -3975,57 +3983,143 @@
                 return ['bios', 'saves', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
             }
 
+            function saveRowKey(row) {
+                return `${row.system_name || row.system || ''}:${row.file_path || row.relative_path || row.save_name || ''}`.toLowerCase();
+            }
+
             async function loadDeviceSavesPanel() {
                 const container = document.getElementById('saves-list');
                 if (!selectedDeviceId || !container) return;
                 try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/saves`);
+                    const params = new URLSearchParams();
+                    const q = (savesSearchQuery || '').trim();
+                    if (q) params.set('q', q);
+                    params.set('page', String(savesPage));
+                    params.set('per_page', String(SAVES_PAGE_SIZE));
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/saves?${params.toString()}`);
                     if (!response.ok) throw new Error('Failed to load saves');
-                    const saves = (await response.json()).saves || [];
-                    container.innerHTML = renderDeviceSavesTable(saves);
+                    const payload = await response.json();
+                    container.innerHTML = renderDeviceSavesTable(payload);
                 } catch (error) {
+                    console.error('Error loading saves:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load game saves.</div>';
                 }
             }
 
-            function renderDeviceSavesTable(saves) {
-                const rows = (Array.isArray(saves) ? saves : []).slice().sort((a, b) => {
-                    const ak = `${a.system_name || ''}/${a.file_path || ''}`;
-                    const bk = `${b.system_name || ''}/${b.file_path || ''}`;
-                    return ak.localeCompare(bk);
-                });
-                const header = `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-                        <strong><i class="bi bi-floppy me-1"></i>Game Saves</strong>
-                        <span class="small text-muted">${rows.length} save${rows.length === 1 ? '' : 's'}</span>
-                    </div>
-                    <div class="small text-muted mb-2">Saves sync across drones (newest-modified wins). This view updates automatically every 30 seconds.</div>`;
-                if (!rows.length) {
-                    return `${header}<div class="empty-state">No game saves reported yet.</div>`;
+            function setSavesPage(page) {
+                savesPage = Math.max(1, page);
+                loadDeviceSavesPanel();
+            }
+
+            function submitSavesSearch() {
+                const input = document.getElementById('device-saves-search');
+                savesSearchQuery = (input ? input.value : '').trim();
+                savesPage = 1;
+                selectedSaveKey = null;
+                loadDeviceSavesPanel();
+            }
+
+            function handleSavesSearchKeydown(event) {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    submitSavesSearch();
                 }
-                const body = rows.map(row => {
+            }
+
+            function toggleSaveDetail(rowId) {
+                const detail = document.getElementById(rowId);
+                if (!detail) return;
+                const isOpen = detail.style.display !== 'none';
+                const trigger = document.querySelector(`[data-save-detail-target="${rowId}"]`);
+                const key = trigger ? trigger.getAttribute('data-save-key') : '';
+                document.querySelectorAll('.save-detail-row').forEach(row => { row.style.display = 'none'; });
+                document.querySelectorAll('.save-row.is-expanded').forEach(row => row.classList.remove('is-expanded'));
+                if (isOpen) {
+                    selectedSaveKey = null;
+                } else {
+                    detail.style.display = 'table-row';
+                    if (trigger) trigger.classList.add('is-expanded');
+                    selectedSaveKey = key || null;
+                }
+            }
+
+            function renderDeviceSavesTable(payload) {
+                const rows = (payload && Array.isArray(payload.saves)) ? payload.saves : [];
+                const total = Number(payload && payload.total != null ? payload.total : rows.length);
+                const page = Number(payload && payload.page ? payload.page : savesPage);
+                const perPage = Number(payload && payload.per_page ? payload.per_page : SAVES_PAGE_SIZE);
+                const pageCount = Math.max(1, Math.ceil(total / perPage));
+                savesPage = page;
+                const q = (savesSearchQuery || '').trim();
+
+                const renderPageButton = (n) => `<button class="btn btn-sm ${n === page ? 'btn-primary' : 'btn-outline-secondary'}" onclick="setSavesPage(${n})">${n}</button>`;
+                const pageButtons = [];
+                if (pageCount <= 7) {
+                    for (let i = 1; i <= pageCount; i += 1) pageButtons.push(renderPageButton(i));
+                } else {
+                    const start = Math.max(1, page - 2);
+                    const end = Math.min(pageCount, page + 2);
+                    if (start > 1) pageButtons.push(renderPageButton(1));
+                    if (start > 2) pageButtons.push('<span class="px-2">&hellip;</span>');
+                    for (let i = start; i <= end; i += 1) pageButtons.push(renderPageButton(i));
+                    if (end < pageCount - 1) pageButtons.push('<span class="px-2">&hellip;</span>');
+                    if (end < pageCount) pageButtons.push(renderPageButton(pageCount));
+                }
+
+                const body = rows.map((row, rowIndex) => {
                     const system = row.system_name || row.system || '';
                     const name = row.save_name || row.name || (row.file_path || '').split('/').pop() || 'save';
+                    const sizeFmt = (typeof formatBytes === 'function') ? formatBytes(row.file_size) : `${row.file_size || 0}`;
                     const modified = row.modified_time ? new Date(Number(row.modified_time) * 1000).toLocaleString() : '—';
-                    const size = formatBytes ? formatBytes(row.file_size) : `${row.file_size || 0}`;
                     const fp = row.fingerprint || row.saves_fingerprint || '';
-                    return `<tr>
-                        <td>${system ? `<span class="badge text-bg-secondary">${escapeHtml(system)}</span>` : '<span class="text-muted">—</span>'}</td>
-                        <td>${escapeHtml(name)}</td>
-                        <td class="small mono text-muted">${escapeHtml(row.file_path || '')}</td>
-                        <td class="small text-nowrap">${escapeHtml(String(size))}</td>
-                        <td class="small text-nowrap">${escapeHtml(modified)}</td>
-                        <td class="small mono text-muted">${escapeHtml(fp.slice(0, 12))}</td>
-                    </tr>`;
+                    const key = saveRowKey(row);
+                    const detailId = `save-detail-${page}-${rowIndex}`;
+                    const expanded = key && key === selectedSaveKey;
+                    return `
+                        <tr class="save-row ${expanded ? 'is-expanded' : ''}" data-save-detail-target="${detailId}" data-save-key="${escapeHtml(key)}" role="button" onclick="toggleSaveDetail('${detailId}')">
+                            <td>${system ? `<span class="badge text-bg-secondary">${escapeHtml(system)}</span>` : '<span class="text-muted">—</span>'}</td>
+                            <td>${escapeHtml(name)}</td>
+                            <td class="small text-nowrap">${escapeHtml(String(sizeFmt))}</td>
+                        </tr>
+                        <tr id="${detailId}" class="save-detail-row" style="display:${expanded ? 'table-row' : 'none'};"><td colspan="3">
+                            <div class="row g-2 small">
+                                <div class="col-md-8"><span class="text-muted">Path:</span> <span class="mono">${escapeHtml(row.file_path || row.relative_path || '')}</span></div>
+                                <div class="col-md-4"><span class="text-muted">Modified:</span> ${escapeHtml(modified)}</div>
+                                <div class="col-md-8"><span class="text-muted">Fingerprint:</span> <span class="mono">${escapeHtml(fp || '—')}</span></div>
+                                <div class="col-md-4"><span class="text-muted">Size:</span> ${escapeHtml(String(sizeFmt))}</div>
+                            </div>
+                        </td></tr>`;
                 }).join('');
-                return `${header}
-                    <div class="table-responsive">
-                        <table class="table table-sm align-middle">
-                            <thead><tr>
-                                <th>System</th><th>Save</th><th>Path</th><th>Size</th><th>Modified</th><th>Fingerprint</th>
-                            </tr></thead>
-                            <tbody>${body}</tbody>
-                        </table>
-                    </div>`;
+
+                return `
+                    <div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                            <div class="d-flex gap-2 align-items-center">
+                                <strong><i class="bi bi-floppy me-1"></i>Game Saves</strong>
+                                <div class="small text-muted">${total} save${total === 1 ? '' : 's'}</div>
+                            </div>
+                            <button class="btn btn-outline-secondary btn-sm" onclick="loadDeviceSavesPanel()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                        </div>
+                        <div class="input-group input-group-sm mb-2" style="max-width:420px">
+                            <input id="device-saves-search" class="form-control" type="search" placeholder="Search saves (system, name, path)" value="${escapeHtml(q)}" onkeydown="handleSavesSearchKeydown(event)">
+                            <button class="btn btn-primary" type="button" onclick="submitSavesSearch()">Search</button>
+                        </div>
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                            <div class="small text-muted">Page ${page} of ${pageCount} · ${perPage} per page</div>
+                            <div class="btn-group" role="group" aria-label="Saves pagination">
+                                <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setSavesPage(${Math.max(1, page - 1)})">Previous</button>
+                                ${pageButtons.join('')}
+                                <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setSavesPage(${Math.min(pageCount, page + 1)})">Next</button>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle">
+                                <thead><tr><th>System</th><th>Save</th><th>Size</th></tr></thead>
+                                <tbody>${body}</tbody>
+                            </table>
+                        </div>
+                        ${total ? '' : (q ? '<div class="small text-muted">No saves match this search.</div>' : '<div class="empty-state">No game saves reported yet.</div>')}
+                    </div></div>`;
             }
 
             function parseRoute() {
