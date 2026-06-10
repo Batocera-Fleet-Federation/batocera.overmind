@@ -32,6 +32,10 @@ def _compute_asset_keys(asset_type: str, payload: dict, system_name: Optional[st
         path = str(payload.get("file_path") or payload.get("relative_path") or payload.get("bios_name") or "").strip().lower()
         mk = f"fingerprint:{fingerprint}" if fingerprint else f"path:{path}"
         return mk, path
+    if asset_type == "saves":
+        sys = str(system_name or "").strip().lower()
+        path = str(payload.get("file_path") or payload.get("relative_path") or payload.get("save_name") or "").strip().lower()
+        return f"saves:{sys}:{path}", f"{sys}:{path}"
     return None, None
 
 
@@ -362,9 +366,10 @@ class PostgresMetadataStore:
         *,
         romset_thumbprint: Optional[str] = None,
         bios_thumbprint: Optional[str] = None,
+        saves_thumbprint: Optional[str] = None,
     ) -> bool:
         """Persist the Drone-supplied asset thumbprints verbatim (no recompute)."""
-        if not internal_id or (romset_thumbprint is None and bios_thumbprint is None):
+        if not internal_id or (romset_thumbprint is None and bios_thumbprint is None and saves_thumbprint is None):
             return False
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
@@ -376,11 +381,16 @@ class PostgresMetadataStore:
                     UPDATE drones
                     SET romset_files_thumbprint = COALESCE(%s::text, romset_files_thumbprint),
                         bios_files_thumbprint = COALESCE(%s::text, bios_files_thumbprint),
+                        saves_files_thumbprint = COALESCE(%s::text, saves_files_thumbprint),
                         romset_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN romset_files_thumbprint_at ELSE now() END,
-                        bios_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN bios_files_thumbprint_at ELSE now() END
+                        bios_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN bios_files_thumbprint_at ELSE now() END,
+                        saves_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN saves_files_thumbprint_at ELSE now() END
                     WHERE id = %s
                     """,
-                    (romset_thumbprint, bios_thumbprint, romset_thumbprint, bios_thumbprint, internal_id),
+                    (
+                        romset_thumbprint, bios_thumbprint, saves_thumbprint,
+                        romset_thumbprint, bios_thumbprint, saves_thumbprint, internal_id,
+                    ),
                 )
                 return cur.rowcount > 0
 
@@ -876,12 +886,19 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     SELECT u.id, u.email, u.password_hash, u.email_verified, u.is_active, u.auth_provider,
-                           p.username, p.full_name, p.avatar_data_url, u.created_at
+                           p.username, p.full_name, p.avatar_data_url, u.created_at,
+                           ns.notify_slack, ns.notify_discord, ns.notify_email,
+                           ns.slack_webhook, ns.discord_webhook, ns.email_address
                     FROM users u
                     LEFT JOIN user_profiles p ON p.user_id = u.id
+                    LEFT JOIN user_notification_settings ns ON ns.user_id = u.id
                     """
                 )
-                for user_id, email, password_hash, email_verified, is_active, auth_provider, username, full_name, avatar_data_url, created_at in cur.fetchall():
+                for (
+                    user_id, email, password_hash, email_verified, is_active, auth_provider,
+                    username, full_name, avatar_data_url, created_at,
+                    notify_slack, notify_discord, notify_email, slack_webhook, discord_webhook, email_address,
+                ) in cur.fetchall():
                     if not user_id or not email:
                         continue
                     state["users"][user_id] = {
@@ -895,9 +912,31 @@ class PostgresMetadataStore:
                         "full_name": full_name,
                         "avatar_data_url": avatar_data_url,
                         "created_at": created_at,
+                        # Notification settings must be present here: the digest delivery job
+                        # hydrates recipients from this overview state and should_notify_user()
+                        # treats a missing notification_settings as "all channels off".
+                        "notification_settings": {
+                            "notify_slack": bool(notify_slack),
+                            "notify_discord": bool(notify_discord),
+                            "notify_email": True if notify_email is None else bool(notify_email),
+                            "slack_webhook": slack_webhook or "",
+                            "discord_webhook": discord_webhook or "",
+                            "email_address": email_address or email,
+                            "types": {},
+                        },
                     }
                     state["user_by_email"][email] = user_id
                     state["user_devices"].setdefault(user_id, [])
+
+                if state["users"]:
+                    cur.execute(
+                        "SELECT user_id, event_type, enabled FROM user_notification_type_settings WHERE user_id = ANY(%s)",
+                        (list(state["users"]),),
+                    )
+                    for user_id, event_type, enabled in cur.fetchall():
+                        user = state["users"].get(user_id)
+                        if user:
+                            user["notification_settings"].setdefault("types", {})[event_type] = bool(enabled)
 
                 cur.execute("SELECT id, owner_user_id, name, is_public, created_at FROM swarms")
                 for swarm_id, owner_id, name, is_public, created_at in cur.fetchall():
@@ -921,13 +960,17 @@ class PostgresMetadataStore:
                     """
                     SELECT d.id, d.device_id, d.device_name, d.user_id, d.swarm_id,
                            d.approval_status, d.swarm_connected, d.registered_at, d.last_seen,
-                           n.reachable_url
+                           n.reachable_url, n.public_resolvable, n.public_ip, n.api_port, n.scheme, n.checked_at
                     FROM drones d
                     LEFT JOIN drone_network_state n ON n.drone_id = d.id
                     WHERE d.removed_at IS NULL
                     """
                 )
-                for internal_id, device_id, device_name, user_id, swarm_id, approval_status, swarm_connected, registered_at, last_seen, reachable_url in cur.fetchall():
+                for (
+                    internal_id, device_id, device_name, user_id, swarm_id, approval_status,
+                    swarm_connected, registered_at, last_seen, reachable_url,
+                    public_resolvable, public_ip, api_port, scheme, checked_at,
+                ) in cur.fetchall():
                     device = {
                         "id": internal_id,
                         "device_id": device_id,
@@ -939,6 +982,16 @@ class PostgresMetadataStore:
                         "registered_at": registered_at,
                         "last_seen": last_seen,
                         "reachable_url": reachable_url,
+                        # Carry probe-owned reachability so a full-state mirror round-trip
+                        # (_mirror_device_details) cannot silently reset public_resolvable.
+                        "api_port": api_port,
+                        "scheme": scheme,
+                        "public_reachability": {
+                            "resolvable": bool(public_resolvable),
+                            "public_ip": public_ip,
+                            "api_port": api_port,
+                            "checked_at": checked_at,
+                        },
                     }
                     state["devices"][internal_id] = device
                     state["user_devices"].setdefault(user_id, []).append(internal_id)
@@ -988,12 +1041,17 @@ class PostgresMetadataStore:
         message: str,
         details: Optional[dict] = None,
         delivery_pending: bool = True,
+        notification_id: Optional[str] = None,
+        created_at: Optional[datetime] = None,
     ) -> Optional[str]:
         """Insert a single swarm notification straight into Postgres (lean path).
 
         Used by stateless scheduled jobs (e.g. the reachability probe) that must not
         round-trip the whole in-memory app state. Defaults to delivery_pending so the
         digest job picks it up; the in-app notification is visible immediately.
+
+        A caller may supply ``notification_id`` so the row stays idempotent with a
+        later full-state mirror that carries the same in-memory entry id.
         """
         if not self.url or not swarm_id:
             return None
@@ -1001,16 +1059,17 @@ class PostgresMetadataStore:
         conn = self._connect()
         if conn is None:
             return None
-        notification_id = str(uuid.uuid4())
+        notification_id = str(notification_id or uuid.uuid4())
         details = details if isinstance(details, dict) else {}
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO notifications (id, swarm_id, event_type, title, message, created_at, delivery_pending)
-                    VALUES (%s, %s, %s, %s, %s, now(), %s)
+                    VALUES (%s, %s, %s, %s, %s, COALESCE(%s, now()), %s)
+                    ON CONFLICT (id) DO NOTHING
                     """,
-                    (notification_id, swarm_id, event_type, title or "", message or "", bool(delivery_pending)),
+                    (notification_id, swarm_id, event_type, title or "", message or "", self._dt(created_at), bool(delivery_pending)),
                 )
                 for key, value in details.items():
                     cur.execute(
@@ -1077,6 +1136,20 @@ class PostgresMetadataStore:
                         except (TypeError, ValueError, json.JSONDecodeError):
                             value = field_value
                         entry["details"][str(field_name)] = value
+                    # Per-recipient read state so the digest can skip notifications a
+                    # user has already read in-app (aggregation "unread" filter).
+                    cur.execute(
+                        """
+                        SELECT notification_id, user_id, read_at
+                        FROM notification_recipients
+                        WHERE notification_id = ANY(%s) AND read_at IS NOT NULL
+                        """,
+                        (list(by_id),),
+                    )
+                    for notification_id, user_id, read_at in cur.fetchall():
+                        entry = by_id.get(notification_id)
+                        if entry and user_id:
+                            entry.setdefault("read_by", {})[user_id] = read_at
                 return result
 
     def _load_relational_state(self, cur) -> dict:
@@ -3787,6 +3860,13 @@ class PostgresMetadataStore:
     def _mirror_device_details(self, cur, device: dict) -> None:
         network = device.get("network") if isinstance(device.get("network"), dict) else {}
         reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
+        # The public-reachability probe (update_device_reachability) is the single
+        # authoritative writer of public_resolvable/public_ip/checked_at. A full-state
+        # mirror is often driven by a partial snapshot that carries no probe data, so
+        # only write those columns when probe data is actually present; otherwise
+        # COALESCE-preserve the existing row so a snapshot can never silently reset a
+        # Drone to "Not Resolvable" (which previously re-fired drone_resolvable).
+        has_probe_data = bool(reachability.get("checked_at"))
         cur.execute(
             """
             INSERT INTO drone_network_state
@@ -3796,9 +3876,9 @@ class PostgresMetadataStore:
                 api_port = EXCLUDED.api_port,
                 scheme = EXCLUDED.scheme,
                 reachable_url = EXCLUDED.reachable_url,
-                public_resolvable = EXCLUDED.public_resolvable,
-                public_ip = EXCLUDED.public_ip,
-                checked_at = EXCLUDED.checked_at,
+                public_resolvable = COALESCE(EXCLUDED.public_resolvable, drone_network_state.public_resolvable),
+                public_ip = COALESCE(EXCLUDED.public_ip, drone_network_state.public_ip),
+                checked_at = COALESCE(EXCLUDED.checked_at, drone_network_state.checked_at),
                 updated_at = now()
             """,
             (
@@ -3806,9 +3886,9 @@ class PostgresMetadataStore:
                 device.get("api_port"),
                 device.get("scheme") or "https",
                 device.get("reachable_url"),
-                bool(reachability.get("resolvable")),
-                reachability.get("public_ip") or network.get("public_ip") or network.get("public"),
-                self._dt(reachability.get("checked_at")),
+                bool(reachability.get("resolvable")) if has_probe_data else None,
+                (reachability.get("public_ip") or network.get("public_ip") or network.get("public")) if has_probe_data else None,
+                self._dt(reachability.get("checked_at")) if has_probe_data else None,
             ),
         )
         cur.execute("DELETE FROM drone_network_addresses WHERE drone_id = %s", (device.get("id"),))
@@ -4468,7 +4548,7 @@ class PostgresMetadataStore:
                         "DELETE FROM overmind_device_assets WHERE device_internal_id = %s",
                         (device_internal_id,),
                     )
-                    for kind in ("rom", "bios", "artwork"):
+                    for kind in ("rom", "bios", "artwork", "saves"):
                         self._clear_domain_assets(cur, device_internal_id, kind)
 
     def begin_device_asset_inventory(self, device_internal_id: str, inventory_id: str) -> None:
@@ -4626,6 +4706,15 @@ class PostgresMetadataStore:
                         "DELETE FROM drone_bios WHERE drone_id = %s AND normalized_path = ANY(%s)",
                         (device_internal_id, [_domain_path(row, "bios") for row in source_rows]),
                     )
+                elif asset_type == "saves":
+                    cur.execute(
+                        "DELETE FROM overmind_device_assets WHERE device_internal_id = %s AND asset_type = %s AND item_key = ANY(%s)",
+                        (device_internal_id, asset_type, keys),
+                    )
+                    cur.execute(
+                        "DELETE FROM drone_saves WHERE drone_id = %s AND normalized_path = ANY(%s)",
+                        (device_internal_id, [_domain_path(row, "saves") for row in source_rows]),
+                    )
                 else:
                     asset_systems = [
                         str(row.get("system_name") or row.get("system") or "").strip().lower()
@@ -4776,7 +4865,7 @@ class PostgresMetadataStore:
         return int(row[0]) if row else None
 
     def _clear_domain_assets(self, cur, device_internal_id: str, asset_type: str, replace_system: Optional[str] = None) -> None:
-        table = {"rom": "drone_roms", "bios": "drone_bios", "artwork": "drone_artwork"}.get(asset_type)
+        table = {"rom": "drone_roms", "bios": "drone_bios", "artwork": "drone_artwork", "saves": "drone_saves"}.get(asset_type)
         if not table:
             return
         if replace_system and asset_type in {"rom", "artwork"}:
@@ -4849,6 +4938,40 @@ class PostgresMetadataStore:
                         row.get("bios_name") or row.get("name"),
                         row.get("bios_md5") or row.get("md5"),
                         row.get("file_size") or row.get("byte_count"),
+                        self._dt(row.get("last_seen") or row.get("added_at")),
+                    ),
+                )
+        elif asset_type == "saves":
+            for row in rows:
+                system_name = str(row.get("system_name") or row.get("system") or "").strip()
+                path = _domain_path(row, "saves")
+                if not path:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO drone_saves
+                        (drone_id, system_id, system_name, file_path, normalized_path, save_name,
+                         fingerprint, file_size, modified_time, last_seen)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    ON CONFLICT (drone_id, system_name, normalized_path) DO UPDATE SET
+                        system_id = EXCLUDED.system_id,
+                        file_path = EXCLUDED.file_path,
+                        save_name = EXCLUDED.save_name,
+                        fingerprint = EXCLUDED.fingerprint,
+                        file_size = EXCLUDED.file_size,
+                        modified_time = EXCLUDED.modified_time,
+                        last_seen = EXCLUDED.last_seen
+                    """,
+                    (
+                        device_internal_id,
+                        self._ensure_system(cur, system_name) if system_name else None,
+                        system_name,
+                        row.get("file_path") or row.get("relative_path") or row.get("save_name"),
+                        path,
+                        row.get("save_name") or row.get("name"),
+                        row.get("fingerprint") or row.get("saves_fingerprint"),
+                        row.get("file_size") or row.get("byte_count"),
+                        row.get("modified_time") or row.get("mtime"),
                         self._dt(row.get("last_seen") or row.get("added_at")),
                     ),
                 )
@@ -5425,6 +5548,10 @@ def _asset_key(asset_type: str, row: dict) -> str:
         types = row.get("artwork_types") if isinstance(row.get("artwork_types"), list) else []
         type_key = ",".join(sorted(str(value).strip().lower() for value in types if str(value).strip()))
         return f"{system}:{path}:{type_key}" if system and path and type_key else ""
+    if asset_type == "saves":
+        system = str(row.get("system_name") or row.get("system") or "").strip().lower()
+        path = str(row.get("file_path") or row.get("relative_path") or row.get("save_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+        return f"{system}:{path}" if path else ""
     return ""
 
 
@@ -5433,6 +5560,8 @@ def _domain_path(row: dict, asset_type: str) -> str:
         value = row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_file") or row.get("rom_name")
     elif asset_type == "bios":
         value = row.get("file_path") or row.get("relative_path") or row.get("path") or row.get("bios_name") or row.get("name")
+    elif asset_type == "saves":
+        value = row.get("file_path") or row.get("relative_path") or row.get("save_name")
     else:
         value = row.get("rom_path") or row.get("file_path") or row.get("rom_name")
     return str(value or "").replace("\\", "/").strip().lstrip("./").lower()

@@ -311,10 +311,25 @@ class DroneArtworkAsset(ExtensibleContractModel):
     artwork_types: list[str] = Field(default_factory=list)
 
 
+class DroneSaveAsset(ExtensibleContractModel):
+    system: Optional[str] = None
+    system_name: Optional[str] = None
+    save_name: Optional[str] = None
+    name: Optional[str] = None
+    file_path: Optional[str] = None
+    relative_path: Optional[str] = None
+    fingerprint: Optional[str] = None
+    saves_fingerprint: Optional[str] = None
+    file_size: Optional[int] = None
+    byte_count: Optional[int] = None
+    modified_time: Optional[int] = None
+
+
 class DroneAssetDeleteSet(StrictContractModel):
     roms: list[DroneRomAsset] = Field(default_factory=list)
     bios: list[DroneBiosAsset] = Field(default_factory=list)
     artwork: list[DroneArtworkAsset] = Field(default_factory=list)
+    saves: list[DroneSaveAsset] = Field(default_factory=list)
 
 
 class DroneAssetMetadataUpload(StrictContractModel):
@@ -331,13 +346,16 @@ class DroneAssetMetadataUpload(StrictContractModel):
     rom_inventory_fingerprint_algorithm: Optional[str] = None
     romset_files_thumbprint: Optional[str] = None
     bios_files_thumbprint: Optional[str] = None
+    saves_files_thumbprint: Optional[str] = None
     collected_at: Optional[str] = None
     roms_root: Optional[str] = None
     bios_root: Optional[str] = None
+    saves_root: Optional[str] = None
     systems: list[DroneAssetSystem] = Field(default_factory=list)
     roms: list[DroneRomAsset] = Field(default_factory=list)
     bios: list[DroneBiosAsset] = Field(default_factory=list)
     artwork: list[DroneArtworkAsset] = Field(default_factory=list)
+    saves: list[DroneSaveAsset] = Field(default_factory=list)
     gamelists: list[dict[str, Any]] = Field(default_factory=list)
     deleted: Optional[DroneAssetDeleteSet] = None
     cache: dict[str, Any] = Field(default_factory=dict)

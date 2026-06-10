@@ -2102,6 +2102,7 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
         # resync only when they differ.
         "romset_files_thumbprint": str((updated or {}).get("romset_files_thumbprint") or "") or None,
         "bios_files_thumbprint": str((updated or {}).get("bios_files_thumbprint") or "") or None,
+        "saves_files_thumbprint": str((updated or {}).get("saves_files_thumbprint") or "") or None,
     }
 
 
@@ -2118,10 +2119,11 @@ async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataU
     roms = metadata.get("roms") if isinstance(metadata.get("roms"), list) else []
     bios = metadata.get("bios") if isinstance(metadata.get("bios"), list) else []
     artwork = metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else []
+    saves = metadata.get("saves") if isinstance(metadata.get("saves"), list) else []
     db.store_rom_metadata(device_id, metadata)
     db.update_device_last_seen(device["id"])
-    print(f"Asset metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)} artwork_count={len(artwork)}")
-    return {"rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork)}
+    print(f"Asset metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)} artwork_count={len(artwork)} saves_count={len(saves)}")
+    return {"rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork), "saves_count": len(saves)}
 
 
 @app.post("/api/drones/rom-metadata")
@@ -2383,6 +2385,16 @@ async def get_device_bios(device_id: str, authorization: Optional[str] = Header(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"bios": db.get_device_bios(device_id)}
+
+
+@app.get("/api/devices/{device_id}/saves")
+async def get_device_saves(device_id: str, authorization: Optional[str] = Header(default=None)):
+    """List the game-save files a Drone has reported, for the Saves tab."""
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"saves": db.get_device_saves(device_id)}
 
 
 @app.get("/api/devices/{device_id}/master-bios")

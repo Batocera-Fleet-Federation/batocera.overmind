@@ -460,11 +460,15 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
     assert webhooks[0]["url"] == "https://discord.com/api/webhooks/1/secret"
     assert "BIOS sync triggered" in webhooks[0]["payload"]["embeds"][0]["description"]
 
+    sent.clear()
+    webhooks.clear()
     client.patch(
         "/api/profile",
         headers={"Authorization": f"Bearer {token}"},
-        json={"notification_settings": {"notify_email": True, "types": {"drone_status": True}}},
+        json={"notification_settings": {"notify_email": True, "notify_discord": False, "types": {"drone_status": True}}},
     )
+    # drone_online/offline are no longer delivered in real time; they aggregate into
+    # the per-channel digest like every other event.
     db.add_swarm_notification(
         swarm_id,
         "drone_online",
@@ -472,16 +476,10 @@ def test_notification_delivery_uses_enabled_channels_and_selected_event_types(cl
         "Mail Drone is online.",
         {"device": {"device_id": "mail-drone", "device_name": "Mail Drone"}, "status": "online"},
     )
+    assert sent == []
+    db_module.notification_delivery.deliver_pending_notifications(db)
     assert len(sent) == 1
-    assert "Drone online" in sent[0]["subject"]
-    db.add_swarm_notification(
-        swarm_id,
-        "drone_online",
-        "Drone online",
-        "Mail Drone is online.",
-        {"device": {"device_id": "mail-drone", "device_name": "Mail Drone"}, "status": "online"},
-    )
-    assert len(sent) == 1
+    assert "Drone online" in sent[0]["html"]
 
 
 def test_notification_delivery_batches_multiple_asset_updates_in_one_email(client, monkeypatch):
@@ -507,6 +505,61 @@ def test_notification_delivery_batches_multiple_asset_updates_in_one_email(clien
     assert sent == []
     db_module.notification_delivery.deliver_pending_notifications(db)
     assert sent == ["Batocera Overmind: 2 swarm updates"]
+
+
+def test_notification_delivery_only_aggregates_recent_window(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        db_module.notification_delivery.emailer,
+        "send_email",
+        lambda to_email, subject, html_body, text_body, from_email=None: sent.append(html_body) or True,
+    )
+    client.post("/api/auth/register", json={"email": "window@example.com", "username": "window-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "window@example.com", "username": "window-at-example.com", "password": "testpass123"}).json()["access_token"]
+    user = db.get_user_by_email("window@example.com")
+    swarm_id = db.default_swarm_id(user["id"])
+    client.patch(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"notification_settings": {"notify_email": True, "types": {"master_rom": True}}},
+    )
+
+    recent = db.add_swarm_notification(swarm_id, "master_rom_added", "Recent ROM", "Recent.zip", {"asset": {"path": "Recent.zip"}})
+    stale = db.add_swarm_notification(swarm_id, "master_rom_added", "Stale ROM", "Stale.zip", {"asset": {"path": "Stale.zip"}})
+    # Age the stale notification beyond the 3-minute aggregation window.
+    stale["created_at"] = datetime.utcnow() - timedelta(minutes=10)
+
+    db_module.notification_delivery.deliver_pending_notifications(db)
+    assert len(sent) == 1
+    assert "Recent.zip" in sent[0]
+    assert "Stale.zip" not in sent[0]
+    # The stale notification is retired (not re-summarized on the next run).
+    assert stale.get("delivery_pending") is False
+    assert recent.get("delivery_pending") is False
+
+
+def test_notification_delivery_skips_already_read_notifications(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        db_module.notification_delivery.emailer,
+        "send_email",
+        lambda to_email, subject, html_body, text_body, from_email=None: sent.append(html_body) or True,
+    )
+    client.post("/api/auth/register", json={"email": "readskip@example.com", "username": "readskip-at-example.com", "password": "testpass123"})
+    token = client.post("/api/auth/login", json={"email": "readskip@example.com", "username": "readskip-at-example.com", "password": "testpass123"}).json()["access_token"]
+    user = db.get_user_by_email("readskip@example.com")
+    swarm_id = db.default_swarm_id(user["id"])
+    client.patch(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"notification_settings": {"notify_email": True, "types": {"master_rom": True}}},
+    )
+
+    note = db.add_swarm_notification(swarm_id, "master_rom_added", "Read ROM", "Read.zip", {"asset": {"path": "Read.zip"}})
+    note["read_by"] = {user["id"]: datetime.utcnow()}
+
+    db_module.notification_delivery.deliver_pending_notifications(db)
+    assert sent == []
 
 
 def test_notification_delivery_claims_pending_rows_before_sending(client, monkeypatch):
@@ -3094,11 +3147,51 @@ def test_asset_metadata_upload_accepts_drone_sync_payload_fields(client):
     )
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"rom_count": 1, "bios_count": 1, "artwork_count": 1}
+    assert response.json() == {"rom_count": 1, "bios_count": 1, "artwork_count": 1, "saves_count": 0}
     stored = db.get_device_by_device_id("drone-a")["rom_metadata"]
     assert stored["collected_at"] == "2026-05-30T23:43:00+00:00"
     assert stored["bios_root"] == "/userdata/bios"
     assert stored["cache"] == {"schema_version": 3}
+
+
+def test_asset_metadata_upload_stores_and_lists_game_saves(client):
+    client.post("/api/auth/register", json={"email": "saves@example.com", "username": "saves-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("saves@example.com")
+    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
+    login = client.post("/api/auth/login", json={"email": "saves@example.com", "username": "saves-at-example.com", "password": "testpass123"})
+    user_token = login.json()["access_token"]
+
+    upload = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory",
+            "replace_all": True,
+            "saves_files_thumbprint": "saves-thumb-1",
+            "saves": [
+                {"system": "snes", "save_name": "Chrono Trigger.srm", "file_path": "snes/Chrono Trigger.srm", "fingerprint": "fp-ct", "file_size": 8192, "modified_time": 1717000000},
+                {"system": "gba", "save_name": "Metroid.sav", "file_path": "gba/Metroid.sav", "fingerprint": "fp-mf", "file_size": 4096, "modified_time": 1717000100},
+            ],
+        },
+    )
+    assert upload.status_code == 200, upload.text
+    assert upload.json()["saves_count"] == 2
+
+    listing = client.get("/api/devices/drone-a/saves", headers={"Authorization": f"Bearer {user_token}"})
+    assert listing.status_code == 200
+    saves = listing.json()["saves"]
+    assert {row["file_path"] for row in saves} == {"snes/Chrono Trigger.srm", "gba/Metroid.sav"}
+    assert {row["fingerprint"] for row in saves} == {"fp-ct", "fp-mf"}
+
+    # The Drone-supplied saves thumbprint is stored verbatim and echoed in the heartbeat.
+    heartbeat = client.post(
+        "/api/devices/drone-a/heartbeat",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={"device_name": "Drone A"},
+    )
+    assert heartbeat.json()["saves_files_thumbprint"] == "saves-thumb-1"
 
 
 def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_last_chunk(client):
@@ -4688,7 +4781,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         },
     )
     assert heartbeat_response.status_code == 200
-    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint"}
+    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint", "saves_files_thumbprint"}
     assert "device" not in heartbeat_response.json()
     swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["drone_id"] == "arcade-cabinet-001")
     assert swarm_peer["reachable_url"] == "https://bff-drone-a:443"
@@ -4787,7 +4880,7 @@ def test_heartbeat_survives_noncritical_state_update_failure(client, monkeypatch
         json={"device_name": "Resilient Drone"},
     )
     assert response.status_code == 200
-    assert set(response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint"}
+    assert set(response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint", "saves_files_thumbprint"}
 
 
 def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):

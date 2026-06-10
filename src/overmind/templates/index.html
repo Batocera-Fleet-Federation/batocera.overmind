@@ -340,6 +340,9 @@
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="bios" onclick="switchDeviceView('bios', this)">
                                                 <i class="bi bi-cpu me-1"></i>Bios
                                             </button>
+                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="saves" onclick="switchDeviceView('saves', this)">
+                                                <i class="bi bi-floppy me-1"></i>Saves
+                                            </button>
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="metadata" onclick="switchDeviceView('metadata', this)">
                                                 <i class="bi bi-info-circle me-1"></i>Metadata
                                             </button>
@@ -382,6 +385,7 @@
                                     <div id="swarm-rom-availability-panel" class="mb-3"></div>
                                 </div>
                                 <div id="device-bios-panel" class="device-subpanel" style="display:none;"></div>
+                                <div id="device-saves-panel" class="device-subpanel" style="display:none;"><div id="saves-list"></div></div>
                                 <div id="device-artwork-panel" class="device-subpanel" style="display:none;"></div>
                                 <div id="device-metadata-panel" class="device-subpanel" style="display:none;"></div>
                                 <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">

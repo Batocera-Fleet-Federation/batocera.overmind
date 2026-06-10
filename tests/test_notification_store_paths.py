@@ -1,0 +1,115 @@
+"""Unit tests for Postgres-only notification/reachability code paths.
+
+These cover two regressions fixed together:
+- #4: load_admin_overview_state must include per-user notification_settings, or the
+  digest delivery job filters every recipient out and no channel messages send.
+- #10: the full-state mirror must not silently reset a Drone's public_resolvable
+  when the snapshot carries no fresh probe data, which previously re-fired the
+  "Drone became resolvable" notification on a loop.
+"""
+
+import sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from overmind.postgres_store import PostgresMetadataStore
+
+
+class _FakeCursor:
+    """Minimal cursor that returns canned rows keyed by SQL content."""
+
+    def __init__(self, responses):
+        self._responses = responses
+        self._last = None
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        self._last = sql
+
+    def fetchall(self):
+        for needle, rows in self._responses:
+            if needle in self._last:
+                return rows
+        return []
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self._cursor
+
+
+def test_load_admin_overview_state_includes_notification_settings(monkeypatch):
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([
+        # users join user_notification_settings: NULL settings -> defaults
+        (
+            "FROM users u",
+            [(
+                "user-1", "owner@example.com", "hash", True, True, "password",
+                "owner", "Owner", None, datetime.utcnow(),
+                None, None, None, None, None, None,
+            )],
+        ),
+        ("user_notification_type_settings", [("user-1", "drone_reachability", True)]),
+        ("FROM swarms", []),
+        ("FROM swarm_memberships", []),
+        ("FROM drones d", []),
+    ])
+    monkeypatch.setattr(store, "_core_connection", lambda ensure_schema=False: _FakeConn(cursor))
+
+    state = store.load_admin_overview_state()
+    user = state["users"]["user-1"]
+    settings = user["notification_settings"]
+    assert settings["notify_email"] is True  # default when NULL
+    assert settings["notify_slack"] is False
+    assert settings["types"]["drone_reachability"] is True
+
+
+def test_mirror_device_details_preserves_reachability_without_probe_data():
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    # Snapshot device WITHOUT probe data (no checked_at): the mirror must pass NULLs
+    # for the probe-owned columns so the COALESCE preserves the existing DB row.
+    store._mirror_device_details(cursor, {"id": "drone-1", "public_reachability": {}})
+    insert_sql, params = cursor.executed[0]
+    assert "drone_network_state" in insert_sql
+    assert "COALESCE(EXCLUDED.public_resolvable" in insert_sql
+    # params order: drone_id, api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at
+    assert params[4] is None  # public_resolvable
+    assert params[5] is None  # public_ip
+    assert params[6] is None  # checked_at
+
+
+def test_mirror_device_details_writes_fresh_probe_data():
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    checked_at = datetime.utcnow()
+    store._mirror_device_details(
+        cursor,
+        {
+            "id": "drone-1",
+            "public_reachability": {"resolvable": True, "public_ip": "8.8.8.8", "checked_at": checked_at},
+        },
+    )
+    _, params = cursor.executed[0]
+    assert params[4] is True       # public_resolvable
+    assert params[5] == "8.8.8.8"  # public_ip
+    assert params[6] is not None   # checked_at preserved

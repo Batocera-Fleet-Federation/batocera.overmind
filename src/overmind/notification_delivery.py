@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from typing import Any, Optional
 
@@ -50,7 +51,21 @@ EVENT_TYPE_TO_SETTING = {
 }
 
 DEFAULT_NOTIFICATION_TYPES = {setting: True for setting in NOTIFICATION_TYPE_GROUPS}
-REALTIME_EVENT_TYPES = {"drone_online", "drone_offline"}
+
+# All outbound channel delivery is now aggregated into per-channel digests (see
+# deliver_pending_notifications). No event type is delivered in real time, so that
+# bursts of drone_online/drone_offline flapping collapse into one summary instead
+# of one email/message per flip. In-app notifications are still recorded instantly.
+REALTIME_EVENT_TYPES: set[str] = set()
+
+
+def _aggregation_window() -> timedelta:
+    """Rolling window of notifications to aggregate into a single channel digest."""
+    try:
+        minutes = float(os.getenv("NOTIFICATION_AGGREGATION_WINDOW_MINUTES", "3"))
+    except (TypeError, ValueError):
+        minutes = 3.0
+    return timedelta(minutes=max(0.0, minutes))
 
 _TEMPLATE_BY_EVENT_TYPE = {
     "master_rom_added": "notification_master_asset_added.html",
@@ -136,12 +151,21 @@ def deliver_pending_notifications(data_store: Any, *, email_client: Any = emaile
         logger.info("Notification digest delivery: no pending notifications")
         return 0
 
+    # Aggregate only events from the recent rolling window. Older pending events are
+    # still retired below (claimed) so the queue cannot grow without bound, but they
+    # are not summarized again; with a delivery cadence at or below the window every
+    # event gets multiple chances to be sent before it ages out.
+    window = _aggregation_window()
+    window_cutoff = datetime.utcnow() - window if window else None
+
     sent_count = 0
     for user_id, user in list(data_store.users.items()):
         items = [
             (notification, swarm)
             for notification, swarm in pending
             if user_id in data_store.swarm_memberships.get(notification.get("swarm_id"), {})
+            and _within_window(notification, window_cutoff)
+            and _unread_by(notification, user_id)
         ]
         if not items:
             continue
@@ -179,6 +203,29 @@ def deliver_pending_notifications(data_store: Any, *, email_client: Any = emaile
         persist()
     logger.info("Notification digest delivery: pending=%d digests_sent=%d", len(pending), sent_count)
     return sent_count
+
+
+def _within_window(notification: dict, cutoff: Optional[datetime]) -> bool:
+    """True when the notification was created at/after the aggregation cutoff."""
+    if cutoff is None:
+        return True
+    created_at = notification.get("created_at")
+    if not isinstance(created_at, datetime):
+        # Unknown/unspecified timestamps are treated as recent so they are not dropped.
+        return True
+    if created_at.tzinfo is not None and cutoff.tzinfo is None:
+        created_at = created_at.replace(tzinfo=None)
+    elif created_at.tzinfo is None and cutoff.tzinfo is not None:
+        created_at = created_at.replace(tzinfo=cutoff.tzinfo)
+    return created_at >= cutoff
+
+
+def _unread_by(notification: dict, user_id: str) -> bool:
+    """True when the given user has not yet read the notification."""
+    read_by = notification.get("read_by")
+    if not isinstance(read_by, dict):
+        return True
+    return user_id not in read_by
 
 
 def should_notify_user(user: dict, event_type: str, channel: str) -> bool:

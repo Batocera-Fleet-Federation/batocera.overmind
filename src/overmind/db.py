@@ -2,6 +2,7 @@
 
 import os
 import hashlib
+import logging
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -25,6 +26,8 @@ try:
     from overmind import cache as _cache
 except Exception:
     _cache = None  # type: ignore[assignment]
+
+logger = logging.getLogger("overmind.db")
 
 ROM_INVENTORY_FINGERPRINT_ALGORITHM = "rom-inventory-sha256-v1"
 
@@ -197,6 +200,7 @@ class OvermindDatabase:
         self.roms: Dict[str, list] = {}  # device_id -> list of roms
         self.bios: Dict[str, list] = {}  # device_id -> list of bios files
         self.artwork: Dict[str, list] = {}  # device_id -> gamelist artwork availability rows
+        self.saves: Dict[str, list] = {}  # device_id -> list of game save files
         self._asset_inventory_staging: Dict[str, dict] = {}
         self.gamelogs: Dict[str, list] = {}  # device_id -> list of game plays
         self.log_sources: Dict[str, dict] = {}  # internal device_id -> persistent Drone logs
@@ -343,6 +347,23 @@ class OvermindDatabase:
         if event_type in notification_delivery.REALTIME_EVENT_TYPES:
             notification_delivery.deliver_notification(self, entry)
             entry["delivery_completed_at"] = datetime.utcnow()
+        elif entry.get("delivery_pending") and postgres_store.available():
+            # Persist immediately on the lean path so stateless scheduled jobs (e.g.
+            # the device-status poller) queue the notification for the digest without
+            # round-tripping full app state. Idempotent by id with any later mirror.
+            try:
+                postgres_store.insert_swarm_notification(
+                    swarm_id,
+                    event_type,
+                    title,
+                    message,
+                    entry["details"],
+                    delivery_pending=True,
+                    notification_id=entry["id"],
+                    created_at=entry["created_at"],
+                )
+            except Exception as error:
+                logger.warning("Failed to persist swarm notification %s: %s", event_type, error)
         return entry
 
     def _recent_drone_status_notification_exists(self, swarm_id: str, event_type: str, details: Optional[dict]) -> bool:
@@ -523,7 +544,7 @@ class OvermindDatabase:
     def _asset_rows_for_device_internal(self, internal_id: str, asset_type: str, system_name: Optional[str] = None) -> List[dict]:
         if self._asset_store_enabled():
             return postgres_store.list_device_assets(internal_id, asset_type, system_name=system_name)
-        bucket = {"rom": self.roms, "bios": self.bios, "artwork": self.artwork}.get(asset_type, {})
+        bucket = {"rom": self.roms, "bios": self.bios, "artwork": self.artwork, "saves": self.saves}.get(asset_type, {})
         rows = list(bucket.get(internal_id, []))
         if system_name and asset_type == "rom":
             rows = [row for row in rows if str(row.get("system_name") or "").lower() == system_name.lower()]
@@ -533,7 +554,7 @@ class OvermindDatabase:
         if self._asset_store_enabled():
             return postgres_store.list_assets_for_devices([device.get("id") for device in devices], asset_type)
         rows = []
-        bucket = {"rom": self.roms, "bios": self.bios, "artwork": self.artwork}.get(asset_type, {})
+        bucket = {"rom": self.roms, "bios": self.bios, "artwork": self.artwork, "saves": self.saves}.get(asset_type, {})
         for device in devices:
             for row in bucket.get(device.get("id"), []):
                 rows.append({**row, "_device_internal_id": device.get("id")})
@@ -545,6 +566,7 @@ class OvermindDatabase:
         self.roms[internal_id] = []
         self.bios[internal_id] = []
         self.artwork[internal_id] = []
+        self.saves[internal_id] = []
 
     def clear_device_asset_metadata(self, user_id: str, device_id: str) -> bool:
         device = self.get_device_by_device_id(device_id)
@@ -639,6 +661,15 @@ class OvermindDatabase:
                     str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
                 ) not in keys
             ]
+        elif asset_type == "saves":
+            keys = {self._saves_key(row) for row in rows if isinstance(row, dict)}
+            self.saves[internal_id] = [row for row in self.saves.get(internal_id, []) if self._saves_key(row) not in keys]
+
+    def _saves_key(self, row: dict) -> tuple:
+        return (
+            str(row.get("system_name") or row.get("system") or "").strip().lower(),
+            str(row.get("file_path") or row.get("relative_path") or row.get("save_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
+        )
 
     def _notify_master_list_changes(self, swarm_id: Optional[str], before: Dict[str, Dict[tuple, dict]], after: Dict[str, Dict[tuple, dict]]) -> None:
         if not swarm_id:
@@ -1887,6 +1918,7 @@ class OvermindDatabase:
         *,
         romset_thumbprint: Optional[str] = None,
         bios_thumbprint: Optional[str] = None,
+        saves_thumbprint: Optional[str] = None,
     ) -> Optional[dict]:
         """Store the Drone-supplied asset thumbprints verbatim.
 
@@ -1894,7 +1926,7 @@ class OvermindDatabase:
         exactly what the Drone sent and echoes it back in the heartbeat response, so the
         two sides can never disagree about the same asset set (the failure mode of the
         legacy recomputed rom_inventory_fingerprint, which produced an endless
-        purge -> full-refresh loop).
+        purge -> full-refresh loop). Game saves follow the same contract.
         """
         device = self.get_device_by_device_id(device_id)
         if not device:
@@ -1906,11 +1938,15 @@ class OvermindDatabase:
         if bios_thumbprint is not None:
             device["bios_files_thumbprint"] = bios_thumbprint
             device["bios_files_thumbprint_at"] = updated_at
+        if saves_thumbprint is not None:
+            device["saves_files_thumbprint"] = saves_thumbprint
+            device["saves_files_thumbprint_at"] = updated_at
         if postgres_store.available():
             postgres_store.update_device_asset_thumbprints(
                 device["id"],
                 romset_thumbprint=romset_thumbprint,
                 bios_thumbprint=bios_thumbprint,
+                saves_thumbprint=saves_thumbprint,
             )
         return device
 
@@ -2494,16 +2530,20 @@ class OvermindDatabase:
                 self._delete_asset_rows(device_id, "rom", row_metadata.get("roms") or [])
                 self._delete_asset_rows(device_id, "bios", row_metadata.get("bios") or [])
                 self._delete_asset_rows(device_id, "artwork", row_metadata.get("artwork") or [])
+                self._delete_asset_rows(device_id, "saves", row_metadata.get("saves") or [])
             for system_name, rows in grouped.items():
                 self.add_roms(device_id, system_name, rows, replace=False)
             if row_metadata.get("bios"):
                 self.add_bios(device_id, row_metadata["bios"], replace=False)
             if row_metadata.get("artwork"):
                 self.add_artwork(device_id, row_metadata["artwork"], replace=False)
+            if row_metadata.get("saves"):
+                self.add_saves(device_id, row_metadata["saves"], replace=False)
             deleted = row_metadata.get("deleted") if is_inventory_delta and isinstance(row_metadata.get("deleted"), dict) else {}
             self._delete_asset_rows(device_id, "rom", deleted.get("roms") or [])
             self._delete_asset_rows(device_id, "bios", deleted.get("bios") or [])
             self._delete_asset_rows(device_id, "artwork", deleted.get("artwork") or [])
+            self._delete_asset_rows(device_id, "saves", deleted.get("saves") or [])
         drone_fingerprint = str(row_metadata.get("rom_inventory_fingerprint") or "").strip() or None
         delta_complete = False
         if is_inventory_delta:
@@ -2538,13 +2578,14 @@ class OvermindDatabase:
         # has fully landed, so the next heartbeat echoes the value the Drone itself sent.
         if should_compute_fingerprint:
             romset_thumbprint = str(row_metadata.get("romset_files_thumbprint") or drone_fingerprint or "").strip() or None
-            bios_thumbprint = str(row_metadata.get("bios_files_thumbprint") or "").strip()
-            bios_thumbprint = bios_thumbprint or None
-            if romset_thumbprint is not None or bios_thumbprint is not None:
+            bios_thumbprint = str(row_metadata.get("bios_files_thumbprint") or "").strip() or None
+            saves_thumbprint = str(row_metadata.get("saves_files_thumbprint") or "").strip() or None
+            if romset_thumbprint is not None or bios_thumbprint is not None or saves_thumbprint is not None:
                 self.update_device_asset_thumbprints(
                     device_id,
                     romset_thumbprint=romset_thumbprint,
                     bios_thumbprint=bios_thumbprint,
+                    saves_thumbprint=saves_thumbprint,
                 )
         after = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
@@ -2949,6 +2990,58 @@ class OvermindDatabase:
         if not internal_device:
             return []
         return self._asset_rows_for_device_internal(internal_device["id"], "bios")
+
+    def _clean_saves_rows(self, device_id: str, saves: list) -> list:
+        cleaned = []
+        for item in saves:
+            if not isinstance(item, dict):
+                continue
+            system_name = str(item.get("system") or item.get("system_name") or "").strip()
+            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("save_name") or "").replace("\\", "/").strip().lstrip("./")
+            if not file_path:
+                continue
+            cleaned.append({
+                "id": str(uuid.uuid4()),
+                "device_id": device_id,
+                "system_name": system_name,
+                "save_name": item.get("save_name") or item.get("name") or file_path.rsplit("/", 1)[-1],
+                "file_path": file_path,
+                "relative_path": file_path,
+                "fingerprint": item.get("fingerprint") or item.get("saves_fingerprint") or item.get("hash"),
+                "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
+                "modified_time": item.get("modified_time") or item.get("mtime"),
+                "added_at": datetime.utcnow(),
+                "last_seen": datetime.utcnow(),
+            })
+        return cleaned
+
+    def add_saves(self, device_id: str, saves: list, *, replace: bool = True) -> List[str]:
+        """Add/replace game-save rows for a device. Returns list of save row IDs."""
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        internal_id = internal_device["id"]
+        cleaned = self._clean_saves_rows(device_id, saves)
+        if self._asset_store_enabled():
+            return postgres_store.upsert_device_assets(internal_id, device_id, "saves", cleaned, replace=replace)
+        if replace or internal_id not in self.saves:
+            self.saves[internal_id] = []
+        elif cleaned:
+            incoming_keys = {self._saves_key(entry) for entry in cleaned}
+            self.saves[internal_id] = [
+                row for row in self.saves[internal_id] if self._saves_key(row) not in incoming_keys
+            ]
+        row_ids = []
+        for entry in cleaned:
+            self.saves[internal_id].append(entry)
+            row_ids.append(entry["id"])
+        return row_ids
+
+    def get_device_saves(self, device_id: str) -> List[dict]:
+        internal_device = self.get_device_by_device_id(device_id)
+        if not internal_device:
+            return []
+        return self._asset_rows_for_device_internal(internal_device["id"], "saves")
 
     def get_master_bios_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)

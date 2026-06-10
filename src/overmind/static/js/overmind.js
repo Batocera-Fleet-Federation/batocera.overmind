@@ -2191,17 +2191,57 @@
                     }).filter(Boolean).join('\n\n') || 'No log output reported yet.';
                     sources.push({id: label, label: label.replaceAll('_', ' '), path: (row.files || []).map(f => f.path || f.name).filter(Boolean).join(', '), content});
                 });
-                const gameLines = (Array.isArray(gamelogs) ? gamelogs : []).map(log => {
-                    const when = log.played_at ? new Date(log.played_at).toLocaleString() : '';
-                    const details = [
-                        log.system_name || '',
-                        log.game_name || log.rom_name || log.rom_path || '',
-                        log.rom_fingerprint ? `fingerprint: ${log.rom_fingerprint}` : '',
-                    ].filter(Boolean).join(' | ');
-                    return `${when} ${details}`.trim();
-                });
-                sources.unshift({id: 'game_logs', label: 'Gameplay Logs', path: 'Overmind gameplay history', content: gameLines.join('\n') || 'No gameplay logs reported yet.'});
+                // Gameplay history is rendered as a dedicated table (renderGameplayTable),
+                // not as a raw-text log source, so it is intentionally excluded here.
                 return sources;
+            }
+
+            function formatGameplayDuration(seconds) {
+                const total = Number(seconds);
+                if (!Number.isFinite(total) || total <= 0) return '—';
+                if (total < 60) return `${Math.round(total)}s`;
+                const minutes = Math.floor(total / 60);
+                const hours = Math.floor(minutes / 60);
+                if (hours > 0) return `${hours}h ${minutes % 60}m`;
+                return `${minutes}m`;
+            }
+
+            function renderGameplayTable(gamelogs) {
+                const rows = (Array.isArray(gamelogs) ? gamelogs : []).slice().sort((a, b) => {
+                    const at = a.played_at ? Date.parse(a.played_at) : 0;
+                    const bt = b.played_at ? Date.parse(b.played_at) : 0;
+                    return bt - at;
+                });
+                const header = `
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                        <strong><i class="bi bi-controller me-1"></i>Gameplay History</strong>
+                        <span class="small text-muted">${rows.length} session${rows.length === 1 ? '' : 's'}</span>
+                    </div>`;
+                if (!rows.length) {
+                    return `${header}<div class="empty-state">No gameplay sessions reported yet.</div>`;
+                }
+                const body = rows.map(log => {
+                    const when = log.played_at ? new Date(log.played_at).toLocaleString() : '—';
+                    const system = log.system_name || '';
+                    const game = log.game_name || log.rom_name || log.rom_path || 'Unknown';
+                    const romPath = log.rom_path || '';
+                    return `<tr>
+                        <td>${system ? `<span class="badge text-bg-secondary">${escapeHtml(system)}</span>` : '<span class="text-muted">—</span>'}</td>
+                        <td>${escapeHtml(game)}</td>
+                        <td class="small mono text-muted">${escapeHtml(romPath)}</td>
+                        <td class="small text-nowrap">${escapeHtml(when)}</td>
+                        <td class="small text-nowrap">${escapeHtml(formatGameplayDuration(log.duration_seconds))}</td>
+                    </tr>`;
+                }).join('');
+                return `${header}
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead><tr>
+                                <th>System</th><th>Game</th><th>ROM Path</th><th>Played</th><th>Duration</th>
+                            </tr></thead>
+                            <tbody>${body}</tbody>
+                        </table>
+                    </div>`;
             }
 
             function renderCombinedLogsShell() {
@@ -2209,10 +2249,11 @@
                 if (!container) return;
                 container.innerHTML = `
                     ${renderPassiveUpdateNotice('Gameplay logs')}
+                    <div class="card mb-3"><div class="card-body" id="gameplayTableWrap"></div></div>
                     <div class="row">
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
-                                    <div class="card-header">Gameplay Sources</div>
+                                    <div class="card-header">Log Sources</div>
                                     <div class="list-group list-group-flush source-selector" id="overmindLogSources"></div>
                             </div>
                         </div>
@@ -2255,15 +2296,22 @@
                 const sources = buildCombinedLogSources(gamelogs, log_sources);
                 const shellExists = Boolean(document.getElementById('overmindLogContent'));
                 const previousSource = (window.overmindLogSources || [])[window.overmindSelectedLogIndex];
-                const selectedSourceId = window.overmindSelectedLogSourceId || (previousSource && previousSource.id) || 'game_logs';
+                const selectedSourceId = window.overmindSelectedLogSourceId || (previousSource && previousSource.id) || (sources[0] && sources[0].id);
                 if (!shellExists) {
                     renderCombinedLogsShell();
                 }
+                const tableWrap = document.getElementById('gameplayTableWrap');
+                if (tableWrap) tableWrap.innerHTML = renderGameplayTable(gamelogs);
                 window.overmindLogSources = sources;
                 updateOvermindLogSourceButtons(sources);
                 if (sources.length) {
                     const selectedIndex = Math.max(0, sources.findIndex(source => source.id === selectedSourceId));
                     selectOvermindLogSource(selectedIndex, shellExists);
+                } else {
+                    const content = document.getElementById('overmindLogContent');
+                    const title = document.getElementById('overmindLogTitle');
+                    if (title) title.textContent = 'No log sources';
+                    if (content) content.textContent = 'No emulator log sources reported yet.';
                 }
             }
 
@@ -3833,7 +3881,7 @@
 
             function startSelectedDeviceDataAutoRefresh(viewName) {
                 stopSelectedDeviceDataAutoRefresh();
-                if (!selectedDeviceId || !['gamelogs', 'configs'].includes(viewName)) return;
+                if (!selectedDeviceId || !['gamelogs', 'configs', 'saves'].includes(viewName)) return;
                 selectedDeviceDataRefreshTimer = setInterval(() => {
                     if (!selectedDeviceId || currentTab !== 'devices') {
                         stopSelectedDeviceDataAutoRefresh();
@@ -3841,12 +3889,13 @@
                     }
                     if (currentDeviceView === 'gamelogs') loadGameLogs();
                     if (currentDeviceView === 'configs') loadDeviceConfigs();
+                    if (currentDeviceView === 'saves') loadDeviceSavesPanel();
                 }, 30000);
             }
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['bios', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
+                currentDeviceView = ['bios', 'saves', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
                 startSelectedDeviceDataAutoRefresh(currentDeviceView);
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
@@ -3854,12 +3903,14 @@
 
                 const systemsPanel = document.getElementById('device-systems-panel');
                 const biosPanel = document.getElementById('device-bios-panel');
+                const savesPanel = document.getElementById('device-saves-panel');
                 const artworkPanel = document.getElementById('device-artwork-panel');
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
                 const configsPanel = document.getElementById('device-configs-panel');
                 const metadataPanel = document.getElementById('device-metadata-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
+                if (savesPanel) savesPanel.style.display = currentDeviceView === 'saves' ? 'block' : 'none';
                 if (artworkPanel) artworkPanel.style.display = 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
                 if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
@@ -3870,6 +3921,7 @@
                     loadSwarmRomAvailabilityPanel();
                 }
                 if (currentDeviceView === 'bios') loadDeviceBiosPanel();
+                if (currentDeviceView === 'saves') loadDeviceSavesPanel();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
                 if (currentDeviceView === 'configs') loadDeviceConfigs();
                 if (currentDeviceView === 'metadata') {
@@ -3896,7 +3948,60 @@
 
             function normalizeDeviceView(viewName) {
                 if (viewName === 'actions') return 'metadata';
-                return ['bios', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
+                return ['bios', 'saves', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
+            }
+
+            async function loadDeviceSavesPanel() {
+                const container = document.getElementById('saves-list');
+                if (!selectedDeviceId || !container) return;
+                try {
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/saves`);
+                    if (!response.ok) throw new Error('Failed to load saves');
+                    const saves = (await response.json()).saves || [];
+                    container.innerHTML = renderDeviceSavesTable(saves);
+                } catch (error) {
+                    container.innerHTML = '<div class="empty-state">Unable to load game saves.</div>';
+                }
+            }
+
+            function renderDeviceSavesTable(saves) {
+                const rows = (Array.isArray(saves) ? saves : []).slice().sort((a, b) => {
+                    const ak = `${a.system_name || ''}/${a.file_path || ''}`;
+                    const bk = `${b.system_name || ''}/${b.file_path || ''}`;
+                    return ak.localeCompare(bk);
+                });
+                const header = `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                        <strong><i class="bi bi-floppy me-1"></i>Game Saves</strong>
+                        <span class="small text-muted">${rows.length} save${rows.length === 1 ? '' : 's'}</span>
+                    </div>
+                    <div class="small text-muted mb-2">Saves sync across drones (newest-modified wins). This view updates automatically every 30 seconds.</div>`;
+                if (!rows.length) {
+                    return `${header}<div class="empty-state">No game saves reported yet.</div>`;
+                }
+                const body = rows.map(row => {
+                    const system = row.system_name || row.system || '';
+                    const name = row.save_name || row.name || (row.file_path || '').split('/').pop() || 'save';
+                    const modified = row.modified_time ? new Date(Number(row.modified_time) * 1000).toLocaleString() : '—';
+                    const size = formatBytes ? formatBytes(row.file_size) : `${row.file_size || 0}`;
+                    const fp = row.fingerprint || row.saves_fingerprint || '';
+                    return `<tr>
+                        <td>${system ? `<span class="badge text-bg-secondary">${escapeHtml(system)}</span>` : '<span class="text-muted">—</span>'}</td>
+                        <td>${escapeHtml(name)}</td>
+                        <td class="small mono text-muted">${escapeHtml(row.file_path || '')}</td>
+                        <td class="small text-nowrap">${escapeHtml(String(size))}</td>
+                        <td class="small text-nowrap">${escapeHtml(modified)}</td>
+                        <td class="small mono text-muted">${escapeHtml(fp.slice(0, 12))}</td>
+                    </tr>`;
+                }).join('');
+                return `${header}
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead><tr>
+                                <th>System</th><th>Save</th><th>Path</th><th>Size</th><th>Modified</th><th>Fingerprint</th>
+                            </tr></thead>
+                            <tbody>${body}</tbody>
+                        </table>
+                    </div>`;
             }
 
             function parseRoute() {
