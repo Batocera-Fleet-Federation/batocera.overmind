@@ -3779,6 +3779,12 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     assert target_activity["source_drone_id"] == "drone-b"
     assert target_activity["status"] == "pending"
     assert target_activity["id"] == claim_a_actions[0]["payload"]["roms"][0]["sync_id"]
+    sync_notifications = [
+        row for row in client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]
+        if row["event_type"] == "sync_triggered"
+    ]
+    assert len(sync_notifications) == 1
+    assert "syncing 2 ROM(s) for snes" in sync_notifications[0]["message"]
 
 
 def test_sync_system_queues_only_roms_from_resolvable_sources(client):
@@ -3802,7 +3808,10 @@ def test_sync_system_queues_only_roms_from_resolvable_sources(client):
     )
 
     assert response.status_code == 200
-    roms = response.json()["action"]["payload"]["roms"]
+    payload = response.json()
+    assert payload["artwork_action_count"] == 0
+    assert payload["artwork_actions"] == []
+    roms = payload["action"]["payload"]["roms"]
     assert [row["file_path"] for row in roms] == ["Good.zip"]
     assert roms[0]["devices"] == [{"device_id": "good-source", "device_name": "Good Source"}]
 

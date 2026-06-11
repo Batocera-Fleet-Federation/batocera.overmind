@@ -2054,26 +2054,28 @@
                             </div>
                             <div class="row g-3">
                                 <div class="col-12 col-lg-6">
-                                    <div class="small text-muted mb-1">Drones</div>
-                                    <div class="d-flex flex-wrap gap-2">
-                                        ${bulkDevices.map(device => `
-                                            <label class="form-check form-check-inline mb-0">
-                                                <input class="form-check-input bulk-sync-drone" type="checkbox" value="${escapeHtml(device.device_id)}">
-                                                <span class="form-check-label">${escapeHtml(device.device_name || device.device_id)}</span>
-                                            </label>
-                                        `).join('') || '<span class="small text-muted">No Drones available.</span>'}
-                                    </div>
+                                    ${renderArtworkCheckboxDropdown({
+                                        id: 'bulk-sync-drones',
+                                        label: 'Drones',
+                                        allLabel: 'Select Drones',
+                                        allValue: 'none',
+                                        items: bulkDevices.map(device => ({value: device.device_id, label: device.device_name || device.device_id})),
+                                        selectedValues: [],
+                                        inputClass: 'bulk-sync-drone',
+                                        onChange: 'handleBulkSyncDropdownChange',
+                                    })}
                                 </div>
                                 <div class="col-12 col-lg-6">
-                                    <div class="small text-muted mb-1">Systems</div>
-                                    <div class="d-flex flex-wrap gap-2">
-                                        ${systemOptions.map(system => `
-                                            <label class="form-check form-check-inline mb-0">
-                                                <input class="form-check-input bulk-sync-system" type="checkbox" value="${escapeHtml(system)}">
-                                                <span class="form-check-label">${escapeHtml(system)}</span>
-                                            </label>
-                                        `).join('') || '<span class="small text-muted">No systems reported yet.</span>'}
-                                    </div>
+                                    ${renderArtworkCheckboxDropdown({
+                                        id: 'bulk-sync-systems',
+                                        label: 'Systems',
+                                        allLabel: 'Select systems',
+                                        allValue: 'none',
+                                        items: systemOptions,
+                                        selectedValues: [],
+                                        inputClass: 'bulk-sync-system',
+                                        onChange: 'handleBulkSyncDropdownChange',
+                                    })}
                                 </div>
                             </div>
                         </div>
@@ -2114,8 +2116,8 @@
             }
 
             async function queueBulkSwarmSync() {
-                const deviceIds = Array.from(document.querySelectorAll('.bulk-sync-drone:checked')).map(input => input.value);
-                const systems = Array.from(document.querySelectorAll('.bulk-sync-system:checked')).map(input => input.value);
+                const deviceIds = Array.from(document.querySelectorAll('.bulk-sync-drone:checked')).map(input => input.value).filter(value => value !== 'none');
+                const systems = Array.from(document.querySelectorAll('.bulk-sync-system:checked')).map(input => input.value).filter(value => value !== 'none');
                 if (deviceIds.length < 2) {
                     showMessage('Select at least two Drones for bulk sync.', 'error');
                     return;
@@ -2137,6 +2139,15 @@
                     console.error('Error queuing bulk sync:', error);
                     showMessage('Failed to queue bulk sync.', 'error');
                 }
+            }
+
+            function handleBulkSyncDropdownChange(event) {
+                const input = event.target;
+                if (!input || input.value !== 'none') return;
+                const menu = input.closest('.app-checkbox-menu');
+                menu?.querySelectorAll('input[type="checkbox"]').forEach(option => {
+                    option.checked = false;
+                });
             }
 
             function selectDevice(deviceId) {
@@ -3436,10 +3447,23 @@
                     const pageCount = Math.max(1, Math.ceil(total / perPage));
                     masterBiosPage = page;
                     const missingCount = rows.filter(row => !row.present_on_selected).length;
+                    const renderPageButton = pageNumber => `<button class="btn btn-sm ${pageNumber === page ? 'btn-primary' : 'btn-outline-secondary'}" onclick="setMasterBiosPage(${pageNumber})">${pageNumber}</button>`;
+                    const paginationButtons = [];
+                    if (pageCount <= 7) {
+                        for (let i = 1; i <= pageCount; i += 1) paginationButtons.push(renderPageButton(i));
+                    } else {
+                        const start = Math.max(1, page - 2);
+                        const end = Math.min(pageCount, page + 2);
+                        if (start > 1) paginationButtons.push(renderPageButton(1));
+                        if (start > 2) paginationButtons.push('<span class="px-2">&hellip;</span>');
+                        for (let i = start; i <= end; i += 1) paginationButtons.push(renderPageButton(i));
+                        if (end < pageCount - 1) paginationButtons.push('<span class="px-2">&hellip;</span>');
+                        if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
+                    }
                     const pagination = `
                         <div class="btn-group" role="group" aria-label="BIOS pagination">
                             <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterBiosPage(${Math.max(1, page - 1)})">Previous</button>
-                            <button class="btn btn-sm btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
+                            ${paginationButtons.join('')}
                             <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterBiosPage(${Math.min(pageCount, page + 1)})">Next</button>
                         </div>
                     `;
@@ -3465,7 +3489,7 @@
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                                 <div class="d-flex gap-2 align-items-center">
                                     <strong>BIOS (All Drones)</strong>
-                                    <div class="small text-muted">${total} files · ${missingCount} missing here</div>
+                                    <div class="small text-muted">${total} files · ${missingCount} missing here · Page ${page} of ${pageCount}</div>
                                 </div>
                                 ${pagination}
                             </div>

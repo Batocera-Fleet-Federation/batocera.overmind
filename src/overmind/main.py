@@ -2789,7 +2789,7 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
             "file_size": row.get("file_size"),
             "rom_fingerprint": row.get("rom_fingerprint"),
         })
-    notify_sync_triggered(user, device, "System", f"{system_name} system sync ({len(missing)} ROM item(s))", [device], [source for row in missing for source in (row.get("devices") or [])], action)
+    notify_sync_triggered(user, device, "System", f"syncing {len(missing)} ROM(s) for {system_name}", [device], [source for row in missing for source in (row.get("devices") or [])], action)
     return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
 
 
@@ -2854,6 +2854,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
 
     actions = []
     queued_roms = 0
+    notification_batches: dict[str, dict] = {}
     for target_id, target_roms in selected_roms_by_device.items():
         target_keys = {db._rom_key(rom) for rom in target_roms}
         missing_by_system: dict[str, list] = {}
@@ -2895,15 +2896,21 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
                         "file_size": row.get("file_size"),
                         "rom_fingerprint": row.get("rom_fingerprint"),
                     })
-                notify_sync_triggered(
-                    user,
-                    devices[target_id],
-                    "Bulk system",
-                    f"{system_name} convergence sync ({len(missing)} ROM item(s))",
-                    [devices[target_id]],
-                    [source for row in missing for source in (row.get("devices") or [])],
-                    action,
-                )
+                batch = notification_batches.setdefault(system_name, {"rom_count": 0, "targets": [], "sources": [], "action": action})
+                batch["rom_count"] += len(missing)
+                batch["targets"].append(devices[target_id])
+                batch["sources"].extend(source for row in missing for source in (row.get("devices") or []))
+
+    for system_name, batch in sorted(notification_batches.items()):
+        notify_sync_triggered(
+            user,
+            batch["targets"][0],
+            "Bulk system",
+            f"syncing {batch['rom_count']} ROM(s) for {system_name}",
+            batch["targets"],
+            batch["sources"],
+            batch["action"],
+        )
 
     return {
         "status": "queued",
