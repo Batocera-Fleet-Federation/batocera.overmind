@@ -4075,6 +4075,44 @@ def test_game_log_upload_stores_sessions_for_game_log_list(client):
     assert logs[0]["played_at"] == "2026-05-26T10:15:00+00:00"
 
 
+def test_game_log_retry_updates_session_without_creating_duplicate(client):
+    user_id = db.create_user("game-log-retry@example.com", "hash")
+    db.create_device(user_id, "game-retry-drone", "Game Retry Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+    session = {
+        "played_at": "2026-05-26T10:15:00+00:00",
+        "system_name": "snes",
+        "game_name": "Game.sfc",
+        "rom_path": "/userdata/roms/snes/Game.sfc",
+    }
+
+    for payload in [
+        session,
+        {**session, "rom_fingerprint": "abc123", "duration_seconds": 90},
+    ]:
+        response = client.post(
+            "/api/devices/game-retry-drone/game-logs",
+            headers={"Authorization": "Bearer drone-token"},
+            json={"type": "game_logs", "sessions": [payload]},
+        )
+        assert response.status_code == 200
+
+    logs = db.get_device_gamelogs("game-retry-drone")
+    assert len(logs) == 1
+    assert logs[0]["rom_fingerprint"] == "abc123"
+    assert logs[0]["duration_seconds"] == 90
+    snapshot = db.get_device_by_device_id("game-retry-drone")["game_logs"]["sessions"]
+    assert len(snapshot) == 1
+    assert snapshot[0]["duration_seconds"] == 90
+
+
+def test_gameplay_history_is_a_table_log_source():
+    source = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    assert "label: 'Gameplay History'" in source
+    assert "type: 'gameplay'" in source
+    assert "overmindGameplayViewer" in source
+    assert "gameplayViewer.innerHTML = renderGameplayTable(source.gamelogs)" in source
+
+
 def test_log_source_upload_persists_and_streams_while_view_requested(client):
     client.post("/api/auth/register", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"})
     token = client.post("/api/auth/login", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"}).json()["access_token"]

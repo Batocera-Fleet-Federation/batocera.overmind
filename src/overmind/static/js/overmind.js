@@ -2189,9 +2189,8 @@
                     if (!deviceResp.ok) throw new Error('Failed to load device details');
                     const logsData = await logsResp.json();
                     const deviceData = await deviceResp.json();
-                    const snapshotLogs = deviceData.game_logs && Array.isArray(deviceData.game_logs.sessions) ? deviceData.game_logs.sessions : [];
                     displayCombinedLogs({
-                        gamelogs: snapshotLogs.length ? snapshotLogs : (logsData.gamelogs || []),
+                        gamelogs: logsData.gamelogs || [],
                         emulator_configs: deviceData.emulator_configs || [],
                         log_sources: deviceData.log_sources || []
                     });
@@ -2221,7 +2220,12 @@
             }
 
             function buildCombinedLogSources(gamelogs, log_sources) {
-                const sources = [];
+                const sources = [{
+                    id: 'gameplay_history',
+                    label: 'Gameplay History',
+                    type: 'gameplay',
+                    gamelogs: Array.isArray(gamelogs) ? gamelogs : []
+                }];
                 const logPayload = log_sources && !Array.isArray(log_sources) ? log_sources : {};
                 const sourceRows = Array.isArray(logPayload.logs) ? logPayload.logs : (Array.isArray(log_sources) ? log_sources : []);
                 sourceRows.forEach(row => {
@@ -2233,8 +2237,6 @@
                     }).filter(Boolean).join('\n\n') || 'No log output reported yet.';
                     sources.push({id: label, label: label.replaceAll('_', ' '), path: (row.files || []).map(f => f.path || f.name).filter(Boolean).join(', '), content});
                 });
-                // Gameplay history is rendered as a dedicated table (renderGameplayTable),
-                // not as a raw-text log source, so it is intentionally excluded here.
                 return sources;
             }
 
@@ -2249,7 +2251,17 @@
             }
 
             function renderGameplayTable(gamelogs) {
-                const rows = (Array.isArray(gamelogs) ? gamelogs : []).slice().sort((a, b) => {
+                const bySession = new Map();
+                (Array.isArray(gamelogs) ? gamelogs : []).forEach(log => {
+                    const key = [
+                        log.played_at || log.started_at || '',
+                        String(log.system_name || log.system || '').trim().toLowerCase(),
+                        String(log.game_name || log.rom_name || log.rom_path || '').trim().toLowerCase(),
+                        String(log.rom_path || '').trim().toLowerCase()
+                    ].join('|');
+                    bySession.set(key, {...(bySession.get(key) || {}), ...log});
+                });
+                const rows = Array.from(bySession.values()).sort((a, b) => {
                     const at = a.played_at ? Date.parse(a.played_at) : 0;
                     const bt = b.played_at ? Date.parse(b.played_at) : 0;
                     return bt - at;
@@ -2277,7 +2289,7 @@
                 }).join('');
                 return `${header}
                     <div class="table-responsive">
-                        <table class="table table-sm align-middle">
+                        <table class="table table-sm table-hover align-middle gameplay-history-table">
                             <thead><tr>
                                 <th>System</th><th>Game</th><th>ROM Path</th><th>Played</th><th>Duration</th>
                             </tr></thead>
@@ -2291,7 +2303,6 @@
                 if (!container) return;
                 container.innerHTML = `
                     ${renderPassiveUpdateNotice('Gameplay logs')}
-                    <div class="card mb-3"><div class="card-body" id="gameplayTableWrap"></div></div>
                     <div class="row">
                         <div class="col-md-3 mb-3">
                                 <div class="card log-card">
@@ -2304,16 +2315,21 @@
                                 <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                                     <span id="overmindLogTitle">Select a log source</span>
                                     <div class="d-flex flex-wrap align-items-center gap-2">
+                                        <div id="overmindLogTextControls" class="d-flex flex-wrap align-items-center gap-2">
                                         <label for="overmindLogLineLimit" class="small text-muted mb-0">Lines</label>
                                         <select id="overmindLogLineLimit" class="form-select form-select-sm" style="width:6rem;" onchange="setOvermindLogLineLimit(this.value)">
                                             ${[10, 20, 50, 100].map(value => `<option value="${value}" ${getOvermindLogLineLimit() === value ? 'selected' : ''}>${value}</option>`).join('')}
                                         </select>
+                                        </div>
                                         <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs()">Refresh View</button>
                                     </div>
                                 </div>
                                 <div class="card-body">
-                                    <div id="overmindLogPath" class="small text-muted mb-2"></div>
-                                    <pre id="overmindLogContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a source from the left panel to view logs.</pre>
+                                    <div id="overmindTextLogViewer">
+                                        <div id="overmindLogPath" class="small text-muted mb-2"></div>
+                                        <pre id="overmindLogContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a source from the left panel to view logs.</pre>
+                                    </div>
+                                    <div id="overmindGameplayViewer" style="display:none;"></div>
                                 </div>
                             </div>
                         </div>
@@ -2324,12 +2340,12 @@
             function updateOvermindLogSourceButtons(sources) {
                 const list = document.getElementById('overmindLogSources');
                 if (!list) return;
-                const signature = sources.map(source => `${source.id}|${source.label}|${source.path}`).join('||');
+                const signature = sources.map(source => `${source.id}|${source.label}|${source.path}|${source.type}`).join('||');
                 if (list.dataset.signature === signature) return;
                 list.dataset.signature = signature;
                 list.innerHTML = sources.map((source, index) => `
                     <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindLogSource(${index})">
-                        <i class="bi bi-journal-text me-2"></i>${escapeHtml(source.label)}
+                        <i class="bi ${source.type === 'gameplay' ? 'bi-controller' : 'bi-journal-text'} me-2"></i>${escapeHtml(source.label)}
                     </button>
                 `).join('');
             }
@@ -2342,8 +2358,6 @@
                 if (!shellExists) {
                     renderCombinedLogsShell();
                 }
-                const tableWrap = document.getElementById('gameplayTableWrap');
-                if (tableWrap) tableWrap.innerHTML = renderGameplayTable(gamelogs);
                 window.overmindLogSources = sources;
                 updateOvermindLogSourceButtons(sources);
                 if (sources.length) {
@@ -2367,7 +2381,22 @@
                 const title = document.getElementById('overmindLogTitle');
                 const path = document.getElementById('overmindLogPath');
                 const content = document.getElementById('overmindLogContent');
+                const textViewer = document.getElementById('overmindTextLogViewer');
+                const gameplayViewer = document.getElementById('overmindGameplayViewer');
+                const textControls = document.getElementById('overmindLogTextControls');
                 if (title) title.textContent = source.label;
+                if (source.type === 'gameplay') {
+                    if (textViewer) textViewer.style.display = 'none';
+                    if (textControls) textControls.style.display = 'none';
+                    if (gameplayViewer) {
+                        gameplayViewer.style.display = 'block';
+                        gameplayViewer.innerHTML = renderGameplayTable(source.gamelogs);
+                    }
+                    return;
+                }
+                if (textViewer) textViewer.style.display = 'block';
+                if (textControls) textControls.style.display = 'flex';
+                if (gameplayViewer) gameplayViewer.style.display = 'none';
                 if (path) path.textContent = source.path || '';
                 if (content) {
                     const nextContent = newestLogLinesFirst(source.content, getOvermindLogLineLimit());

@@ -106,20 +106,34 @@ def merge_log_sources(existing: Optional[dict], incoming: dict, max_lines: int =
     return _cap_log_payload_source_lines(merged, max_lines)
 
 
+def _game_session_key(session: dict) -> tuple:
+    return (
+        str(session.get("played_at") or session.get("started_at") or ""),
+        str(session.get("system_name") or session.get("system") or "").strip().lower(),
+        str(session.get("game_name") or session.get("rom_name") or session.get("rom_path") or "").strip().lower(),
+        str(session.get("rom_path") or "").strip().lower(),
+    )
+
+
 def merge_game_logs(existing: Optional[dict], incoming: dict, max_lines: int = 1000) -> dict:
     """Add newly detected game sessions and optional log-source changes."""
     merged = dict(existing or {"type": "game_logs", "sessions": []})
     merged["type"] = "game_logs"
     merged["collected_at"] = incoming.get("collected_at") or merged.get("collected_at")
-    sessions = list(merged.get("sessions") or [])
-    seen = {json.dumps(row, sort_keys=True, default=str) for row in sessions if isinstance(row, dict)}
-    for session in incoming.get("sessions") if isinstance(incoming.get("sessions"), list) else []:
+    sessions = []
+    by_key = {}
+    for session in list(merged.get("sessions") or []) + (
+        incoming.get("sessions") if isinstance(incoming.get("sessions"), list) else []
+    ):
         if not isinstance(session, dict):
             continue
-        key = json.dumps(session, sort_keys=True, default=str)
-        if key not in seen:
-            sessions.append(session)
-            seen.add(key)
+        key = _game_session_key(session)
+        existing_index = by_key.get(key)
+        if existing_index is None:
+            by_key[key] = len(sessions)
+            sessions.append(dict(session))
+        else:
+            sessions[existing_index] = {**sessions[existing_index], **session}
     merged["sessions"] = sessions[-max_lines:]
     if isinstance(incoming.get("logs"), list):
         log_payload = {"type": "log_sources", "logs": merged.get("logs") or []}
@@ -129,18 +143,18 @@ def merge_game_logs(existing: Optional[dict], incoming: dict, max_lines: int = 1
 
 def append_game_log_sessions(existing: list, device_id: str, sessions: list, max_rows: int = 1000) -> list:
     """Normalize session reports into persisted game-log rows."""
-    bucket = list(existing or [])
-    seen = {
-        (
-            str(row.get("played_at") or ""),
-            str(row.get("system_name") or ""),
-            str(row.get("game_name") or ""),
-            str(row.get("rom_path") or ""),
-            str(row.get("rom_fingerprint") or ""),
-        )
-        for row in bucket
-        if isinstance(row, dict)
-    }
+    bucket = []
+    by_key = {}
+    for row in existing or []:
+        if not isinstance(row, dict):
+            continue
+        key = _game_session_key(row)
+        existing_index = by_key.get(key)
+        if existing_index is None:
+            by_key[key] = len(bucket)
+            bucket.append(dict(row))
+        else:
+            bucket[existing_index] = {**bucket[existing_index], **row}
     for session in sessions if isinstance(sessions, list) else []:
         if not isinstance(session, dict):
             continue
@@ -149,16 +163,7 @@ def append_game_log_sessions(existing: list, device_id: str, sessions: list, max
         if not system_name or not game_name:
             continue
         played_at = session.get("played_at") or session.get("started_at") or datetime.utcnow().isoformat()
-        key = (
-            str(played_at),
-            system_name,
-            game_name,
-            str(session.get("rom_path") or ""),
-            str(session.get("rom_fingerprint") or session.get("fingerprint") or ""),
-        )
-        if key in seen:
-            continue
-        bucket.append({
+        normalized = {
             "id": str(uuid.uuid4()),
             "device_id": device_id,
             "system_name": system_name,
@@ -167,8 +172,19 @@ def append_game_log_sessions(existing: list, device_id: str, sessions: list, max
             "rom_fingerprint": session.get("rom_fingerprint") or session.get("fingerprint"),
             "played_at": played_at,
             "duration_seconds": session.get("duration_seconds"),
-        })
-        seen.add(key)
+        }
+        key = _game_session_key(normalized)
+        existing_index = by_key.get(key)
+        if existing_index is None:
+            by_key[key] = len(bucket)
+            bucket.append(normalized)
+        else:
+            existing_row = bucket[existing_index]
+            bucket[existing_index] = {
+                **existing_row,
+                **{field: value for field, value in normalized.items() if value is not None},
+                "id": existing_row.get("id") or normalized["id"],
+            }
     return bucket[-max_rows:]
 
 

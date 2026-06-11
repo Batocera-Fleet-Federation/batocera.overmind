@@ -294,7 +294,7 @@ class OvermindDatabase:
         existing = self.gamelogs.get(internal_id, [])
         updated = append_game_log_sessions(existing, device_id, sessions)
         self.gamelogs[internal_id] = updated
-        if len(updated) != len(existing):
+        if updated != existing:
             self.update_device_last_seen(internal_id)
             self._persist_state()
 
@@ -3833,10 +3833,15 @@ class OvermindDatabase:
         if not internal_device:
             return []
         internal_id = internal_device["id"]
+        if postgres_store.available():
+            return postgres_store.get_device_gameplay_sessions(internal_id)
         return self.gamelogs.get(internal_id, [])
     
     def get_device_gamelogs_by_system(self, device_id: str, system_name: str) -> List[dict]:
         """Get game logs for a device filtered by system."""
+        internal_device = self.get_device_by_device_id(device_id)
+        if internal_device and postgres_store.available():
+            return postgres_store.get_device_gameplay_sessions(internal_device["id"], system_name=system_name)
         all_logs = self.get_device_gamelogs(device_id)
         return [log for log in all_logs if log.get("system_name") == system_name]
 

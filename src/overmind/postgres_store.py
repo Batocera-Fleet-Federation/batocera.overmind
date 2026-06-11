@@ -794,6 +794,44 @@ class PostgresMetadataStore:
                 payload["logs"] = list(by_source.values())
         return payload
 
+    def get_device_gameplay_sessions(self, internal_device_id: str, system_name: Optional[str] = None) -> list[dict]:
+        if not self.url or not internal_device_id:
+            return []
+        self.ensure_schema()
+        conn = self._connect()
+        if conn is None:
+            return []
+        with conn:
+            with conn.cursor() as cur:
+                parameters = [internal_device_id]
+                system_filter = ""
+                if system_name:
+                    system_filter = " AND system_name = %s"
+                    parameters.append(system_name)
+                cur.execute(
+                    f"""
+                    SELECT id, system_name, game_name, rom_path, rom_fingerprint, played_at, duration_seconds, received_at
+                    FROM gameplay_sessions
+                    WHERE drone_id = %s{system_filter}
+                    ORDER BY played_at DESC NULLS LAST, received_at DESC, id DESC
+                    """,
+                    parameters,
+                )
+                return [
+                    {
+                        "id": gameplay_id,
+                        "system_name": row_system,
+                        "game_name": game_name,
+                        "rom_path": rom_path,
+                        "rom_fingerprint": rom_fingerprint,
+                        "played_at": played_at,
+                        "duration_seconds": duration_seconds,
+                        "received_at": received_at,
+                    }
+                    for gameplay_id, row_system, game_name, rom_path, rom_fingerprint, played_at, duration_seconds, received_at
+                    in cur.fetchall()
+                ]
+
     def get_device_emulator_configs(self, internal_device_id: str, max_versions: int = 10) -> dict:
         payload = {"type": "emulator_configs", "configs": []}
         if not self.url or not internal_device_id:

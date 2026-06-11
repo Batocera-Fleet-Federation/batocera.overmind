@@ -1415,6 +1415,17 @@
             .table td {
                 border-color: var(--admin-border);
             }
+            .gameplay-history-table {
+                margin-bottom: 0;
+            }
+            .gameplay-history-table thead th {
+                background: rgba(31, 42, 68, 0.94);
+                color: var(--admin-text);
+            }
+            .gameplay-history-table tbody td {
+                background: rgba(21, 31, 50, 0.54);
+                color: var(--admin-text);
+            }
             .tree-view details {
                 margin-bottom: 0.75rem;
             }
