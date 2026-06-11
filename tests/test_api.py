@@ -4475,6 +4475,7 @@ def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
     assert "[10, 20, 50, 100]" in js
     assert "log_limit=${encodeURIComponent(logLimit)}" in js
     assert "if (content.textContent !== nextContent) {" in js
+    assert "newestLogLinesFirst(source.content, getOvermindLogLineLimit())" in js
     assert "file.content || file.path" not in js
     assert "No log output reported yet." in js
     assert "join('\\\\n\\\\n')" not in js
@@ -4576,6 +4577,8 @@ def test_super_admin_runtime_metrics_ui_refreshes_when_viewed():
     assert "apiGet('/api/admin/runtime-metrics'" in js
     assert "apiGet('/api/admin/runtime-logs'" in js
     assert "Overmind Runtime Logs" in js
+    assert "newestLogLinesFirst(logs.stdout" in js
+    assert "newestLogLinesFirst(logs.stderr" in js
     assert "setInterval(() =>" in js
     assert "5000" in js
 

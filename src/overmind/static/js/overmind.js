@@ -2370,15 +2370,12 @@
                 if (title) title.textContent = source.label;
                 if (path) path.textContent = source.path || '';
                 if (content) {
-                    const lines = String(source.content || '').split(/\r?\n/);
-                    const nextContent = lines.slice(-getOvermindLogLineLimit()).join('\n');
-                    const wasAtBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 24;
+                    const nextContent = newestLogLinesFirst(source.content, getOvermindLogLineLimit());
+                    const wasAtTop = content.scrollTop < 24;
                     const previousScrollTop = content.scrollTop;
                     if (content.textContent !== nextContent) {
                         content.textContent = nextContent;
-                        if (preserveScroll) {
-                            content.scrollTop = wasAtBottom ? content.scrollHeight : previousScrollTop;
-                        }
+                        content.scrollTop = preserveScroll && !wasAtTop ? previousScrollTop : 0;
                     }
                 }
             }
@@ -3495,6 +3492,7 @@
                             </div>
                             <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
                                 <th>BIOS</th>
+                                <th>MD5</th>
                                 <th>Size</th>
                                 <th>Source</th>
                                 <th>Status</th>
@@ -3510,8 +3508,8 @@
                                         <tr>
                                             <td style="min-width:260px">
                                                 <div>${escapeHtml(row.file_path || row.bios_name || '')}</div>
-                                                ${row.bios_md5 ? `<div class="small fst-italic text-muted mono">md5: ${escapeHtml(row.bios_md5)}</div>` : ''}
                                             </td>
+                                            <td class="small text-muted mono">${escapeHtml(row.bios_md5 || '')}</td>
                                             <td class="text-muted">${escapeHtml(sizeText)}</td>
                                             <td class="text-muted">${escapeHtml(sources)}</td>
                                             <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${present ? 'Present' : (row.devices && row.devices.length ? 'Missing' : 'Unavailable')}</span></td>
@@ -4614,18 +4612,24 @@
                 }
             }
 
-            // Update a log <pre> in place so refreshes don't reset the scroll
-            // position. If the user was scrolled to the bottom we keep it pinned
-            // to the bottom; otherwise we preserve their exact scroll offset.
+            function newestLogLinesFirst(text, limit = null) {
+                const lines = String(text ?? '').split(/\r?\n/);
+                if (lines.length && !lines[lines.length - 1]) lines.pop();
+                const selected = Number.isInteger(limit) && limit > 0 ? lines.slice(-limit) : lines;
+                return selected.reverse().join('\n');
+            }
+
+            // Newest log lines are at the top. Keep the pane pinned there while the
+            // user is reading fresh output, otherwise preserve their scroll offset.
             function updateLogPane(pre, text) {
                 if (!pre) return;
                 const wasEmpty = !pre.textContent;
-                const wasAtBottom = wasEmpty || pre.scrollHeight <= pre.clientHeight || pre.scrollHeight - pre.scrollTop - pre.clientHeight < 32;
+                const wasAtTop = wasEmpty || pre.scrollTop < 32;
                 const previousScrollTop = pre.scrollTop;
                 if (pre.textContent !== text) {
                     pre.textContent = text;
                 }
-                pre.scrollTop = wasAtBottom ? pre.scrollHeight : previousScrollTop;
+                pre.scrollTop = wasAtTop ? 0 : previousScrollTop;
             }
 
             function ensureSuperAdminLogShell(container) {
@@ -4679,8 +4683,8 @@
                     const logs = payload.logs || {};
                     const maxLinesBadge = document.getElementById('super-admin-log-maxlines');
                     if (maxLinesBadge) maxLinesBadge.textContent = `last ${Number(logs.max_lines || 0)} lines`;
-                    updateLogPane(document.getElementById('super-admin-log-stdout'), logs.stdout || 'No stdout captured yet.');
-                    updateLogPane(document.getElementById('super-admin-log-stderr'), logs.stderr || 'No stderr captured yet.');
+                    updateLogPane(document.getElementById('super-admin-log-stdout'), newestLogLinesFirst(logs.stdout || 'No stdout captured yet.'));
+                    updateLogPane(document.getElementById('super-admin-log-stderr'), newestLogLinesFirst(logs.stderr || 'No stderr captured yet.'));
                     const capturedEl = document.getElementById('super-admin-log-captured');
                     if (capturedEl) capturedEl.textContent = `Captured: ${logs.captured_at ? new Date(logs.captured_at).toLocaleString() : 'n/a'}`;
                     const statusEl = document.getElementById('super-admin-log-status');
