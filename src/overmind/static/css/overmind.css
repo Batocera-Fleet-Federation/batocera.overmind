@@ -11,6 +11,30 @@
       --admin-text: #ecf6ff;
       --admin-muted: #9fb0c9;
     }
+    .feedback-banner {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      padding: .6rem 1rem;
+      background: linear-gradient(90deg, rgba(0,194,255,0.18), rgba(255,62,165,0.18));
+      border-bottom: 1px solid var(--admin-border);
+      color: var(--admin-text);
+      font-size: .92rem;
+    }
+    .feedback-banner > i { color: var(--admin-accent-coin); flex: 0 0 auto; font-size: 1.05rem; }
+    .feedback-banner-text { flex: 1 1 auto; }
+    .feedback-banner a { color: var(--admin-sidebar-accent); font-weight: 700; }
+    .feedback-banner-close {
+      flex: 0 0 auto;
+      background: transparent;
+      border: 0;
+      color: var(--admin-muted);
+      font-size: 1.4rem;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0 .25rem;
+    }
+    .feedback-banner-close:hover { color: var(--admin-text); }
     body {
       font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       margin: 0;
@@ -284,6 +308,7 @@
       padding: 1.25rem;
       border-radius: 1rem;
       box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+      text-align: left;
     }
     .landing-shell .step h3 {
       color: var(--admin-sidebar-accent);

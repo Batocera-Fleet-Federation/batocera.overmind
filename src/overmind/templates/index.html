@@ -12,6 +12,11 @@
   <link href="/static/css/overmind.css" rel="stylesheet">
 </head>
 <body>
+  <div id="feedbackBanner" class="feedback-banner" role="note" style="display:none;">
+    <i class="bi bi-megaphone-fill" aria-hidden="true"></i>
+    <span class="feedback-banner-text">Batocera Overmind is actively being improved. Hit a bug or have an issue? Please report it on <a href="https://github.com/Batocera-Fleet-Federation/batocera.overmind/issues" target="_blank" rel="noopener noreferrer">GitHub Issues</a>.</span>
+    <button type="button" class="feedback-banner-close" aria-label="Dismiss this message" onclick="dismissFeedbackBanner()">&times;</button>
+  </div>
   <div class="landing-shell">
     <div class="landing-container">
       <nav class="landing-nav" aria-label="Landing page navigation">
@@ -33,100 +38,72 @@
       <div class="hero">
         <div class="hero-badge"><i class="bi bi-broadcast-pin"></i> Fleet command for Batocera arcades</div>
         <h1>Batocera Overmind</h1>
-        <p><strong>One free, open-source dashboard for your Batocera machines.</strong> Connect your arcade boxes, see what is online, sync ROMs, artwork, and configs, and debug issues remotely without SSHing into every device.</p>
+        <p><strong>One free, open-source command center for all your Batocera machines.</strong> See what's online, sync games, saves, and artwork between cabinets, and fix problems from your browser — no SSH, no walking to each machine.</p>
       </div>
 
       <div class="feature-strip" aria-label="What Batocera Overmind does">
         <div class="feature-pill">
           <i class="bi bi-hdd-network"></i>
-          <h3>See every arcade machine</h3>
-          <p>Know which Drones are connected, online, and ready from one Overmind screen.</p>
+          <h3>See every machine</h3>
+          <p>Online status, health, and swarm membership for all your Drones in one view.</p>
         </div>
         <div class="feature-pill">
           <i class="bi bi-arrow-repeat"></i>
-          <h3>Sync games and configs</h3>
-          <p>Keep ROMs, artwork, metadata, and emulator configurations aligned across your arcade machines.</p>
+          <h3>Sync between cabinets</h3>
+          <p>Copy games, saves, BIOS, artwork, and configs machine-to-machine.</p>
         </div>
         <div class="feature-pill">
-          <i class="bi bi-diagram-3"></i>
-          <h3>Connect a swarm</h3>
-          <p>Pair Batocera machines as Drones so they can report back to the Overmind dashboard.</p>
+          <i class="bi bi-sliders"></i>
+          <h3>Manage remotely</h3>
+          <p>Kiosk mode, volume, restarts, and cache refreshes from one screen.</p>
         </div>
         <div class="feature-pill">
           <i class="bi bi-bug"></i>
-          <h3>Debug remotely</h3>
-          <p>View logs, configs, metadata, and machine status from the browser so you can troubleshoot without standing at the cabinet.</p>
+          <h3>Debug without the cabinet</h3>
+          <p>Read logs, configs, and machine state from your browser — no SSH.</p>
         </div>
       </div>
 
       <div class="landing-card">
-        <h2>What Overmind Does</h2>
-        <p>Think of Overmind as the control room for your retro arcade fleet. Each Batocera machine runs a small Drone app. Overmind brings those Drones together so you can:</p>
+        <h2><i class="bi bi-stars me-2"></i>Built for arcades you can't babysit</h2>
+        <p>Got Batocera machines you don't sit next to every day? That's exactly who Overmind is for.</p>
         <ul>
-          <li><strong>See machine health:</strong> online status, connection state, and swarm membership.</li>
-          <li><strong>Understand game coverage:</strong> which systems and ROMs are present across the fleet.</li>
-          <li><strong>Debug remotely:</strong> review logs, metadata, emulator configs, and machine state from the browser before touching the physical device.</li>
-          <li><strong>Trigger safe actions:</strong> collect logs, refresh inventory, sync content, and manage approved Drones without touching every machine.</li>
-          <li><strong>Stay free and open:</strong> the project is open source and completely free to use, modify, self-host, and extend.</li>
+          <li><strong>Airbnbs &amp; vacation rentals:</strong> give guests a polished arcade, lock it to Kiosk mode, and update or fix it remotely between stays — no trip to the property.</li>
+          <li><strong>Home arcades &amp; game rooms:</strong> keep every cabinet's games, saves, and artwork in sync from the couch.</li>
+          <li><strong>Bars, cafes &amp; businesses:</strong> manage a whole floor of machines, set volume, and restart anything from one screen.</li>
+          <li><strong>Multiple properties or locations:</strong> one dashboard for every machine, wherever it lives.</li>
         </ul>
       </div>
 
-      <div class="grid">
-        <div class="step">
-          <h3>Quick install: Drone on a Batocera machine</h3>
+      <div class="step">
+          <h3><i class="bi bi-lightning-charge me-2"></i>Quick setup</h3>
+          <p style="color:var(--admin-muted)">Monitor and manage a machine in a few quick steps.</p>
           <ol>
-            <li>On the Batocera machine, open a command prompt. You can SSH into the machine, or press <strong>F1</strong> on the Batocera keyboard and open the terminal from the file manager.</li>
-            <li>Copy and run this installer command:</li>
+            <li><strong>Install the Drone.</strong> On the Batocera machine, open a terminal (SSH, or press <strong>F1</strong> &rarr; file manager &rarr; terminal) and run:</li>
           </ol>
           <div style="margin:.75rem 0 1rem;">
             <code style="display:block;white-space:normal;word-break:break-all;line-height:1.5;padding:.75rem;">curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash</code>
           </div>
-          <ol start="3">
-            <li>If you are using <strong>Batocera v43 or newer</strong>, go to <strong>System Settings</strong> &gt; <strong>Services</strong>, then turn on <strong>DRONE_SERVER</strong>.</li>
-            <li>If you are using an <strong>older Batocera version</strong>, reboot the machine after the installer finishes.</li>
+          <ol start="2">
+            <li><strong>Turn it on.</strong> Batocera v43+: <strong>System Settings</strong> &gt; <strong>Services</strong> &gt; enable <strong>DRONE_SERVER</strong>. Older versions: reboot.</li>
+            <li><strong>Open the Drone.</strong> The installer prints a green banner with this machine's address — usually <code>https://batocera.local</code>. Open it from any device on your network and sign in (user <code>batocera</code>, password <code>linux</code>).</li>
+            <li><strong>Connect it.</strong> Register at <code>batocera-swarm.com</code>, then <strong>My Swarm</strong> &gt; <strong>Generate Token</strong>. In the Drone app, open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>, set the Overmind URL to <code>https://www.batocera-swarm.com</code>, paste the token, and save. Approve the Drone from <strong>My Swarm</strong>.</li>
           </ol>
-          <div style="margin:1rem 0;padding:.9rem 1rem;border:1px solid rgba(52,211,153,0.35);background:rgba(52,211,153,0.10);border-radius:.75rem;color:var(--admin-text);font-weight:900;">
-            <i class="bi bi-check-circle me-1" style="color:var(--admin-accent-green);"></i> Done! The Drone app is installed on this Batocera machine.
+          <div style="margin:1rem 0 0;padding:.9rem 1rem;border:1px solid rgba(52,211,153,0.35);background:rgba(52,211,153,0.10);border-radius:.75rem;color:var(--admin-text);font-weight:900;">
+            <i class="bi bi-check-circle me-1" style="color:var(--admin-accent-green);"></i> Done — the machine reports status and accepts remote actions.
           </div>
-          <h4 style="color:var(--admin-text);font-size:1rem;font-weight:900;margin:1rem 0 .5rem;">Open the Drone app on your home network</h4>
-          <ol start="5">
-            <li>From a phone, laptop, or another computer on the same home network, open <code>https://BATOCERA-HOSTNAME.local</code>.</li>
-            <li>The default hostname is usually <code>batocera</code>, so try <code>https://batocera.local</code> first.</li>
-            <li>Older bookmarks and router rules can still use <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
-            <li>If that does not open, check the machine name in Batocera under <strong>Network Settings</strong> &gt; <strong>Hostname</strong>, then replace <code>BATOCERA-HOSTNAME</code> with that name.</li>
-          </ol>
-          <p style="color:var(--admin-muted)">Once the Drone app opens, sign in with the default username <code>batocera</code> and password <code>linux</code>. You can change these credentials from the Drone app after logging in.</p>
-          <p style="color:var(--admin-muted)">After that, this Batocera machine is ready to connect back to Overmind and join your swarm.</p>
-        </div>
+      </div>
 
-        <div class="step">
-          <h3>Connect your Drone to Overmind</h3>
-          <p style="color:var(--admin-muted)">Link the Drone app to your Overmind account so this Batocera machine can join your swarm at <code>www.batocera-swarm.com</code>.</p>
-
-          <h4 style="color:var(--admin-text);font-size:1rem;font-weight:900;margin:1rem 0 .5rem;">Recommended setup order</h4>
-          <ol>
-            <li>Register or sign in at <code>https://www.batocera-swarm.com</code>.</li>
-            <li>Go to <strong>My Swarm</strong> and click <strong>Generate Token</strong>.</li>
-            <li>Log in to your local Drone app.</li>
-            <li>Open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>.</li>
-            <li>Set <strong>Overmind URL</strong> to <code>https://www.batocera-swarm.com</code>.</li>
-            <li>Set <strong>Drone Name</strong> to the name you want shown in Overmind.</li>
-            <li>Paste the generated token into <strong>Authorization Token</strong>, then save.</li>
-          </ol>
-
-          <p style="color:var(--admin-muted)">After saving, Overmind will detect the Drone. Approve it from <strong>My Swarm</strong> to finish adding the machine.</p>
-
-          <h4 style="color:var(--admin-text);font-size:1rem;font-weight:900;margin:1rem 0 .5rem;">Optional: enable file syncing</h4>
-          <p style="color:var(--admin-muted)">Port forwarding is only required for ROM, file, artwork, config, and settings syncing. You can still connect a Drone to Overmind without port forwarding, but Overmind and other Drones will not be able to download ROMs, configs, settings, or files from that machine.</p>
-          <ul>
-            <li>Forward internet traffic on port <code>443</code> to your Batocera machine.</li>
-            <li>In the Drone app, find your router address under <strong>System Info</strong> &gt; <strong>Router IP Address</strong>, then enter that IP in your browser to log in to your router.</li>
-            <li>In your router, look for <strong>NAT</strong>, <strong>Port Forwarding</strong>, or <strong>Connected Devices</strong>.</li>
-            <li>Find your Batocera machine and forward port <code>443</code> to its IP address.</li>
-            <li>You can also find the Batocera IP address on the machine under <strong>Network Settings</strong> &gt; <strong>IP Address</strong>.</li>
-            <li>Need help? Open <a href="https://www.youtube.com/results?search_query=How+to+enable+Home+Router+NAT+Port+Forwarding" target="_blank" rel="noopener noreferrer">NAT Port Forwarding Help</a>.</li>
-          </ul>
-        </div>
+      <div class="landing-card">
+        <h2><i class="bi bi-shield-lock me-2"></i>Secure by design</h2>
+        <p>Your machines and your network deserve real protection. Security was built in from the start, not bolted on:</p>
+        <ul>
+          <li><strong>Encrypted everywhere:</strong> all traffic runs over HTTPS, and machine-to-machine transfers use mutually-authenticated TLS (mTLS).</li>
+          <li><strong>Certificate-pinned peers:</strong> Drones verify each other by certificate, so only the trusted machines in your swarm can connect or share files.</li>
+          <li><strong>Your credentials stay yours:</strong> tokens and keys stay on each machine and are never shared between peers.</li>
+          <li><strong>Locked-down access:</strong> admin tools sit behind authentication, with brute-force protection and rate limiting on unauthenticated requests.</li>
+          <li><strong>You stay in control:</strong> new Drones must be explicitly approved before they join, and the whole project is open source so anyone can verify exactly how it works.</li>
+        </ul>
       </div>
 
       <footer>
@@ -525,62 +502,81 @@
                             <div class="row g-3">
                                 <div class="col-lg-6">
                                     <div class="device-card h-100">
-                                        <h4 class="h5">Quick install: Drone on a Batocera machine</h4>
+                                        <h4 class="h5"><i class="bi bi-lightning-charge me-2"></i>Quick start</h4>
+                                        <p class="text-muted">Get a machine connected for monitoring and remote management.</p>
                                         <ol>
-                                            <li>On the Batocera machine, open a command prompt. You can SSH into the machine, or press <strong>F1</strong> on the Batocera keyboard and open the terminal from the file manager.</li>
-                                            <li>Copy and run this installer command:</li>
+                                            <li><strong>Install the Drone.</strong> On the Batocera machine, open a terminal (SSH, or press <strong>F1</strong> &rarr; file manager &rarr; terminal) and run:</li>
                                         </ol>
                                         <div class="my-3">
                                             <code style="display:block;white-space:normal;word-break:break-all;line-height:1.5;padding:.75rem;">curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash</code>
                                         </div>
-                                        <ol start="3">
-                                            <li>If you are using <strong>Batocera v43 or newer</strong>, go to <strong>System Settings</strong> &gt; <strong>Services</strong>, then turn on <strong>DRONE_SERVER</strong>.</li>
-                                            <li>If you are using an <strong>older Batocera version</strong>, reboot the machine after the installer finishes.</li>
+                                        <ol start="2">
+                                            <li><strong>Turn it on.</strong> Batocera v43+: <strong>System Settings</strong> &gt; <strong>Services</strong> &gt; enable <strong>DRONE_SERVER</strong>. Older versions: reboot.</li>
+                                            <li><strong>Open the Drone.</strong> The installer prints a green banner with the machine's address &mdash; usually <code>https://batocera.local</code>. Open it from any device on your network and sign in (user <code>batocera</code>, password <code>linux</code>).</li>
+                                            <li><strong>Connect to Overmind.</strong> Here in Overmind, open <strong>My Swarm</strong> &gt; <strong>Generate Token</strong>. In the Drone app, open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>, set the Overmind URL to <code>https://www.batocera-swarm.com</code>, paste the token, and save &mdash; then <strong>approve</strong> the Drone back in <strong>My Swarm</strong>.</li>
                                         </ol>
                                         <div class="my-3 p-3 border rounded" style="border-color:rgba(52,211,153,0.35)!important;background:rgba(52,211,153,0.10);font-weight:800;">
-                                            <i class="bi bi-check-circle me-1" style="color:var(--admin-accent-green);"></i> Done! The Drone app is installed on this Batocera machine.
+                                            <i class="bi bi-check-circle me-1" style="color:var(--admin-accent-green);"></i> Done! The machine now reports status and accepts remote actions.
                                         </div>
-                                        <h5 class="h6 mt-3">Open the Drone app on your home network</h5>
-                                        <ol start="5">
-                                            <li>From a phone, laptop, or another computer on the same home network, open <code>https://BATOCERA-HOSTNAME.local</code>.</li>
-                                            <li>The default hostname is usually <code>batocera</code>, so try <code>https://batocera.local</code> first.</li>
-                                            <li>Older bookmarks and router rules can still use <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
-                                            <li>If that does not open, check the machine name in Batocera under <strong>Network Settings</strong> &gt; <strong>Hostname</strong>, then replace <code>BATOCERA-HOSTNAME</code> with that name.</li>
-                                        </ol>
-                                        <p class="text-muted">Once the Drone app opens, sign in with the default username <code>batocera</code> and password <code>linux</code>. You can change these credentials from the Drone app after logging in.</p>
-                                        <p class="text-muted mb-0">After that, this Batocera machine is ready to connect back to Overmind and join your swarm.</p>
                                     </div>
                                 </div>
                                 <div class="col-lg-6">
                                     <div class="device-card h-100">
-                                        <h4 class="h5">Connect your Drone to Overmind</h4>
-                                        <p class="text-muted">Link the Drone app to your Overmind account so this Batocera machine can join your swarm at <code>www.batocera-swarm.com</code>.</p>
-
-                                        <h5 class="h6 mt-3">Recommended setup order</h5>
-                                        <ol>
-                                            <li>Register or sign in at <code>https://www.batocera-swarm.com</code>.</li>
-                                            <li>Go to <strong>My Swarm</strong> and click <strong>Generate Token</strong>.</li>
-                                            <li>Log in to your local Drone app.</li>
-                                            <li>Open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>.</li>
-                                            <li>Set <strong>Overmind URL</strong> to <code>https://www.batocera-swarm.com</code>.</li>
-                                            <li>Set <strong>Drone Name</strong> to the name you want shown in Overmind.</li>
-                                            <li>Paste the generated token into <strong>Authorization Token</strong>, then save.</li>
-                                        </ol>
-
-                                        <p class="text-muted">After saving, Overmind will detect the Drone. Approve it from <strong>My Swarm</strong> to finish adding the machine.</p>
-
-                                        <h5 class="h6 mt-3">Optional: enable file syncing</h5>
-                                        <p class="text-muted">Port forwarding is only required for ROM, file, artwork, config, and settings syncing. You can still connect a Drone to Overmind without port forwarding, but Overmind and other Drones will not be able to download ROMs, configs, settings, or files from that machine.</p>
-                                        <ul>
-                                            <li>Forward internet traffic on port <code>443</code> to your Batocera machine.</li>
-                                            <li>In the Drone app, find your router address under <strong>System Info</strong> &gt; <strong>Router IP Address</strong>, then enter that IP in your browser to log in to your router.</li>
-                                            <li>In your router, look for <strong>NAT</strong>, <strong>Port Forwarding</strong>, or <strong>Connected Devices</strong>.</li>
-                                            <li>Find your Batocera machine and forward port <code>443</code> to its IP address.</li>
-                                            <li>You can also find the Batocera IP address on the machine under <strong>Network Settings</strong> &gt; <strong>IP Address</strong>.</li>
-                                            <li>Need help? Open <a href="https://www.youtube.com/results?search_query=How+to+enable+Home+Router+NAT+Port+Forwarding" target="_blank" rel="noopener noreferrer">NAT Port Forwarding Help</a>.</li>
+                                        <h4 class="h5"><i class="bi bi-stars me-2"></i>What you can do from Overmind</h4>
+                                        <ul class="mb-0">
+                                            <li><strong>Monitor every machine</strong> &mdash; online status, system info, storage, and gameplay history from one dashboard.</li>
+                                            <li><strong>Manage remotely</strong> &mdash; open a Drone and use the <strong>Admin</strong> tab to turn <strong>Kiosk</strong> mode on/off, set <strong>Volume</strong>, <strong>Restart</strong> the machine, or rebuild its asset cache. Each request shows its progress under <strong>Recent Actions</strong> as it moves from pending to completed.</li>
+                                            <li><strong>Sync content between cabinets</strong> &mdash; copy games, saves, BIOS, and artwork directly from one machine to another, so you set things up once and let the others pull it. <em>(Needs the one-time router step below.)</em></li>
+                                            <li><strong>Debug from your desk</strong> &mdash; read logs, emulator configs, and metadata without walking over to the cabinet.</li>
                                         </ul>
                                     </div>
                                 </div>
+                            </div>
+
+                            <div class="device-card mt-3">
+                                <h4 class="h5"><i class="bi bi-router me-2"></i>Full setup: share files between machines</h4>
+                                <p class="text-muted">Monitoring and remote actions work as soon as a Drone is connected. <strong>One extra step</strong> lets your machines send games, saves, BIOS, and artwork to each other: you tell your router to pass incoming secure traffic (port <code>443</code>) through to the Batocera machine. This is called <em>port forwarding</em>, and you only do it once per machine.</p>
+
+                                <div class="my-3 p-3 border rounded" style="border-color:rgba(255,255,255,0.15)!important;background:rgba(255,255,255,0.04);">
+                                    <i class="bi bi-info-circle me-1"></i> <strong>Not ready to share files?</strong> Skip this entirely. The Drone still connects for monitoring and remote actions &mdash; it just won't share files with other Drones.
+                                </div>
+
+                                <p class="fw-semibold mb-1">1. Gather three things first</p>
+                                <ul>
+                                    <li><strong>Your router's address</strong> &mdash; in the Drone app, open <strong>System Info</strong> and copy the <strong>Router IP Address</strong> (it looks like <code>192.168.1.1</code>).</li>
+                                    <li><strong>Your Batocera machine's IP address</strong> &mdash; also in <strong>System Info</strong>, or on the machine under <strong>Network Settings</strong> &gt; <strong>IP Address</strong> (it looks like <code>192.168.1.50</code>).</li>
+                                    <li><strong>Your router's login</strong> &mdash; the admin username and password, usually printed on a sticker on the router itself.</li>
+                                </ul>
+
+                                <p class="fw-semibold mb-1">2. Open your router's settings</p>
+                                <p class="text-muted">Type the <strong>Router IP Address</strong> into a web browser on any device on your network, then sign in with the router login.</p>
+
+                                <p class="fw-semibold mb-1">3. Find the port forwarding page</p>
+                                <p class="text-muted">Look for a menu called <strong>Port Forwarding</strong>. Depending on the router brand it may be tucked under <strong>NAT</strong>, <strong>Firewall</strong>, <strong>Advanced</strong>, <strong>Gaming</strong>, or <strong>Virtual Server</strong>.</p>
+
+                                <p class="fw-semibold mb-1">4. Add one new rule with these exact values</p>
+                                <div class="table-responsive">
+                                    <table class="table table-sm align-middle">
+                                        <tbody>
+                                            <tr><td><strong>Name</strong></td><td>Anything you like, e.g. <code>Batocera Drone</code></td></tr>
+                                            <tr><td><strong>Device / Internal IP</strong></td><td>Your <strong>Batocera machine's IP address</strong> (not the router's)</td></tr>
+                                            <tr><td><strong>External port</strong></td><td><code>443</code></td></tr>
+                                            <tr><td><strong>Internal port</strong></td><td><code>443</code></td></tr>
+                                            <tr><td><strong>Protocol</strong></td><td><code>TCP</code> (choose "TCP/UDP" or "Both" if TCP alone isn't offered)</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <p class="fw-semibold mb-1">5. Save it</p>
+                                <p class="text-muted">Click <strong>Save</strong> (some routers say <strong>Apply</strong> or <strong>Add</strong>). A few routers need a quick reboot for the rule to take effect.</p>
+
+                                <div class="my-3 p-3 border rounded" style="border-color:rgba(52,211,153,0.35)!important;background:rgba(52,211,153,0.10);">
+                                    <i class="bi bi-check2-circle me-1" style="color:var(--admin-accent-green);"></i> <strong>How to tell it worked:</strong> come back to Overmind, open the Drone, and check its connection. Within a minute or two it should show as <strong>reachable</strong> to the swarm, and other Drones can pull files from it.
+                                </div>
+
+                                <p class="text-muted small mb-2"><strong>If it isn't working:</strong> make sure you forwarded to the <em>Batocera machine's</em> IP (not the router's), that both ports are <code>443</code>, and that the protocol includes <code>TCP</code>. Some home internet plans block incoming connections &mdash; if a correct rule still doesn't work, your internet provider may need to allow it.</p>
+
+                                <p class="mb-0"><a href="https://www.youtube.com/results?search_query=How+to+enable+Home+Router+NAT+Port+Forwarding" target="_blank" rel="noopener noreferrer"><i class="bi bi-play-circle me-1"></i>Watch a port forwarding walkthrough for your router</a></p>
                             </div>
                         </div>
                     </section>

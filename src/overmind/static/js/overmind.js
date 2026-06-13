@@ -37,6 +37,20 @@
       if (window.location.hash !== nextHash) history.pushState(null, '', nextHash);
     }
 
+    function dismissFeedbackBanner() {
+      const banner = document.getElementById('feedbackBanner');
+      if (banner) banner.style.display = 'none';
+      try { localStorage.setItem('feedback_banner_dismissed', '1'); } catch (e) {}
+    }
+
+    function initFeedbackBanner() {
+      const banner = document.getElementById('feedbackBanner');
+      if (!banner) return;
+      let dismissed = false;
+      try { dismissed = localStorage.getItem('feedback_banner_dismissed') === '1'; } catch (e) {}
+      banner.style.display = dismissed ? 'none' : 'flex';
+    }
+
     window.addEventListener('hashchange', () => {
       if (localStorage.getItem('auth_token')) return;
       const hash = window.location.hash || '';
@@ -125,6 +139,7 @@
             };
 
             document.addEventListener('DOMContentLoaded', async () => {
+                initFeedbackBanner();
                 setupInactivityTracking();
                 setupAccountMenu();
                 setupNotificationMenu();
