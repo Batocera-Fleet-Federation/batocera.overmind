@@ -31,6 +31,12 @@ logger = logging.getLogger("overmind.db")
 
 ROM_INVENTORY_FINGERPRINT_ALGORITHM = "rom-inventory-sha256-v1"
 
+# Hidden "system" swarm used to deliver superadmin alerts (new user / new drone)
+# through the existing swarm-scoped notification + email-digest pipeline. It is
+# filtered out of normal swarm listings so it never shows in the swarm switcher.
+ADMIN_ALERT_SWARM_ID = "__overmind_admin__"
+ADMIN_ALERT_SWARM_NAME = "Overmind Admin Alerts"
+
 
 def _normalize_rom_inventory_path(value: object) -> str:
     return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
@@ -219,6 +225,7 @@ class OvermindDatabase:
         self.swarm_memberships: Dict[str, Dict[str, dict]] = {}
         self.invitations: Dict[str, dict] = {}
         self.notifications: Dict[str, list] = {}
+        self.audit_events: List[dict] = []
         self._operation_depth = 0
         self._operation_dirty = False
         self._last_source_refresh_at = 0.0
@@ -366,6 +373,102 @@ class OvermindDatabase:
                 logger.warning("Failed to persist swarm notification %s: %s", event_type, error)
         return entry
 
+    def ensure_admin_alert_swarm(self, member_user_ids: Optional[list] = None) -> str:
+        """Ensure the hidden system swarm + superadmin memberships exist (both stores)."""
+        member_ids = [str(uid) for uid in (member_user_ids or []) if uid]
+        owner_id = member_ids[0] if member_ids else None
+        if postgres_store.available() and owner_id:
+            try:
+                postgres_store.ensure_admin_alert_swarm(
+                    ADMIN_ALERT_SWARM_ID, ADMIN_ALERT_SWARM_NAME, owner_id, member_ids
+                )
+            except Exception as error:
+                logger.warning("Failed to ensure admin alert swarm: %s", error)
+        if ADMIN_ALERT_SWARM_ID not in self.swarms:
+            self.swarms[ADMIN_ALERT_SWARM_ID] = {
+                "id": ADMIN_ALERT_SWARM_ID,
+                "name": ADMIN_ALERT_SWARM_NAME,
+                "owner_id": owner_id,
+                "created_at": datetime.utcnow(),
+                "is_system": True,
+            }
+        members = self.swarm_memberships.setdefault(ADMIN_ALERT_SWARM_ID, {})
+        for uid in member_ids:
+            members.setdefault(uid, {"user_id": uid, "role": "overlord", "created_at": datetime.utcnow()})
+        return ADMIN_ALERT_SWARM_ID
+
+    def add_admin_notification(self, superadmin_ids: list, event_type: str, title: str, message: str, details: Optional[dict] = None) -> dict:
+        """Notify all superadmins via the hidden system swarm (bell + email digest)."""
+        ids = [str(uid) for uid in (superadmin_ids or []) if uid]
+        if not ids:
+            return {}
+        swarm_id = self.ensure_admin_alert_swarm(ids)
+        return self.add_swarm_notification(swarm_id, event_type, title, message, details)
+
+    def record_audit_event(self, event_type: str, summary: str, *, actor: Optional[dict] = None,
+                           target_type: Optional[str] = None, target_id: Optional[str] = None,
+                           target_label: Optional[str] = None, details: Optional[dict] = None) -> dict:
+        """Append a Super Admin audit-log entry (best-effort; never raises)."""
+        actor = actor if isinstance(actor, dict) else {}
+        entry = {
+            "id": str(uuid.uuid4()),
+            "event_type": event_type,
+            "summary": summary,
+            "actor_user_id": actor.get("id"),
+            "actor_email": actor.get("email"),
+            "target_type": target_type,
+            "target_id": target_id,
+            "target_label": target_label,
+            "details": details if isinstance(details, dict) else {},
+            "created_at": datetime.utcnow(),
+        }
+        if postgres_store.available():
+            try:
+                postgres_store.insert_audit_event(entry)
+            except Exception as error:
+                logger.warning("Failed to persist audit event %s: %s", event_type, error)
+        self.audit_events.append(entry)
+        overflow = len(self.audit_events) - 2000
+        if overflow > 0:
+            del self.audit_events[:overflow]
+        return entry
+
+    def list_audit_events(self, search: Optional[str] = None, limit: int = 20, offset: int = 0) -> dict:
+        """Return a page of audit events newest-first: ``{"events": [...], "total": N}``."""
+        limit = max(1, min(int(limit or 20), 100))
+        offset = max(0, int(offset or 0))
+        if postgres_store.available():
+            page = postgres_store.list_audit_events(search, limit, offset)
+            if page is not None:
+                return page
+        term = str(search or "").strip().lower()
+        rows = list(reversed(self.audit_events))
+        if term:
+            rows = [
+                event for event in rows
+                if any(term in str(event.get(field) or "").lower()
+                       for field in ("event_type", "summary", "actor_email", "target_label"))
+            ]
+        return {"events": rows[offset:offset + limit], "total": len(rows)}
+
+    def summarize_sync_actions(self) -> dict:
+        """Counts of all sync actions by status for the Super Admin summary."""
+        if postgres_store.available():
+            summary = postgres_store.summarize_sync_actions()
+            if summary is not None:
+                return summary
+        by_status: dict = {}
+        total = 0
+        for actions in self.device_actions.values():
+            for action in actions:
+                if not str(action.get("action") or "").startswith("sync"):
+                    continue
+                status_value = action.get("status") or "pending"
+                key = "in_progress" if status_value == "claimed" else str(status_value)
+                by_status[key] = by_status.get(key, 0) + 1
+                total += 1
+        return {"total": total, "by_status": by_status}
+
     def _recent_drone_status_notification_exists(self, swarm_id: str, event_type: str, details: Optional[dict]) -> bool:
         device = details.get("device") if isinstance(details, dict) else None
         device_id = str(device.get("device_id") or "").strip() if isinstance(device, dict) else ""
@@ -427,7 +530,7 @@ class OvermindDatabase:
 
     def _user_notification_rows(self, user_id: str) -> List[dict]:
         """In-memory (non-Postgres) fallback: all non-dismissed rows, newest first."""
-        swarm_ids = {row["id"] for row in self.get_user_swarms(user_id)}
+        swarm_ids = {row["id"] for row in self.get_user_swarms(user_id, include_system=True)}
         rows = []
         for swarm_id in swarm_ids:
             swarm = self.swarms.get(swarm_id) or {}
@@ -469,7 +572,7 @@ class OvermindDatabase:
             relational = postgres_store.mark_notifications_read(user_id, notification_ids)
             if relational is not None:
                 return relational
-        allowed_swarms = {row["id"] for row in self.get_user_swarms(user_id)}
+        allowed_swarms = {row["id"] for row in self.get_user_swarms(user_id, include_system=True)}
         wanted = {str(item) for item in notification_ids or [] if str(item)}
         count = 0
         now = datetime.utcnow()
@@ -488,7 +591,7 @@ class OvermindDatabase:
             relational = postgres_store.dismiss_notifications(user_id, notification_ids)
             if relational is not None:
                 return relational
-        allowed_swarms = {row["id"] for row in self.get_user_swarms(user_id)}
+        allowed_swarms = {row["id"] for row in self.get_user_swarms(user_id, include_system=True)}
         wanted = {str(item) for item in notification_ids or [] if str(item)}
         count = 0
         now = datetime.utcnow()
@@ -976,13 +1079,17 @@ class OvermindDatabase:
         user = self.get_user(user_id) or {}
         return self.create_swarm(user_id, f"{user.get('full_name') or user.get('email') or 'Overlord'}'s Swarm")
 
-    def get_user_swarms(self, user_id: str) -> List[dict]:
+    def get_user_swarms(self, user_id: str, include_system: bool = False) -> List[dict]:
         if postgres_store.available():
             relational = postgres_store.list_user_swarms(user_id)
             if relational is not None:
-                return relational
+                if include_system:
+                    return relational
+                return [row for row in relational if row.get("id") != ADMIN_ALERT_SWARM_ID]
         rows = []
         for swarm_id, members in self.swarm_memberships.items():
+            if not include_system and swarm_id == ADMIN_ALERT_SWARM_ID:
+                continue
             member = members.get(user_id)
             swarm = self.swarms.get(swarm_id)
             if member and swarm:
@@ -1473,6 +1580,7 @@ class OvermindDatabase:
                 "last_seen": now,
                 "status": "pending",
             })
+            existing["_created"] = False
             return existing
 
         connection = {
@@ -1487,6 +1595,7 @@ class OvermindDatabase:
             "authorization_token_id": authorization_token_id,
             "drone_token_hash": drone_token_hash,
             "recovery_reason": recovery_reason,
+            "_created": True,
         }
         self.pending_drone_connections[device_id] = connection
         return connection

@@ -115,6 +115,8 @@
             let superAdminMetricsTimer = null;
             let syncActionsOffset = 0;
             let syncActionsPageSize = 20;
+            let auditLogOffset = 0;
+            let auditLogPageSize = 20;
             let notificationsRefreshTimer = null;
             let notificationsPageOffset = 0;
             const notificationsPageSize = 25;
@@ -4806,13 +4808,35 @@
                                     </select>
                                 </div>
                             </div>
+                            <div id="sync-actions-summary" class="d-flex flex-wrap gap-2 mb-2"></div>
                             <div id="sync-actions-results"><div class="empty-state">Loading sync actions…</div></div>
+                        </div>
+                        <div class="device-card mt-3">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <h4 class="h5 mb-0">Audit Log</h4>
+                                <div class="d-flex flex-wrap align-items-center gap-2">
+                                    <input id="audit-log-search" class="form-control form-control-sm" type="text" placeholder="Search event / summary / email / target" style="min-width: 260px;" onkeydown="if(event.key==='Enter'){event.preventDefault();searchSuperAdminAuditLog();}">
+                                    <button class="btn btn-primary btn-sm" type="button" onclick="searchSuperAdminAuditLog()">Search</button>
+                                    <button class="btn btn-outline-secondary btn-sm" type="button" onclick="clearSuperAdminAuditLogSearch()">Clear</button>
+                                    <select id="audit-log-page-size" class="form-select form-select-sm" style="width: auto;" onchange="changeAuditLogPageSize(this.value)" title="Rows per page">
+                                        <option value="20">20</option>
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div id="audit-log-results"><div class="empty-state">Loading audit log…</div></div>
                         </div>
                     `;
                     syncActionsOffset = 0;
+                    auditLogOffset = 0;
                     const pageSizeSelect = document.getElementById('sync-actions-page-size');
                     if (pageSizeSelect) pageSizeSelect.value = String(syncActionsPageSize);
+                    const auditPageSizeSelect = document.getElementById('audit-log-page-size');
+                    if (auditPageSizeSelect) auditPageSizeSelect.value = String(auditLogPageSize);
                     loadSuperAdminSyncActions();
+                    loadSuperAdminSyncSummary();
+                    loadSuperAdminAuditLog();
                 } catch (error) {
                     console.error('Error loading super admin data:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load super admin data.</div>';
@@ -4902,6 +4926,95 @@
                 } catch (error) {
                     console.error('Error loading sync actions:', error);
                     results.innerHTML = '<div class="empty-state">Unable to load sync actions.</div>';
+                }
+            }
+
+            async function loadSuperAdminSyncSummary() {
+                const container = document.getElementById('sync-actions-summary');
+                if (!container || !isSuperAdmin()) return;
+                try {
+                    const response = await apiGet('/api/admin/sync-actions/summary', { showLoader: false });
+                    if (!response.ok) throw new Error('Failed to load sync summary');
+                    const data = await response.json();
+                    const byStatus = data.by_status || {};
+                    const order = ['completed', 'in_progress', 'pending', 'failed', 'cancelled'];
+                    const keys = order.filter(k => k in byStatus).concat(Object.keys(byStatus).filter(k => !order.includes(k)));
+                    container.innerHTML = `
+                        <span class="badge text-bg-primary">Total: ${Number(data.total || 0)}</span>
+                        ${keys.map(key => `<span class="badge ${syncActionStatusBadge(key)}">${escapeHtml(key.replace('_', ' '))}: ${Number(byStatus[key] || 0)}</span>`).join('')}
+                    `;
+                } catch (error) {
+                    console.error('Error loading sync summary:', error);
+                    container.innerHTML = '';
+                }
+            }
+
+            function searchSuperAdminAuditLog() {
+                auditLogOffset = 0;
+                loadSuperAdminAuditLog();
+            }
+
+            function clearSuperAdminAuditLogSearch() {
+                const input = document.getElementById('audit-log-search');
+                if (input) input.value = '';
+                auditLogOffset = 0;
+                loadSuperAdminAuditLog();
+            }
+
+            function changeAuditLogPageSize(value) {
+                const size = Number(value) || 20;
+                auditLogPageSize = [20, 50, 100].includes(size) ? size : 20;
+                auditLogOffset = 0;
+                loadSuperAdminAuditLog();
+            }
+
+            function gotoAuditLogPage(offset) {
+                auditLogOffset = Math.max(0, Number(offset) || 0);
+                loadSuperAdminAuditLog();
+            }
+
+            async function loadSuperAdminAuditLog() {
+                const results = document.getElementById('audit-log-results');
+                if (!results || !isSuperAdmin()) return;
+                const input = document.getElementById('audit-log-search');
+                const query = input ? input.value.trim() : '';
+                const limit = auditLogPageSize;
+                const offset = auditLogOffset;
+                results.innerHTML = '<div class="empty-state">Loading audit log…</div>';
+                try {
+                    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+                    if (query) params.set('q', query);
+                    const response = await apiGet(`/api/admin/audit-log?${params.toString()}`, { showLoader: false });
+                    if (!response.ok) throw new Error('Failed to load audit log');
+                    const data = await response.json();
+                    const events = data.audit_events || [];
+                    const total = Number(data.total || 0);
+                    const start = total ? offset + 1 : 0;
+                    const end = offset + events.length;
+                    const hasPrev = offset > 0;
+                    const hasNext = end < total;
+                    results.innerHTML = `
+                        <div class="table-responsive"><table class="table table-sm align-middle">
+                            <thead><tr><th>When</th><th>Event</th><th>Summary</th><th>Actor</th><th>Target</th></tr></thead>
+                            <tbody>${events.map(event => `
+                                <tr>
+                                    <td>${formatAdminDate(event.created_at)}</td>
+                                    <td><span class="badge text-bg-secondary">${escapeHtml(String(event.event_type || '').replace(/_/g, ' '))}</span></td>
+                                    <td>${escapeHtml(event.summary || '')}</td>
+                                    <td>${escapeHtml(event.actor_email || '')}</td>
+                                    <td>${escapeHtml(event.target_label || event.target_id || '')}</td>
+                                </tr>`).join('') || `<tr><td colspan="5" class="text-muted">${query ? 'No audit events match your search.' : 'No audit events yet.'}</td></tr>`}</tbody>
+                        </table></div>
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
+                            <span class="small text-muted">${total ? `Showing ${start}–${end} of ${total}` : 'No results'}</span>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary" type="button" ${hasPrev ? '' : 'disabled'} onclick="gotoAuditLogPage(${Math.max(0, offset - limit)})">Previous</button>
+                                <button class="btn btn-outline-secondary" type="button" ${hasNext ? '' : 'disabled'} onclick="gotoAuditLogPage(${offset + limit})">Next</button>
+                            </div>
+                        </div>`;
+                } catch (error) {
+                    console.error('Error loading audit log:', error);
+                    results.innerHTML = '<div class="empty-state">Unable to load audit log.</div>';
                 }
             }
 

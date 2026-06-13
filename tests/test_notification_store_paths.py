@@ -134,3 +134,40 @@ def test_expire_stale_device_actions_fails_claimed_actions(monkeypatch):
     assert "status = 'failed'" in sql
     assert "status IN ('claimed', 'in_progress')" in sql
     assert params[1] == 600  # timeout seconds bound into the interval
+
+
+def test_insert_audit_event_writes_row(monkeypatch):
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    monkeypatch.setattr(store, "_core_connection", lambda ensure_schema=False: _FakeConn(cursor))
+
+    ok = store.insert_audit_event({
+        "id": "evt-1", "event_type": "user_registered", "summary": "New user registered: a@b.c",
+        "actor_user_id": "u1", "actor_email": "a@b.c", "target_type": "user",
+        "target_id": "u1", "target_label": "a@b.c", "details": {"x": 1},
+        "created_at": None,
+    })
+
+    assert ok is True
+    sql, params = cursor.executed[-1]
+    assert "INSERT INTO admin_audit_log" in sql
+    assert params[0] == "evt-1" and params[1] == "user_registered"
+
+
+def test_list_audit_events_returns_page(monkeypatch):
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([
+        ("count(*)", [(2,)]),
+        ("FROM admin_audit_log", [
+            ("evt-2", "drone_registered", "New Drone registered: Cab", "a@b.c", "drone", "d1", "Cab", None, "2026-06-13T00:00:00Z"),
+            ("evt-1", "user_registered", "New user registered: a@b.c", "a@b.c", "user", "u1", "a@b.c", '{"x": 1}', "2026-06-12T00:00:00Z"),
+        ]),
+    ])
+    # fetchone() must return the count tuple for the COUNT query.
+    cursor.fetchone = lambda: (2,)  # type: ignore[assignment]
+    monkeypatch.setattr(store, "_core_connection", lambda ensure_schema=False: _FakeConn(cursor))
+
+    page = store.list_audit_events(limit=20, offset=0)
+    assert page["total"] == 2
+    assert len(page["events"]) == 2
+    assert page["events"][1]["details"] == {"x": 1}

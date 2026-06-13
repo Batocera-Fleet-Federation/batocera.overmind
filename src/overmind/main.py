@@ -35,7 +35,7 @@ from overmind.models import (
     DroneActionCompleteRequest, DroneAssetMetadataUpload, DroneDownloadsReport, DroneEmulatorConfigsUpload,
     DroneGameLogsUpload, DroneHeartbeatRequest, DroneLogSourcesUpload, DronePeerChecksUpload, DroneSpeedSampleUpload,
 )
-from overmind.db import db
+from overmind.db import db, ADMIN_ALERT_SWARM_ID
 from overmind import auth
 from overmind import cache
 from overmind import emailer
@@ -884,6 +884,21 @@ def require_super_admin(authorization: Optional[str]) -> dict:
     return _require_super_admin(authorization, current_user=get_current_user, super_admin_email=SUPER_ADMIN_EMAIL)
 
 
+def _super_admin_users() -> list[dict]:
+    """All users treated as superadmins (currently the configured email; future-proofed)."""
+    users: list[dict] = []
+    seen: set[str] = set()
+    candidate = db.get_user_by_email(SUPER_ADMIN_EMAIL)
+    if candidate and candidate.get("id") and candidate["id"] not in seen:
+        users.append(candidate)
+        seen.add(candidate["id"])
+    return users
+
+
+def _super_admin_ids(exclude_user_id: Optional[str] = None) -> list[str]:
+    return [str(u["id"]) for u in _super_admin_users() if u.get("id") and str(u["id"]) != str(exclude_user_id or "")]
+
+
 def _user_label(user: dict) -> str:
     return str(user.get("full_name") or user.get("email") or user.get("id") or "Unknown user")
 
@@ -973,6 +988,26 @@ async def register(user_data: UserRegister):
         auto_verify = True
     user_id = db.create_user(user_data.email, hashed_password, user_data.full_name, verified=auto_verify, auth_provider="password", username=username)
     user = db.get_user(user_id)
+    try:
+        admin_ids = _super_admin_ids(exclude_user_id=user_id)
+        if admin_ids:
+            db.add_admin_notification(
+                admin_ids,
+                "admin_user_registered",
+                "New user registered",
+                f"{user.get('username') or user.get('email')} just created an Overmind account.",
+                {"user": {"id": user_id, "email": user.get("email"), "username": user.get("username")}},
+            )
+        db.record_audit_event(
+            "user_registered",
+            f"New user registered: {user.get('email')}",
+            actor=user,
+            target_type="user",
+            target_id=user_id,
+            target_label=user.get("email"),
+        )
+    except Exception as error:
+        logger.warning("Failed to record user-registration admin alert: %s", error)
     if invitation:
         db.accept_invitation_for_user(invitation, user_id)
         print(f"Invitation registration flow completed for {user_data.email}: swarm_id={invitation.get('swarm_id')}")
@@ -1329,7 +1364,10 @@ async def admin_overview(authorization: Optional[str] = Header(default=None)):
     db.refresh_admin_overview_state()
     db._dedupe_all_device_records()
     users = sorted((admin_user_row(user) for user in db.users.values()), key=lambda row: str(row.get("email") or "").lower())
-    swarms = sorted((admin_swarm_row(swarm) for swarm in db.swarms.values()), key=lambda row: str(row.get("name") or "").lower())
+    swarms = sorted(
+        (admin_swarm_row(swarm) for swarm in db.swarms.values() if swarm.get("id") != ADMIN_ALERT_SWARM_ID),
+        key=lambda row: str(row.get("name") or "").lower(),
+    )
     drones = sorted((admin_drone_row(device) for device in db.devices.values()), key=lambda row: str(row.get("device_name") or row.get("device_id") or "").lower())
     pending_connections = sorted(
         (admin_pending_drone_connection_row(connection) for connection in db.get_all_pending_drone_connections()),
@@ -1365,6 +1403,29 @@ async def admin_sync_actions(
     offset = max(0, int(offset or 0))
     page = db.list_all_sync_actions(search=q, limit=limit, offset=offset)
     return {"sync_actions": page["actions"], "total": page["total"], "limit": limit, "offset": offset}
+
+
+@app.get("/api/admin/sync-actions/summary")
+async def admin_sync_actions_summary(authorization: Optional[str] = Header(default=None)):
+    """Status counts across all sync actions (super admin only)."""
+    require_super_admin(authorization)
+    db.refresh_admin_overview_state()
+    return db.summarize_sync_actions()
+
+
+@app.get("/api/admin/audit-log")
+async def admin_audit_log(
+    q: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+    authorization: Optional[str] = Header(default=None),
+):
+    """List Super Admin audit-log events, newest first (super admin only)."""
+    require_super_admin(authorization)
+    limit = max(1, min(int(limit or 20), 100))
+    offset = max(0, int(offset or 0))
+    page = db.list_audit_events(search=q, limit=limit, offset=offset)
+    return {"audit_events": page["events"], "total": page["total"], "limit": limit, "offset": offset}
 
 
 @app.get("/api/admin/runtime-metrics")
@@ -1681,13 +1742,39 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
             "drone_token": raw_auth_token,
         }
 
-    db.create_pending_drone_connection(
+    pending = db.create_pending_drone_connection(
         device_data.device_id,
         device_data.device_name,
         batocera_info,
         user_id=user["id"],
         authorization_token_id=integration_token.get("id"),
     )
+    # Alert superadmins the first time a Drone they don't own registers (not on retries).
+    if pending.get("_created") and str(user.get("email") or "").strip().lower() != SUPER_ADMIN_EMAIL:
+        try:
+            owner_label = user.get("username") or user.get("email")
+            admin_ids = _super_admin_ids(exclude_user_id=user["id"])
+            if admin_ids:
+                db.add_admin_notification(
+                    admin_ids,
+                    "admin_drone_registered",
+                    "New Drone registered",
+                    f"{device_data.device_name} registered under {owner_label} (awaiting approval).",
+                    {
+                        "device": {"device_id": device_data.device_id, "device_name": device_data.device_name},
+                        "owner": {"id": user["id"], "email": user.get("email")},
+                    },
+                )
+            db.record_audit_event(
+                "drone_registered",
+                f"New Drone registered: {device_data.device_name} (owner {owner_label})",
+                actor=user,
+                target_type="drone",
+                target_id=device_data.device_id,
+                target_label=device_data.device_name,
+            )
+        except Exception as error:
+            logger.warning("Failed to record drone-registration admin alert: %s", error)
     return {
         "message": "Psionic connection detected. Awaiting Overlord approval.",
         "status": "pending",

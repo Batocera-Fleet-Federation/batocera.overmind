@@ -31,6 +31,8 @@ NOTIFICATION_EVENT_TYPES = {
     "sync_triggered": "Sync triggered",
     "device_action_completed": "Remote action completed",
     "device_action_failed": "Remote action failed",
+    "admin_user_registered": "New user registered",
+    "admin_drone_registered": "New Drone registered",
 }
 
 NOTIFICATION_TYPE_GROUPS = {
@@ -42,6 +44,7 @@ NOTIFICATION_TYPE_GROUPS = {
     "drone_membership": ("drone_added", "drone_removed"),
     "sync_triggered": ("sync_triggered",),
     "device_action": ("device_action_completed", "device_action_failed"),
+    "admin_alerts": ("admin_user_registered", "admin_drone_registered"),
 }
 
 EVENT_TYPE_TO_SETTING = {

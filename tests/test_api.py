@@ -959,11 +959,84 @@ def test_super_admin_sync_actions_listing_and_search(client):
     assert client.get("/api/admin/sync-actions", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
 
 
+def test_new_user_registration_alerts_superadmin(client):
+    # Superadmin must exist before the new user registers so it can be notified.
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
+    admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
+    admin = db.get_user_by_email("mr_jerrodh@hotmail.com")
+
+    client.post("/api/auth/register", json={"email": "newbie@example.com", "username": "newbie", "password": "testpass123"})
+
+    # Bell notification reached the superadmin.
+    notifications = client.get("/api/notifications", headers={"Authorization": f"Bearer {admin_token}"}).json()["notifications"]
+    user_alerts = [n for n in notifications if n["event_type"] == "admin_user_registered"]
+    assert len(user_alerts) == 1
+    assert "newbie" in user_alerts[0]["message"]
+
+    # Audit log captured it.
+    audit = client.get("/api/admin/audit-log", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert any(e["event_type"] == "user_registered" and e["target_label"] == "newbie@example.com" for e in audit["audit_events"])
+
+    # The hidden admin-alert swarm is not exposed in normal swarm listings.
+    visible = {s["id"] for s in db.get_user_swarms(admin["id"])}
+    assert "__overmind_admin__" not in visible
+    assert "__overmind_admin__" in {s["id"] for s in db.get_user_swarms(admin["id"], include_system=True)}
+
+
+def test_new_drone_registration_alerts_superadmin_when_not_owned(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
+    admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
+
+    client.post("/api/auth/register", json={"email": "remote-owner@example.com", "username": "remote-owner", "password": "testpass123"})
+    owner_token = client.post("/api/auth/login", json={"email": "remote-owner@example.com", "password": "testpass123"}).json()["access_token"]
+    auth_token = client.post(
+        "/api/integration-tokens",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"label": "Cabinet"},
+    ).json()["token"]["authorization_token"]
+
+    register = client.post(
+        "/api/devices/register",
+        headers={"Authorization": f"Bearer {auth_token}"},
+        json=_device_registration_payload(
+            authorization_token=auth_token,
+            device_id="guest-arcade",
+            device_name="Guest Arcade",
+            email="remote-owner@example.com",
+        ),
+    )
+    assert register.status_code == 200
+
+    alerts = [n for n in client.get("/api/notifications", headers={"Authorization": f"Bearer {admin_token}"}).json()["notifications"]
+              if n["event_type"] == "admin_drone_registered"]
+    assert len(alerts) == 1
+    assert "Guest Arcade" in alerts[0]["message"]
+
+    audit = client.get("/api/admin/audit-log?q=guest", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert any(e["event_type"] == "drone_registered" for e in audit["audit_events"])
+
+
+def test_admin_audit_log_and_sync_summary_are_super_admin_only(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
+    admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "reg@example.com", "username": "reg", "password": "testpass123"})
+    reg_token = client.post("/api/auth/login", json={"email": "reg@example.com", "password": "testpass123"}).json()["access_token"]
+
+    assert client.get("/api/admin/audit-log", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
+    assert client.get("/api/admin/sync-actions/summary", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
+
+    summary = client.get("/api/admin/sync-actions/summary", headers={"Authorization": f"Bearer {admin_token}"})
+    assert summary.status_code == 200
+    body = summary.json()
+    assert "total" in body and "by_status" in body
+
+
 def test_drone_reachability_notification_type_registered():
     from overmind import notification_delivery as nd
     from pathlib import Path as _Path
 
     assert nd.EVENT_TYPE_TO_SETTING["drone_resolvable"] == "drone_reachability"
+    assert nd.EVENT_TYPE_TO_SETTING["admin_user_registered"] == "admin_alerts"
     assert nd.EVENT_TYPE_TO_SETTING["drone_unresolvable"] == "drone_reachability"
     assert nd.DEFAULT_NOTIFICATION_TYPES["drone_reachability"] is True
     assert nd._TEMPLATE_BY_EVENT_TYPE["drone_resolvable"] == "notification_drone_reachability.html"

@@ -3230,6 +3230,116 @@ class PostgresMetadataStore:
         )
         return {"id": swarm_id, "owner_id": owner_id, "name": swarm_name, "created_at": created_at}
 
+    def ensure_admin_alert_swarm(self, swarm_id: str, name: str, owner_id: str, member_ids: list[str]) -> Optional[str]:
+        """Upsert the hidden system swarm and superadmin memberships (lean path)."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None or not owner_id:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO swarms (id, owner_user_id, name, is_public, created_at, updated_at)
+                    VALUES (%s, %s, %s, false, now(), now())
+                    ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+                    """,
+                    (swarm_id, owner_id, name),
+                )
+                for uid in [u for u in (member_ids or []) if u]:
+                    cur.execute(
+                        """
+                        INSERT INTO swarm_memberships (swarm_id, user_id, role, created_at)
+                        VALUES (%s, %s, 'overlord', now())
+                        ON CONFLICT (swarm_id, user_id) DO UPDATE SET role = 'overlord'
+                        """,
+                        (swarm_id, uid),
+                    )
+        return swarm_id
+
+    def insert_audit_event(self, event: dict) -> bool:
+        """Insert one Super Admin audit-log row (idempotent by id)."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO admin_audit_log
+                        (id, event_type, summary, actor_user_id, actor_email,
+                         target_type, target_id, target_label, details, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        event["id"], event["event_type"], event["summary"],
+                        event.get("actor_user_id"), event.get("actor_email"),
+                        event.get("target_type"), event.get("target_id"), event.get("target_label"),
+                        json.dumps(event.get("details") or {}), event.get("created_at"),
+                    ),
+                )
+        return True
+
+    def list_audit_events(self, search: Optional[str] = None, limit: int = 20, offset: int = 0) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        row_limit = max(1, min(int(limit or 20), 100))
+        row_offset = max(0, int(offset or 0))
+        term = str(search or "").strip().lower()
+        where = ""
+        where_params: list = []
+        if term:
+            where = ("WHERE lower(event_type) LIKE %s OR lower(summary) LIKE %s "
+                     "OR lower(coalesce(actor_email, '')) LIKE %s OR lower(coalesce(target_label, '')) LIKE %s")
+            like = f"%{term}%"
+            where_params = [like, like, like, like]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT count(*) FROM admin_audit_log {where}", where_params)
+                total = cur.fetchone()[0]
+                cur.execute(
+                    f"""
+                    SELECT id, event_type, summary, actor_email, target_type, target_id,
+                           target_label, details, created_at
+                    FROM admin_audit_log
+                    {where}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    where_params + [row_limit, row_offset],
+                )
+                events = []
+                for row in cur.fetchall():
+                    try:
+                        details = json.loads(row[7]) if row[7] else {}
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        details = {}
+                    events.append({
+                        "id": row[0], "event_type": row[1], "summary": row[2], "actor_email": row[3],
+                        "target_type": row[4], "target_id": row[5], "target_label": row[6],
+                        "details": details, "created_at": row[8],
+                    })
+        return {"events": events, "total": total}
+
+    def summarize_sync_actions(self) -> Optional[dict]:
+        """Counts of sync actions grouped by status (super-admin summary)."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, count(*) FROM drone_actions WHERE action LIKE 'sync%%' GROUP BY status"
+                )
+                by_status: dict = {}
+                total = 0
+                for status_value, count in cur.fetchall():
+                    key = "in_progress" if status_value == "claimed" else str(status_value or "pending")
+                    by_status[key] = by_status.get(key, 0) + int(count)
+                    total += int(count)
+        return {"total": total, "by_status": by_status}
+
     def accept_invitations_for_email(self, email: str, user_id: str) -> list[dict]:
         conn = self._core_connection(ensure_schema=False)
         if conn is None or not email or not user_id:
@@ -3427,7 +3537,7 @@ class PostgresMetadataStore:
                         requested_at = now(),
                         status = 'pending'
                     RETURNING device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id,
-                              drone_token_hash, recovery_reason, requested_at, status
+                              drone_token_hash, recovery_reason, requested_at, status, (xmax = 0)
                     """,
                     (
                         device_id,
@@ -3440,7 +3550,11 @@ class PostgresMetadataStore:
                         recovery_reason,
                     ),
                 )
-                return self._pending_drone_connection_from_row(cur.fetchone())
+                row = cur.fetchone()
+                result = self._pending_drone_connection_from_row(row[:10] if row else row)
+                if result is not None and row is not None:
+                    result["_created"] = bool(row[10])
+                return result
 
     def get_pending_drone_connections(self, user_id: str) -> Optional[list[dict]]:
         conn = self._core_connection()
