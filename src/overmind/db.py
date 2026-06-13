@@ -2384,6 +2384,30 @@ class OvermindDatabase:
         self.device_actions[device["id"]] = retained
         return deleted_count
 
+    def expire_stale_device_actions(self, timeout_seconds: int = 600) -> int:
+        """Mark actions claimed but never completed (past timeout) as failed.
+
+        Safety net for the actions UI: a Drone that claimed an action but never reported
+        completion (it died mid-action, or its completion POST kept failing) would otherwise
+        leave the action 'in_progress' indefinitely. Returns the number of actions failed.
+        """
+        if postgres_store.available():
+            return postgres_store.expire_stale_device_actions(timeout_seconds)
+        cutoff = datetime.utcnow() - timedelta(seconds=max(60, int(timeout_seconds)))
+        message = "Action timed out: the Drone did not report completion."
+        expired = 0
+        for actions in self.device_actions.values():
+            for action in actions:
+                if action.get("status") not in {"claimed", "in_progress"}:
+                    continue
+                reference = action.get("claimed_at") or action.get("created_at")
+                if reference and reference < cutoff:
+                    action["status"] = "failed"
+                    action["completed_at"] = datetime.utcnow()
+                    action["message"] = message
+                    expired += 1
+        return expired
+
     def claim_next_device_action(self, device_id: str) -> Optional[dict]:
         """Claim the oldest pending action for a device."""
         device = self.get_device_by_device_id(device_id)

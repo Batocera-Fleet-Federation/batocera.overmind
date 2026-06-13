@@ -3929,6 +3929,46 @@ def test_get_device_actions_recency_window(client):
     assert all(a["id"] != action["id"] for a in aged)
 
 
+def test_expire_stale_device_actions_marks_in_progress_as_failed(client):
+    seed_test_fleet()
+    device = db.get_device_by_device_id("arcade-cabinet-001")
+    user_id = device["user_id"]
+
+    stale = db.create_device_action(user_id, "arcade-cabinet-001", "enable_kiosk", {})
+    fresh = db.create_device_action(user_id, "arcade-cabinet-001", "restart", {})
+    db.claim_pending_device_actions("arcade-cabinet-001")  # both -> in_progress
+    stored = {a["id"]: a for a in db.device_actions[device["id"]]}
+    stored[stale["id"]]["claimed_at"] = datetime.utcnow() - timedelta(minutes=20)
+
+    expired = db.expire_stale_device_actions(600)
+    assert expired == 1
+    assert stored[stale["id"]]["status"] == "failed"
+    assert "timed out" in (stored[stale["id"]]["message"] or "").lower()
+    # The recently claimed action is left running.
+    assert stored[fresh["id"]]["status"] == "in_progress"
+
+    # The timed-out action remains visible (as failed) in the recent-actions listing.
+    listed = db.get_device_actions(user_id, "arcade-cabinet-001", include_recent=True)
+    failed = [a for a in listed if a["id"] == stale["id"]]
+    assert failed and failed[0]["status"] == "failed"
+
+
+def test_poll_device_status_job_expires_stale_actions(client):
+    from overmind import main
+
+    seed_test_fleet()
+    device = db.get_device_by_device_id("arcade-cabinet-001")
+    user_id = device["user_id"]
+    action = db.create_device_action(user_id, "arcade-cabinet-001", "enable_kiosk", {})
+    db.claim_pending_device_actions("arcade-cabinet-001")
+    stored = next(a for a in db.device_actions[device["id"]] if a["id"] == action["id"])
+    stored["claimed_at"] = datetime.utcnow() - timedelta(hours=1)
+
+    main.poll_device_status_notifications_once()
+
+    assert stored["status"] == "failed"
+
+
 def test_device_action_lifecycle(client):
     seed_test_fleet()
     login_response = client.post(

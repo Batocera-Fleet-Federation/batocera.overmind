@@ -103,6 +103,10 @@ DEVICE_STATUS_MAX_DEVICES_PER_RUN = max(0, int(os.getenv(
     "DEVICE_STATUS_MAX_DEVICES_PER_RUN",
     "50" if _LAMBDA_RUNTIME_ENV else "0",
 )))
+# Safety net: an action a Drone claimed but never reported completion for (e.g. the
+# Drone died mid-action, or its completion POST failed) is marked failed after this
+# many seconds so it stops showing as a perpetual "in progress" in the actions UI.
+DEVICE_ACTION_TIMEOUT_SECONDS = max(60, int(os.getenv("DEVICE_ACTION_TIMEOUT_SECONDS", "600")))
 # Public-reachability probe: bounded so a single 60s run can never back up.
 # Per-probe TCP timeout, worker fan-out, and a hard wall-clock budget that keeps
 # every run well under the EventBridge 60s cadence (which has retries disabled).
@@ -419,6 +423,14 @@ def poll_device_status_notifications_once() -> None:
         SWARM_OFFLINE_THRESHOLD_SECONDS,
         limit=DEVICE_STATUS_MAX_DEVICES_PER_RUN,
     )
+    # Fail any action a Drone claimed but never reported completion for, so it stops
+    # hanging as "in progress" forever.
+    try:
+        expired = db.expire_stale_device_actions(DEVICE_ACTION_TIMEOUT_SECONDS)
+        if expired:
+            print(f"Expired {expired} stale device action(s) past {DEVICE_ACTION_TIMEOUT_SECONDS}s timeout")
+    except Exception as error:
+        logger.warning("Failed to expire stale device actions: %s", error)
 
 
 def _emit_reachability_notification(device: dict, resolvable: bool) -> None:

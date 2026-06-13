@@ -118,3 +118,19 @@ def test_mirror_device_details_writes_fresh_probe_data():
     assert params[4] is True       # public_resolvable
     assert params[5] == "8.8.8.8"  # public_ip
     assert params[6] is not None   # checked_at preserved
+
+
+def test_expire_stale_device_actions_fails_claimed_actions(monkeypatch):
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    cursor.rowcount = 3
+    monkeypatch.setattr(store, "_core_connection", lambda ensure_schema=False: _FakeConn(cursor))
+
+    count = store.expire_stale_device_actions(600)
+
+    assert count == 3
+    sql, params = cursor.executed[-1]
+    assert "UPDATE drone_actions" in sql
+    assert "status = 'failed'" in sql
+    assert "status IN ('claimed', 'in_progress')" in sql
+    assert params[1] == 600  # timeout seconds bound into the interval

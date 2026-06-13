@@ -2769,6 +2769,28 @@ class PostgresMetadataStore:
                         by_id[action_id].setdefault("payload", {})[parameter_name] = value
                 return actions
 
+    def expire_stale_device_actions(self, timeout_seconds: int = 600) -> int:
+        """Mark claimed/in-progress actions older than the timeout as failed. Returns count."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return 0
+        seconds = max(60, int(timeout_seconds))
+        message = f"Action timed out: the Drone did not report completion within {seconds // 60} minute(s)."
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE drone_actions
+                    SET status = 'failed',
+                        completed_at = now(),
+                        message = %s
+                    WHERE status IN ('claimed', 'in_progress')
+                      AND COALESCE(claimed_at, created_at) < now() - (%s * interval '1 second')
+                    """,
+                    (message, seconds),
+                )
+                return cur.rowcount or 0
+
     def complete_device_action(
         self,
         device_id: str,
