@@ -3427,6 +3427,25 @@ def test_heartbeat_accepts_saves_files_thumbprint_and_updates_last_seen(client):
     assert (datetime.utcnow() - refreshed["last_seen"]).total_seconds() < 60
 
 
+def test_heartbeat_accepts_audio_volume_in_system_info(client):
+    client.post("/api/auth/register", json={"email": "hb-vol@example.com", "username": "hb-vol-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("hb-vol@example.com")
+    db.create_device(user["id"], "drone-vol", "Drone Vol", {"ip_address": "10.0.0.2"}, raw_token="drone-token-vol")
+
+    response = client.post(
+        "/api/devices/drone-vol/heartbeat",
+        headers={"Authorization": "Bearer drone-token-vol"},
+        json={
+            "device_id": "drone-vol",
+            "system_info": {"hostname": "drone-vol", "kiosk_enabled": True, "audio_volume": 65},
+        },
+    )
+    assert response.status_code == 200, response.text
+    refreshed = db.get_device_by_device_id("drone-vol")
+    assert refreshed["system_info"]["audio_volume"] == 65
+    assert refreshed["system_info"]["kiosk_enabled"] is True
+
+
 def test_heartbeat_echoes_stored_asset_thumbprints(client):
     client.post("/api/auth/register", json={"email": "thumbprint-echo@example.com", "username": "thumbprint-echo-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("thumbprint-echo@example.com")
@@ -3846,6 +3865,47 @@ def test_sync_system_uses_peer_check_resolvability_for_sources(client):
     roms = response_after.json()["action"]["payload"]["roms"]
     assert roms[0]["devices"] == [{"device_id": "fresh-source", "device_name": "Fresh Source"}]
     assert db.is_drone_peer_resolvable("fresh-source") is True
+
+
+def test_set_volume_action_accepts_level_payload(client):
+    seed_test_fleet()
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    )
+    token = login_response.json()["access_token"]
+
+    create_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "set_volume", "payload": {"level": 50}},
+    )
+    assert create_response.status_code == 200
+    assert create_response.json()["action"]["action"] == "set_volume"
+
+    claim_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions/claim",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={},
+    )
+    assert claim_response.status_code == 200
+    assert claim_response.json()["action"]["payload"]["level"] == 50
+
+
+def test_unsupported_device_action_is_rejected(client):
+    seed_test_fleet()
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    )
+    token = login_response.json()["access_token"]
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "do_something_unsupported"},
+    )
+    assert response.status_code == 400
 
 
 def test_device_action_lifecycle(client):
@@ -4484,12 +4544,18 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert ">Update<" not in html
     assert "data-device-view=\"actions\"" not in html
     assert "device-actions-panel" not in html
-    assert ">Remote Restart<" in js
+    assert "queueDeviceAction('restart'" in js
     assert "rebuild_asset_metadata" in html
     assert "refresh_emulator_list" in js
     assert "Rebuild Asset Metadata" in html
-    assert "deviceKioskToggle" in js
-    assert "queueKioskMode(this.checked)" in js
+    # Kiosk control moved from a stateful toggle (misleading) to explicit Admin-tab ON/OFF buttons.
+    assert "deviceKioskToggle" not in js
+    assert "queueKioskMode(this.checked)" not in js
+    assert "data-device-view=\"admin\"" in html
+    assert "function renderDeviceAdminPanel()" in js
+    assert "queueDeviceAction('enable_kiosk'" in js
+    assert "queueDeviceAction('disable_kiosk'" in js
+    assert "queueDeviceVolume(" in js
     assert "deleteDeviceActions()" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html

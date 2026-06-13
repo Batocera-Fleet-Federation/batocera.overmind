@@ -130,6 +130,8 @@ class DroneSystemInfo(ExtensibleContractModel):
     memory_total: Optional[str] = None
     batocera_version: Optional[str] = None
     container: Optional[bool] = None
+    kiosk_enabled: Optional[bool] = None
+    audio_volume: Optional[int] = None
     performance: dict[str, Any] = Field(default_factory=dict)
 
 

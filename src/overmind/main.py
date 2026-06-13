@@ -79,6 +79,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "restart",
     "enable_kiosk",
     "disable_kiosk",
+    "set_volume",
     "collect_rom_metadata",
     "rebuild_asset_metadata",
     "purge_asset_cache",

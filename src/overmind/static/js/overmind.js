@@ -3063,8 +3063,77 @@
                 return device;
             }
 
-            async function queueKioskMode(enabled) {
-                await queueDeviceAction(enabled ? 'enable_kiosk' : 'disable_kiosk', {refreshActions:false});
+            function renderDeviceAdminPanel() {
+                const container = document.getElementById('device-admin-panel');
+                const device = selectedDrone();
+                if (!container || !device) return;
+                const info = device.system_info || {};
+                const kioskKnown = info.kiosk_enabled === true || info.kiosk_enabled === false;
+                const kioskEnabled = info.kiosk_enabled === true;
+                const volumeKnown = Number.isFinite(Number(info.audio_volume));
+                const currentVolume = volumeKnown ? Number(info.audio_volume) : null;
+                const volumePresets = [
+                    { level: 0, label: 'Mute', icon: 'bi-volume-mute' },
+                    { level: 25, label: '25%', icon: 'bi-volume-down' },
+                    { level: 50, label: '50%', icon: 'bi-volume-down' },
+                    { level: 75, label: '75%', icon: 'bi-volume-up' },
+                    { level: 100, label: '100%', icon: 'bi-volume-up' },
+                ];
+                // Highlight the preset closest to the reported volume.
+                let nearestPreset = null;
+                if (volumeKnown) {
+                    nearestPreset = volumePresets.reduce((best, p) =>
+                        Math.abs(p.level - currentVolume) < Math.abs(best.level - currentVolume) ? p : best, volumePresets[0]).level;
+                }
+                const volumeButtons = volumePresets.map(p => `
+                    <button class="btn btn-sm ${nearestPreset === p.level ? 'btn-primary' : 'btn-outline-primary'}" type="button"
+                        onclick="queueDeviceVolume(${p.level})"><i class="bi ${p.icon} me-1"></i>${p.label}</button>
+                `).join('');
+                const kioskState = kioskKnown ? (kioskEnabled ? 'enabled' : 'disabled') : 'not yet reported';
+                container.innerHTML = `
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-display me-1"></i>Kiosk Mode</strong>
+                            <span class="small text-muted">Current: ${kioskState}</span>
+                        </div>
+                        <div class="btn-group" role="group" aria-label="Kiosk mode">
+                            <button class="btn btn-sm ${kioskKnown && kioskEnabled ? 'btn-success' : 'btn-outline-success'}" type="button"
+                                onclick="queueDeviceAction('enable_kiosk', {refreshActions:false})"><i class="bi bi-lock me-1"></i>ON</button>
+                            <button class="btn btn-sm ${kioskKnown && !kioskEnabled ? 'btn-secondary' : 'btn-outline-secondary'}" type="button"
+                                onclick="queueDeviceAction('disable_kiosk', {refreshActions:false})"><i class="bi bi-unlock me-1"></i>OFF</button>
+                        </div>
+                        <div class="small text-muted mt-2">Changing Kiosk mode restarts EmulationStation on the device.</div>
+                    </div></div>
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-volume-up me-1"></i>Volume</strong>
+                            <span class="small text-muted">Current: ${volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported'}</span>
+                        </div>
+                        <div class="btn-group flex-wrap" role="group" aria-label="Volume presets">${volumeButtons}</div>
+                    </div></div>
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <strong><i class="bi bi-power me-1"></i>Power</strong>
+                        <div class="mt-2">
+                            <button class="btn btn-outline-danger btn-sm" type="button"
+                                onclick="queueDeviceAction('restart', {refreshActions:false})"><i class="bi bi-arrow-clockwise me-1"></i>Restart Machine</button>
+                        </div>
+                    </div></div>
+                    <div class="card mutate-only"><div class="card-body py-3">
+                        <strong><i class="bi bi-database-gear me-1"></i>Asset Cache</strong>
+                        <div class="d-flex flex-wrap gap-2 mt-2">
+                            <button class="btn btn-outline-primary btn-sm" type="button"
+                                onclick="queueDeviceAction('rebuild_asset_metadata', {refreshActions:false})"><i class="bi bi-database-up me-1"></i>Rebuild Asset Metadata</button>
+                            <button class="btn btn-outline-warning btn-sm" type="button"
+                                onclick="queueDeviceAction('purge_asset_cache', {refreshActions:false})"><i class="bi bi-trash me-1"></i>Purge Asset Cache</button>
+                        </div>
+                        <div class="small text-muted mt-2">Rebuild re-scans and re-uploads a fresh inventory; purge keeps fingerprints and forces a full re-scan.</div>
+                    </div></div>
+                `;
+                applyRbacUI();
+            }
+
+            async function queueDeviceVolume(level) {
+                await queueDeviceAction('set_volume', { payload: { level }, refreshActions: false });
             }
 
             function renderDroneNetworkPanel() {
@@ -3194,6 +3263,7 @@
                 const sample = device.last_speed_sample;
                 const kioskKnown = info.kiosk_enabled === true || info.kiosk_enabled === false;
                 const kioskEnabled = info.kiosk_enabled === true;
+                const volumeKnown = Number.isFinite(Number(info.audio_volume));
                 const systemRows = [
                     ['Hostname', info.hostname || device.device_name],
                     ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
@@ -3204,21 +3274,12 @@
                     ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
                     ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
                     ['Kiosk Mode', kioskKnown ? (kioskEnabled ? 'enabled' : 'disabled') : 'unknown'],
+                    ['Volume', volumeKnown ? (Number(info.audio_volume) <= 0 ? 'muted' : `${Number(info.audio_volume)}%`) : 'unknown'],
                     ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
                     ['Updated', info.last_system_info_update || info.updated_at],
                 ].filter(row => row[1]);
                 container.innerHTML = `
                     <div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3 mutate-only">
-                            <strong>Settings</strong>
-                            <div class="d-flex flex-wrap align-items-center gap-2">
-                                <button class="btn btn-outline-danger btn-sm" onclick="queueDeviceAction('restart', {refreshActions:false})"><i class="bi bi-arrow-clockwise me-1"></i>Remote Restart</button>
-                                <div class="form-check form-switch mb-0 d-flex align-items-center gap-2" title="${kioskKnown ? '' : 'Current Kiosk mode has not been reported by this Drone yet.'}">
-                                    <input class="form-check-input mt-0" type="checkbox" role="switch" id="deviceKioskToggle" ${kioskEnabled ? 'checked' : ''} onchange="queueKioskMode(this.checked)">
-                                    <label class="form-check-label small" for="deviceKioskToggle"><i class="bi ${kioskEnabled ? 'bi-lock' : 'bi-unlock'} me-1"></i>Kiosk Mode</label>
-                                </div>
-                            </div>
-                        </div>
                         <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
                             <strong>Connection Information</strong>
                             <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
@@ -3978,7 +4039,7 @@
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['bios', 'saves', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
+                currentDeviceView = ['bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'systems';
                 startSelectedDeviceDataAutoRefresh(currentDeviceView);
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
@@ -3991,6 +4052,7 @@
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
                 const configsPanel = document.getElementById('device-configs-panel');
                 const metadataPanel = document.getElementById('device-metadata-panel');
+                const adminPanel = document.getElementById('device-admin-panel');
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
                 if (savesPanel) savesPanel.style.display = currentDeviceView === 'saves' ? 'block' : 'none';
@@ -3998,6 +4060,7 @@
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
                 if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
                 if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
+                if (adminPanel) adminPanel.style.display = currentDeviceView === 'admin' ? 'block' : 'none';
 
                 if (currentDeviceView === 'systems') {
                     loadDeviceSystems();
@@ -4011,6 +4074,12 @@
                     renderDroneMetadataPanel();
                     refreshSelectedDroneDetails()
                         .then(() => renderDroneMetadataPanel())
+                        .catch(error => console.error('Error refreshing selected Drone details:', error));
+                }
+                if (currentDeviceView === 'admin') {
+                    renderDeviceAdminPanel();
+                    refreshSelectedDroneDetails()
+                        .then(() => renderDeviceAdminPanel())
                         .catch(error => console.error('Error refreshing selected Drone details:', error));
                 }
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
@@ -4031,7 +4100,7 @@
 
             function normalizeDeviceView(viewName) {
                 if (viewName === 'actions') return 'metadata';
-                return ['bios', 'saves', 'gamelogs', 'configs', 'metadata'].includes(viewName) ? viewName : 'systems';
+                return ['bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'systems';
             }
 
             function saveRowKey(row) {
@@ -4178,7 +4247,7 @@
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
                 const allowed = ['devices', 'hive', 'profile', 'notifications', 'super-admin', 'help'];
-                if ((parts[0] === 'systems' || parts[0] === 'bios' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata') && parts[1]) {
+                if ((parts[0] === 'systems' || parts[0] === 'bios' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata' || parts[0] === 'admin') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: normalizeDeviceView(parts[0]) };
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
@@ -4281,6 +4350,7 @@
                     refresh_emulator_list: 'refresh emulator list',
                     enable_kiosk: 'enable Kiosk mode',
                     disable_kiosk: 'disable Kiosk mode',
+                    set_volume: 'set volume',
                     collect_rom_metadata: 'collect ROM and system metadata',
                     collect_game_logs: 'collect Game Logs',
                     collect_emulator_configs: 'collect emulator configs',
@@ -4288,13 +4358,15 @@
                 };
                 if (shouldConfirm && !window.confirm(`Queue ${labels[actionName] || actionName} for this Drone?`)) return;
                 try {
+                    const body = { action: actionName };
+                    if (options.payload && typeof options.payload === 'object') body.payload = options.payload;
                     const response = await fetch(`/api/devices/${selectedDeviceId}/actions`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                             'Authorization': `Bearer ${authToken}`
                         },
-                        body: JSON.stringify({ action: actionName })
+                        body: JSON.stringify(body)
                     });
                     if (response.status === 401) {
                         logout('Session expired. Please log in again.', '#/login');
@@ -4333,6 +4405,8 @@
                     rebuild_asset_metadata: 'Rebuild Asset Metadata',
                     enable_kiosk: 'Enable Kiosk Mode',
                     disable_kiosk: 'Disable Kiosk Mode',
+                    set_volume: 'Set Volume',
+                    purge_asset_cache: 'Purge Asset Cache',
                     collect_game_logs: 'Game Logs',
                     collect_emulator_configs: 'Emulator Configs',
                     collect_log_sources: 'Log Sources',
@@ -4345,6 +4419,8 @@
                 if (!result) return '';
                 if (result.type === 'asset_metadata_rebuild') return `${result.rom_count || 0} ROM entries, ${result.bios_count || 0} BIOS files, ${result.artwork_count || 0} artwork rows uploaded`;
                 if (result.type === 'emulator_list_refresh') return result.emulationstation_restarted ? 'EmulationStation restart issued' : 'EmulationStation restart was not issued';
+                if (result.type === 'kiosk_mode') return `Kiosk ${result.enabled ? 'enabled' : 'disabled'}${result.emulationstation_restarted ? '; EmulationStation restarted' : ''}`;
+                if (result.type === 'audio_volume') return result.muted ? 'Volume muted' : `Volume set to ${result.level}%`;
                 if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;
                 if (result.type === 'game_logs') return `${(result.sessions || []).length} parsed play sessions, ${(result.logs || []).length} logs`;
                 if (result.type === 'emulator_configs') return `${(result.configs || []).length} config files`;
