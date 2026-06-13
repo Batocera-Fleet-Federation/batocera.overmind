@@ -266,8 +266,8 @@ class PostgresMetadataStore:
                         INSERT INTO drone_system_info
                             (drone_id, hostname, model, system_name, architecture, cpu_model, cpu_cores,
                              cpu_threads, cpu_max_frequency, memory_available, memory_total,
-                             batocera_version, container, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                             batocera_version, screen_mode, audio_volume, container, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         ON CONFLICT (drone_id) DO UPDATE SET
                             hostname          = COALESCE(EXCLUDED.hostname,          drone_system_info.hostname),
                             model             = COALESCE(EXCLUDED.model,             drone_system_info.model),
@@ -280,6 +280,8 @@ class PostgresMetadataStore:
                             memory_available  = COALESCE(EXCLUDED.memory_available,  drone_system_info.memory_available),
                             memory_total      = COALESCE(EXCLUDED.memory_total,      drone_system_info.memory_total),
                             batocera_version  = COALESCE(EXCLUDED.batocera_version,  drone_system_info.batocera_version),
+                            screen_mode       = COALESCE(EXCLUDED.screen_mode,       drone_system_info.screen_mode),
+                            audio_volume      = COALESCE(EXCLUDED.audio_volume,      drone_system_info.audio_volume),
                             container         = COALESCE(EXCLUDED.container,         drone_system_info.container),
                             updated_at        = now()
                         """,
@@ -296,6 +298,8 @@ class PostgresMetadataStore:
                             info.get("memory_available"),
                             info.get("memory_total"),
                             info.get("batocera_version"),
+                            info.get("screen_mode"),
+                            info.get("audio_volume"),
                             info.get("container"),
                         ),
                     )
@@ -1316,7 +1320,8 @@ class PostgresMetadataStore:
                    d.romset_files_thumbprint, d.bios_files_thumbprint,
                    n.api_port, n.scheme, n.reachable_url, n.public_resolvable, n.public_ip, n.checked_at,
                    s.hostname, s.model, s.system_name, s.architecture, s.cpu_model, s.cpu_cores, s.cpu_threads,
-                   s.cpu_max_frequency, s.memory_available, s.memory_total, s.batocera_version, s.container
+                   s.cpu_max_frequency, s.memory_available, s.memory_total, s.batocera_version,
+                   s.screen_mode, s.audio_volume, s.container
             FROM drones d
             LEFT JOIN drone_network_state n ON n.drone_id = d.id
             LEFT JOIN drone_system_info s ON s.drone_id = d.id
@@ -1333,7 +1338,8 @@ class PostgresMetadataStore:
                 romset_files_thumbprint, bios_files_thumbprint,
                 api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
                 hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
-                cpu_max_frequency, memory_available, memory_total, batocera_version, container,
+                cpu_max_frequency, memory_available, memory_total, batocera_version,
+                screen_mode, audio_volume, container,
             ) = row
             device = {
                 "id": internal_id,
@@ -1371,6 +1377,8 @@ class PostgresMetadataStore:
                     "memory_available": memory_available,
                     "memory_total": memory_total,
                     "batocera_version": batocera_version,
+                    "screen_mode": screen_mode,
+                    "audio_volume": audio_volume,
                     "container": container,
                 },
             }
@@ -1847,7 +1855,8 @@ class PostgresMetadataStore:
             romset_files_thumbprint, bios_files_thumbprint,
             api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
             hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
-            cpu_max_frequency, memory_available, memory_total, batocera_version, container,
+            cpu_max_frequency, memory_available, memory_total, batocera_version,
+            screen_mode, audio_volume, container,
             cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer,
             valid_from, valid_until, serial_number, overmind_signed_at,
             auto_sync_enabled, auto_sync_systems, ipv4, ipv6, hostnames, macs, last_speed_sample,
@@ -1920,6 +1929,8 @@ class PostgresMetadataStore:
                 "memory_available": memory_available,
                 "memory_total": memory_total,
                 "batocera_version": batocera_version,
+                "screen_mode": screen_mode,
+                "audio_volume": audio_volume,
                 "container": container,
             },
             "batocera_info": {},
@@ -1971,7 +1982,7 @@ class PostgresMetadataStore:
                    ns.api_port, ns.scheme, ns.reachable_url, ns.public_resolvable, ns.public_ip, ns.checked_at,
                    si.hostname, si.model, si.system_name, si.architecture, si.cpu_model, si.cpu_cores,
                    si.cpu_threads, si.cpu_max_frequency, si.memory_available, si.memory_total,
-                   si.batocera_version, si.container,
+                   si.batocera_version, si.screen_mode, si.audio_volume, si.container,
                    dc.status, dc.fingerprint, dc.sha256_fingerprint, dc.public_certificate, dc.subject,
                    dc.issuer, dc.valid_from, dc.valid_until, dc.serial_number, dc.overmind_signed_at,
                    COALESCE(p.enabled, false),
@@ -4014,8 +4025,9 @@ class PostgresMetadataStore:
             """
             INSERT INTO drone_system_info
                 (drone_id, hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
-                 cpu_max_frequency, memory_available, memory_total, batocera_version, container, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                 cpu_max_frequency, memory_available, memory_total, batocera_version, screen_mode,
+                 audio_volume, container, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (drone_id) DO UPDATE SET
                 hostname = EXCLUDED.hostname,
                 model = EXCLUDED.model,
@@ -4028,6 +4040,8 @@ class PostgresMetadataStore:
                 memory_available = EXCLUDED.memory_available,
                 memory_total = EXCLUDED.memory_total,
                 batocera_version = EXCLUDED.batocera_version,
+                screen_mode = EXCLUDED.screen_mode,
+                audio_volume = EXCLUDED.audio_volume,
                 container = EXCLUDED.container,
                 updated_at = now()
             """,
@@ -4044,6 +4058,8 @@ class PostgresMetadataStore:
                 info.get("memory_available"),
                 info.get("memory_total"),
                 info.get("batocera_version"),
+                info.get("screen_mode"),
+                info.get("audio_volume"),
                 info.get("container"),
             ),
         )

@@ -77,8 +77,7 @@ _LAMBDA_RUNTIME_ENV = (os.getenv("OVERMIND_RUNTIME") or "").strip().lower() == "
 
 SUPPORTED_DEVICE_ACTIONS = {
     "restart",
-    "enable_kiosk",
-    "disable_kiosk",
+    "set_screen_mode",
     "set_volume",
     "collect_rom_metadata",
     "rebuild_asset_metadata",
@@ -2010,9 +2009,18 @@ async def create_device_action(
         action_type = "restart"
     if action_type not in SUPPORTED_DEVICE_ACTIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported action")
+    action_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    if action_type == "set_screen_mode":
+        mode = str(action_payload.get("mode") or "").strip().lower()
+        if mode not in {"full", "kiosk", "kid"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Screen mode must be one of: full, kiosk, kid",
+            )
+        action_payload = {**action_payload, "mode": mode}
     if action_type in {"rebuild_asset_metadata", "purge_asset_cache"}:
         db.clear_device_asset_metadata(device["user_id"], device_id)
-    action = db.create_device_action(device["user_id"], device_id, action_type, payload.get("payload") if isinstance(payload.get("payload"), dict) else {})
+    action = db.create_device_action(device["user_id"], device_id, action_type, action_payload)
     if not action:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"action": action}

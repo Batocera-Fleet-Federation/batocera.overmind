@@ -3068,8 +3068,9 @@
                 const device = selectedDrone();
                 if (!container || !device) return;
                 const info = device.system_info || {};
-                const kioskKnown = info.kiosk_enabled === true || info.kiosk_enabled === false;
-                const kioskEnabled = info.kiosk_enabled === true;
+                const screenMode = ['full', 'kiosk', 'kid'].includes(String(info.screen_mode || '').toLowerCase())
+                    ? String(info.screen_mode).toLowerCase()
+                    : null;
                 const volumeKnown = Number.isFinite(Number(info.audio_volume));
                 const currentVolume = volumeKnown ? Number(info.audio_volume) : null;
                 const volumePresets = [
@@ -3089,20 +3090,22 @@
                     <button class="btn btn-sm ${nearestPreset === p.level ? 'btn-primary' : 'btn-outline-primary'}" type="button"
                         onclick="queueDeviceVolume(${p.level})"><i class="bi ${p.icon} me-1"></i>${p.label}</button>
                 `).join('');
-                const kioskState = kioskKnown ? (kioskEnabled ? 'enabled' : 'disabled') : 'not yet reported';
+                const screenModeButtons = [
+                    { mode: 'full', label: 'Full', icon: 'bi-unlock' },
+                    { mode: 'kiosk', label: 'Kiosk', icon: 'bi-lock' },
+                    { mode: 'kid', label: 'Kid', icon: 'bi-person' },
+                ].map(item => `
+                    <button class="btn btn-sm ${screenMode === item.mode ? 'btn-primary' : 'btn-outline-primary'}" type="button"
+                        onclick="queueDeviceScreenMode('${item.mode}')"><i class="bi ${item.icon} me-1"></i>${item.label}</button>
+                `).join('');
                 container.innerHTML = `
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-                            <strong><i class="bi bi-display me-1"></i>Kiosk Mode</strong>
-                            <span class="small text-muted">Current: ${kioskState}</span>
+                            <strong><i class="bi bi-display me-1"></i>Screen Mode</strong>
+                            <span class="small text-muted">Current: ${screenMode || 'not yet reported'}</span>
                         </div>
-                        <div class="btn-group" role="group" aria-label="Kiosk mode">
-                            <button class="btn btn-sm ${kioskKnown && kioskEnabled ? 'btn-success' : 'btn-outline-success'}" type="button"
-                                onclick="queueDeviceAction('enable_kiosk')"><i class="bi bi-lock me-1"></i>ON</button>
-                            <button class="btn btn-sm ${kioskKnown && !kioskEnabled ? 'btn-secondary' : 'btn-outline-secondary'}" type="button"
-                                onclick="queueDeviceAction('disable_kiosk')"><i class="bi bi-unlock me-1"></i>OFF</button>
-                        </div>
-                        <div class="small text-muted mt-2">Changing Kiosk mode restarts EmulationStation on the device.</div>
+                        <div class="btn-group" role="group" aria-label="Screen mode">${screenModeButtons}</div>
+                        <div class="small text-muted mt-2">Changing screen mode restarts EmulationStation on the device.</div>
                     </div></div>
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
@@ -3146,6 +3149,10 @@
 
             async function queueDeviceVolume(level) {
                 await queueDeviceAction('set_volume', { payload: { level } });
+            }
+
+            async function queueDeviceScreenMode(mode) {
+                await queueDeviceAction('set_screen_mode', { payload: { mode } });
             }
 
             function renderDroneNetworkPanel() {
@@ -3273,8 +3280,9 @@
                 const cert = device.certificate || {};
                 const info = device.system_info || {};
                 const sample = device.last_speed_sample;
-                const kioskKnown = info.kiosk_enabled === true || info.kiosk_enabled === false;
-                const kioskEnabled = info.kiosk_enabled === true;
+                const screenMode = ['full', 'kiosk', 'kid'].includes(String(info.screen_mode || '').toLowerCase())
+                    ? String(info.screen_mode).toLowerCase()
+                    : null;
                 const volumeKnown = Number.isFinite(Number(info.audio_volume));
                 const systemRows = [
                     ['Hostname', info.hostname || device.device_name],
@@ -3285,7 +3293,7 @@
                     ['CPU', info.cpu ? `${info.cpu.model || 'CPU'} ${info.cpu.count ? `(${info.cpu.count} cores)` : ''}` : ''],
                     ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
                     ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
-                    ['Kiosk Mode', kioskKnown ? (kioskEnabled ? 'enabled' : 'disabled') : 'unknown'],
+                    ['Screen Mode', screenMode || 'unknown'],
                     ['Volume', volumeKnown ? (Number(info.audio_volume) <= 0 ? 'muted' : `${Number(info.audio_volume)}%`) : 'unknown'],
                     ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
                     ['Updated', info.last_system_info_update || info.updated_at],
@@ -4340,30 +4348,39 @@
                         completed: 'text-bg-success',
                         failed: 'text-bg-danger',
                     };
-                    container.innerHTML = actions.map(action => {
+                    container.innerHTML = `
+                        <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead><tr>
+                                <th>Action</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Completed</th>
+                                <th>Message</th>
+                                <th>Result</th>
+                            </tr></thead>
+                            <tbody>${actions.map(action => {
                         const result = action.result || null;
                         const resultSummary = summarizeActionResult(result);
+                        const mode = action.action === 'set_screen_mode' ? String((action.payload || {}).mode || '').toLowerCase() : '';
                         return `
-                        <div class="card mb-2 shadow-sm">
-                            <div class="card-body py-2">
-                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-                                    <strong>${formatActionName(action.action)}</strong>
-                                    <span class="badge ${statusBadge[action.status] || 'text-bg-secondary'}">${escapeHtml(action.status || 'n/a')}</span>
-                                </div>
-                                <div class="small text-muted mt-1">Created: ${action.created_at ? new Date(action.created_at).toLocaleString() : 'n/a'}</div>
-                                ${action.completed_at ? `<div class="small text-muted mt-1">Completed: ${new Date(action.completed_at).toLocaleString()}</div>` : ''}
-                                ${action.message ? `<div class="small mt-1">${action.message}</div>` : ''}
-                                ${result ? `
-                                    <div class="small text-muted mt-2">${resultSummary}</div>
-                                    <details class="mt-2">
-                                        <summary class="small">View returned data</summary>
+                            <tr>
+                                <td><strong>${formatActionName(action.action)}</strong>${mode ? `<div class="small text-muted">${escapeHtml(mode)}</div>` : ''}</td>
+                                <td><span class="badge ${statusBadge[action.status] || 'text-bg-secondary'}">${escapeHtml(action.status || 'n/a')}</span></td>
+                                <td class="small">${action.created_at ? new Date(action.created_at).toLocaleString() : 'n/a'}</td>
+                                <td class="small">${action.completed_at ? new Date(action.completed_at).toLocaleString() : 'n/a'}</td>
+                                <td class="small">${escapeHtml(action.message || '')}</td>
+                                <td class="small">${result ? `
+                                    <div class="text-muted">${escapeHtml(resultSummary)}</div>
+                                    <details class="mt-1">
+                                        <summary>View returned data</summary>
                                         <pre class="small mt-2 p-2 rounded" style="white-space:pre-wrap;background:rgba(0,0,0,0.18);max-height:360px;overflow:auto;">${escapeHtml(JSON.stringify(result, null, 2))}</pre>
                                     </details>
-                                ` : ''}
-                            </div>
-                        </div>
-                    `;
-                    }).join('');
+                                ` : 'n/a'}</td>
+                            </tr>`;
+                            }).join('')}</tbody>
+                        </table>
+                        </div>`;
                 } catch (error) {
                     console.error('Error loading actions:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load actions.</div>';
@@ -4379,8 +4396,7 @@
                     restart: 'remote restart',
                     rebuild_asset_metadata: 'rebuild asset metadata',
                     refresh_emulator_list: 'refresh emulator list',
-                    enable_kiosk: 'enable Kiosk mode',
-                    disable_kiosk: 'disable Kiosk mode',
+                    set_screen_mode: 'set screen mode',
                     set_volume: 'set volume',
                     collect_rom_metadata: 'collect ROM and system metadata',
                     collect_game_logs: 'collect Game Logs',
@@ -4434,8 +4450,7 @@
                     restart: 'Remote Restart',
                     refresh_emulator_list: 'Refresh Emulator List',
                     rebuild_asset_metadata: 'Rebuild Asset Metadata',
-                    enable_kiosk: 'Enable Kiosk Mode',
-                    disable_kiosk: 'Disable Kiosk Mode',
+                    set_screen_mode: 'Set Screen Mode',
                     set_volume: 'Set Volume',
                     purge_asset_cache: 'Purge Asset Cache',
                     collect_game_logs: 'Game Logs',
@@ -4450,7 +4465,7 @@
                 if (!result) return '';
                 if (result.type === 'asset_metadata_rebuild') return `${result.rom_count || 0} ROM entries, ${result.bios_count || 0} BIOS files, ${result.artwork_count || 0} artwork rows uploaded`;
                 if (result.type === 'emulator_list_refresh') return result.emulationstation_restarted ? 'EmulationStation restart issued' : 'EmulationStation restart was not issued';
-                if (result.type === 'kiosk_mode') return `Kiosk ${result.enabled ? 'enabled' : 'disabled'}${result.emulationstation_restarted ? '; EmulationStation restarted' : ''}`;
+                if (result.type === 'screen_mode') return `Screen mode set to ${result.mode || 'unknown'}${result.emulationstation_restarted ? '; EmulationStation restarted' : ''}`;
                 if (result.type === 'audio_volume') return result.muted ? 'Volume muted' : `Volume set to ${result.level}%`;
                 if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;
                 if (result.type === 'game_logs') return `${(result.sessions || []).length} parsed play sessions, ${(result.logs || []).length} logs`;

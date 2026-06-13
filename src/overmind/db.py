@@ -2482,8 +2482,7 @@ class OvermindDatabase:
             return
         action_label = {
             "restart": "Remote Restart",
-            "enable_kiosk": "Enable Kiosk Mode",
-            "disable_kiosk": "Disable Kiosk Mode",
+            "set_screen_mode": "Set Screen Mode",
         }.get(
             str(action.get("action") or ""),
             str(action.get("action") or "action").replace("_", " ").title(),

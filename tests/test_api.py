@@ -3427,7 +3427,7 @@ def test_heartbeat_accepts_saves_files_thumbprint_and_updates_last_seen(client):
     assert (datetime.utcnow() - refreshed["last_seen"]).total_seconds() < 60
 
 
-def test_heartbeat_accepts_audio_volume_in_system_info(client):
+def test_heartbeat_accepts_screen_mode_and_audio_volume_in_system_info(client):
     client.post("/api/auth/register", json={"email": "hb-vol@example.com", "username": "hb-vol-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("hb-vol@example.com")
     db.create_device(user["id"], "drone-vol", "Drone Vol", {"ip_address": "10.0.0.2"}, raw_token="drone-token-vol")
@@ -3437,13 +3437,13 @@ def test_heartbeat_accepts_audio_volume_in_system_info(client):
         headers={"Authorization": "Bearer drone-token-vol"},
         json={
             "device_id": "drone-vol",
-            "system_info": {"hostname": "drone-vol", "kiosk_enabled": True, "audio_volume": 65},
+            "system_info": {"hostname": "drone-vol", "screen_mode": "kid", "audio_volume": 65},
         },
     )
     assert response.status_code == 200, response.text
     refreshed = db.get_device_by_device_id("drone-vol")
     assert refreshed["system_info"]["audio_volume"] == 65
-    assert refreshed["system_info"]["kiosk_enabled"] is True
+    assert refreshed["system_info"]["screen_mode"] == "kid"
 
 
 def test_heartbeat_echoes_stored_asset_thumbprints(client):
@@ -3934,7 +3934,7 @@ def test_expire_stale_device_actions_marks_in_progress_as_failed(client):
     device = db.get_device_by_device_id("arcade-cabinet-001")
     user_id = device["user_id"]
 
-    stale = db.create_device_action(user_id, "arcade-cabinet-001", "enable_kiosk", {})
+    stale = db.create_device_action(user_id, "arcade-cabinet-001", "set_screen_mode", {"mode": "kiosk"})
     fresh = db.create_device_action(user_id, "arcade-cabinet-001", "restart", {})
     db.claim_pending_device_actions("arcade-cabinet-001")  # both -> in_progress
     stored = {a["id"]: a for a in db.device_actions[device["id"]]}
@@ -3959,7 +3959,7 @@ def test_poll_device_status_job_expires_stale_actions(client):
     seed_test_fleet()
     device = db.get_device_by_device_id("arcade-cabinet-001")
     user_id = device["user_id"]
-    action = db.create_device_action(user_id, "arcade-cabinet-001", "enable_kiosk", {})
+    action = db.create_device_action(user_id, "arcade-cabinet-001", "set_screen_mode", {"mode": "kiosk"})
     db.claim_pending_device_actions("arcade-cabinet-001")
     stored = next(a for a in db.device_actions[device["id"]] if a["id"] == action["id"])
     stored["claimed_at"] = datetime.utcnow() - timedelta(hours=1)
@@ -4480,7 +4480,7 @@ def test_shutdown_action_is_rejected_by_api(client):
     assert response.status_code == 400
 
 
-def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
+def test_screen_mode_action_is_supported_and_validated(client):
     seed_test_fleet()
     token = client.post(
         "/api/auth/login",
@@ -4488,14 +4488,22 @@ def test_kiosk_actions_are_supported_and_update_action_is_rejected(client):
     ).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    for action_name in ("enable_kiosk", "disable_kiosk", "refresh_emulator_list"):
+    for mode in ("full", "kiosk", "kid"):
         response = client.post(
             "/api/devices/arcade-cabinet-001/actions",
             headers=headers,
-            json={"action": action_name},
+            json={"action": "set_screen_mode", "payload": {"mode": mode}},
         )
         assert response.status_code == 200
-        assert response.json()["action"]["action"] == action_name
+        assert response.json()["action"]["action"] == "set_screen_mode"
+        assert response.json()["action"]["payload"]["mode"] == mode
+
+    invalid_mode_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_screen_mode", "payload": {"mode": "arcade"}},
+    )
+    assert invalid_mode_response.status_code == 400
 
     update_response = client.post(
         "/api/devices/arcade-cabinet-001/actions",
@@ -4512,12 +4520,16 @@ def test_delete_actions_clears_device_queue(client):
         json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
     ).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
-    for action_name in ("refresh_emulator_list", "enable_kiosk"):
-        assert client.post(
-            "/api/devices/arcade-cabinet-001/actions",
-            headers=headers,
-            json={"action": action_name},
-        ).status_code == 200
+    assert client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "refresh_emulator_list"},
+    ).status_code == 200
+    assert client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_screen_mode", "payload": {"mode": "full"}},
+    ).status_code == 200
 
     response = client.delete("/api/devices/arcade-cabinet-001/actions", headers=headers)
 
@@ -4613,14 +4625,17 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "rebuild_asset_metadata" in html
     assert "refresh_emulator_list" in js
     assert "Rebuild Asset Metadata" in html
-    # Kiosk control moved from a stateful toggle (misleading) to explicit Admin-tab ON/OFF buttons.
+    # Screen mode is an explicit three-value action in the Admin tab.
     assert "deviceKioskToggle" not in js
     assert "queueKioskMode(this.checked)" not in js
     assert "data-device-view=\"admin\"" in html
     assert "function renderDeviceAdminPanel()" in js
-    assert "queueDeviceAction('enable_kiosk'" in js
-    assert "queueDeviceAction('disable_kiosk'" in js
+    assert "queueDeviceScreenMode('${item.mode}')" in js
+    assert "queueDeviceAction('set_screen_mode'" in js
+    assert "queueDeviceAction('enable_kiosk'" not in js
+    assert "queueDeviceAction('disable_kiosk'" not in js
     assert "queueDeviceVolume(" in js
+    assert '<table class="table table-sm align-middle">' in js
     assert "deleteDeviceActions()" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html
@@ -5541,6 +5556,8 @@ def test_relational_schema_declares_domain_tables():
     assert "ALTER TABLE pending_drone_connections ALTER COLUMN user_id DROP NOT NULL" in migration_sql
     assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in migration_sql
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in migration_sql
+    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS screen_mode" in migration_sql
+    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS audio_volume" in migration_sql
     assert "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint" in migration_sql
     assert "def store_device_emulator_configs" in store_source
     assert "def get_device_emulator_configs" in store_source
@@ -5692,7 +5709,7 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
                         None, None,
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
-                    None, None, None, None, None,
+                    None, None, None, None, "kid", 65, None,
                 )]
             if "FROM device_admin_claims" in self.sql:
                 return []
@@ -5707,6 +5724,8 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
     state = PostgresMetadataStore()._load_relational_state(RecordingCursor())
 
     action = state["device_actions"]["d1"][0]
+    assert state["devices"]["d1"]["system_info"]["screen_mode"] == "kid"
+    assert state["devices"]["d1"]["system_info"]["audio_volume"] == 65
     assert action["device_id"] == "drone-a"
     assert action["action"] == "restart"
     assert action["status"] == "pending"
@@ -5751,7 +5770,7 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                         None, None,
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
-                    None, None, None, None, None,
+                    None, None, None, None, None, None, None,
                 )]
             if "FROM gameplay_sessions" in self.sql:
                 return [("game-1", "d1", "snes", "Game", "Game.zip", "abc", received_at, 60, received_at)]
@@ -5812,7 +5831,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                     return [(
                         "d1", "drone-a", "Drone A", "u1", "s1", "approved", True,
                         None, "target-hash", reported_at, reported_at,
-                        None, None, None, None, None,
+                        None, None, None, None, None, None, None,
                         None, None,
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
@@ -5824,7 +5843,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         None, None,
                         443, "https", "https://drone-b:443", True, "198.51.100.2", reported_at,
                         None, None, None, None, None, None, None,
-                    None, None, None, None, None,
+                    None, None, None, None, None, None, None,
                 )]
             if "FROM drone_certificates" in self.sql:
                 return [("d2", "loaded", "fp", "sha", "-----BEGIN CERTIFICATE-----\\npeer\\n-----END CERTIFICATE-----", "subject", "issuer", None, None, "1", None, reported_at)]
