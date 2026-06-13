@@ -3098,9 +3098,9 @@
                         </div>
                         <div class="btn-group" role="group" aria-label="Kiosk mode">
                             <button class="btn btn-sm ${kioskKnown && kioskEnabled ? 'btn-success' : 'btn-outline-success'}" type="button"
-                                onclick="queueDeviceAction('enable_kiosk', {refreshActions:false})"><i class="bi bi-lock me-1"></i>ON</button>
+                                onclick="queueDeviceAction('enable_kiosk')"><i class="bi bi-lock me-1"></i>ON</button>
                             <button class="btn btn-sm ${kioskKnown && !kioskEnabled ? 'btn-secondary' : 'btn-outline-secondary'}" type="button"
-                                onclick="queueDeviceAction('disable_kiosk', {refreshActions:false})"><i class="bi bi-unlock me-1"></i>OFF</button>
+                                onclick="queueDeviceAction('disable_kiosk')"><i class="bi bi-unlock me-1"></i>OFF</button>
                         </div>
                         <div class="small text-muted mt-2">Changing Kiosk mode restarts EmulationStation on the device.</div>
                     </div></div>
@@ -3115,25 +3115,37 @@
                         <strong><i class="bi bi-power me-1"></i>Power</strong>
                         <div class="mt-2">
                             <button class="btn btn-outline-danger btn-sm" type="button"
-                                onclick="queueDeviceAction('restart', {refreshActions:false})"><i class="bi bi-arrow-clockwise me-1"></i>Restart Machine</button>
+                                onclick="queueDeviceAction('restart')"><i class="bi bi-arrow-clockwise me-1"></i>Restart Machine</button>
                         </div>
                     </div></div>
-                    <div class="card mutate-only"><div class="card-body py-3">
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <strong><i class="bi bi-database-gear me-1"></i>Asset Cache</strong>
                         <div class="d-flex flex-wrap gap-2 mt-2">
                             <button class="btn btn-outline-primary btn-sm" type="button"
-                                onclick="queueDeviceAction('rebuild_asset_metadata', {refreshActions:false})"><i class="bi bi-database-up me-1"></i>Rebuild Asset Metadata</button>
+                                onclick="queueDeviceAction('rebuild_asset_metadata')"><i class="bi bi-database-up me-1"></i>Rebuild Asset Metadata</button>
                             <button class="btn btn-outline-warning btn-sm" type="button"
-                                onclick="queueDeviceAction('purge_asset_cache', {refreshActions:false})"><i class="bi bi-trash me-1"></i>Purge Asset Cache</button>
+                                onclick="queueDeviceAction('purge_asset_cache')"><i class="bi bi-trash me-1"></i>Purge Asset Cache</button>
                         </div>
                         <div class="small text-muted mt-2">Rebuild re-scans and re-uploads a fresh inventory; purge keeps fingerprints and forces a full re-scan.</div>
                     </div></div>
+                    <div class="card"><div class="card-body py-3">
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-list-check me-1"></i>Recent Actions</strong>
+                            <div class="d-flex align-items-center gap-2">
+                                <button class="btn btn-outline-secondary btn-sm" type="button" onclick="loadDeviceActions()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+                                <button class="btn btn-outline-danger btn-sm mutate-only" type="button" onclick="deleteDeviceActions()"><i class="bi bi-x-circle me-1"></i>Clear Queued</button>
+                            </div>
+                        </div>
+                        <div class="small text-muted mb-2">Queued and in-progress actions, plus actions the Drone completed in the last hour. Drones poll for actions periodically, so a newly queued action may stay "pending" for up to a minute.</div>
+                        <div id="actions-list"></div>
+                    </div></div>
                 `;
                 applyRbacUI();
+                loadDeviceActions();
             }
 
             async function queueDeviceVolume(level) {
-                await queueDeviceAction('set_volume', { payload: { level }, refreshActions: false });
+                await queueDeviceAction('set_volume', { payload: { level } });
             }
 
             function renderDroneNetworkPanel() {
@@ -4024,9 +4036,22 @@
 
             function startSelectedDeviceDataAutoRefresh(viewName) {
                 stopSelectedDeviceDataAutoRefresh();
+                if (!selectedDeviceId) return;
+                // The Admin actions list refreshes more often so an operator can watch a
+                // queued action move pending -> in_progress -> completed without reloading.
+                if (viewName === 'admin') {
+                    selectedDeviceDataRefreshTimer = setInterval(() => {
+                        if (!selectedDeviceId || currentTab !== 'devices' || currentDeviceView !== 'admin') {
+                            stopSelectedDeviceDataAutoRefresh();
+                            return;
+                        }
+                        loadDeviceActions();
+                    }, 8000);
+                    return;
+                }
                 // Saves are near-static and paged/searchable, so they are NOT auto-refreshed
                 // (a periodic reload previously wiped the table mid-view). Use the Refresh button.
-                if (!selectedDeviceId || !['gamelogs', 'configs'].includes(viewName)) return;
+                if (!['gamelogs', 'configs'].includes(viewName)) return;
                 selectedDeviceDataRefreshTimer = setInterval(() => {
                     if (!selectedDeviceId || currentTab !== 'devices') {
                         stopSelectedDeviceDataAutoRefresh();
@@ -4309,6 +4334,12 @@
                         container.innerHTML = '<div class="empty-state">No actions queued yet.</div>';
                         return;
                     }
+                    const statusBadge = {
+                        pending: 'text-bg-secondary',
+                        in_progress: 'text-bg-info',
+                        completed: 'text-bg-success',
+                        failed: 'text-bg-danger',
+                    };
                     container.innerHTML = actions.map(action => {
                         const result = action.result || null;
                         const resultSummary = summarizeActionResult(result);
@@ -4317,7 +4348,7 @@
                             <div class="card-body py-2">
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
                                     <strong>${formatActionName(action.action)}</strong>
-                                    <span class="badge text-bg-secondary">${action.status}</span>
+                                    <span class="badge ${statusBadge[action.status] || 'text-bg-secondary'}">${escapeHtml(action.status || 'n/a')}</span>
                                 </div>
                                 <div class="small text-muted mt-1">Created: ${action.created_at ? new Date(action.created_at).toLocaleString() : 'n/a'}</div>
                                 ${action.completed_at ? `<div class="small text-muted mt-1">Completed: ${new Date(action.completed_at).toLocaleString()}</div>` : ''}

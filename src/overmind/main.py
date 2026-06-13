@@ -1919,7 +1919,7 @@ async def list_device_actions(device_id: str, authorization: Optional[str] = Hea
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    actions = db.get_device_actions(device["user_id"], device_id)
+    actions = db.get_device_actions(device["user_id"], device_id, include_recent=True)
     if actions is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return {"actions": actions}

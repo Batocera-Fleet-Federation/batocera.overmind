@@ -2341,19 +2341,32 @@ class OvermindDatabase:
         self.device_actions.setdefault(internal_id, []).append(action)
         return action
 
-    def get_device_actions(self, user_id: str, device_id: str) -> Optional[List[dict]]:
-        """Get currently queued or running actions for a user's device."""
+    def get_device_actions(self, user_id: str, device_id: str, include_recent: bool = False) -> Optional[List[dict]]:
+        """Get queued or running actions for a user's device.
+
+        With include_recent, also returns actions that completed/failed within the
+        last hour so the actions UI can confirm a queued action was picked up and
+        finished (otherwise terminal actions disappear immediately and the queue
+        looks like nothing ever ran).
+        """
         if postgres_store.available():
-            return postgres_store.list_device_actions(user_id, device_id)
+            return postgres_store.list_device_actions(user_id, device_id, include_recent=include_recent)
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
             return None
-        active = [
-            action
-            for action in self.device_actions.get(device["id"], [])
-            if action.get("status") in {"pending", "in_progress"}
-        ]
-        return list(reversed(active))
+        recent_cutoff = datetime.utcnow() - timedelta(hours=1)
+
+        def _visible(action: dict) -> bool:
+            if action.get("status") in {"pending", "in_progress"}:
+                return True
+            if not include_recent:
+                return False
+            completed_at = action.get("completed_at")
+            return bool(completed_at and completed_at >= recent_cutoff)
+
+        visible = [action for action in self.device_actions.get(device["id"], []) if _visible(action)]
+        visible.sort(key=lambda action: action.get("created_at") or datetime.min, reverse=True)
+        return visible
 
     def clear_device_actions(self, user_id: str, device_id: str) -> Optional[int]:
         """Remove currently queued or running actions for a user's device."""

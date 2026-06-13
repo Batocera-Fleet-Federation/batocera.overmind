@@ -3908,6 +3908,27 @@ def test_unsupported_device_action_is_rejected(client):
     assert response.status_code == 400
 
 
+def test_get_device_actions_recency_window(client):
+    seed_test_fleet()
+    device = db.get_device_by_device_id("arcade-cabinet-001")
+    user_id = device["user_id"]
+
+    action = db.create_device_action(user_id, "arcade-cabinet-001", "restart", {})
+    db.complete_device_action("arcade-cabinet-001", action["id"], "completed", message="done")
+
+    # Recently completed actions appear only when include_recent is requested.
+    recent = db.get_device_actions(user_id, "arcade-cabinet-001", include_recent=True)
+    assert any(a["id"] == action["id"] for a in recent)
+    active_only = db.get_device_actions(user_id, "arcade-cabinet-001")
+    assert all(a["id"] != action["id"] for a in active_only)
+
+    # Once it ages past the window it drops off even with include_recent.
+    stored = next(a for a in db.device_actions[device["id"]] if a["id"] == action["id"])
+    stored["completed_at"] = datetime.utcnow() - timedelta(hours=2)
+    aged = db.get_device_actions(user_id, "arcade-cabinet-001", include_recent=True)
+    assert all(a["id"] != action["id"] for a in aged)
+
+
 def test_device_action_lifecycle(client):
     seed_test_fleet()
     login_response = client.post(
@@ -3947,7 +3968,11 @@ def test_device_action_lifecycle(client):
         "/api/devices/arcade-cabinet-001/actions",
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert all(action["id"] != action_id for action in actions_response.json()["actions"])
+    # Recently completed actions remain visible (last hour) so an operator can confirm
+    # the queued action was picked up and finished, instead of it silently vanishing.
+    completed = [action for action in actions_response.json()["actions"] if action["id"] == action_id]
+    assert len(completed) == 1
+    assert completed[0]["status"] == "completed"
     action_notifications = [
         row
         for row in client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]

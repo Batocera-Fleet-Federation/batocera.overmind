@@ -2643,20 +2643,29 @@ class PostgresMetadataStore:
                     )
         return action
 
-    def list_device_actions(self, user_id: str, device_id: str) -> Optional[list[dict]]:
+    def list_device_actions(self, user_id: str, device_id: str, include_recent: bool = False) -> Optional[list[dict]]:
         device = self.get_device_by_device_id(device_id)
         if not device or device.get("user_id") != user_id:
             return None
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
+        # The actions UI passes include_recent so an operator can confirm a queued action
+        # was actually claimed and finished: without it, completed/failed actions vanish
+        # the moment the Drone reports them and the queue looks like nothing happened.
+        status_filter = (
+            "(a.status IN ('pending', 'claimed', 'in_progress')"
+            " OR a.completed_at >= now() - interval '1 hour')"
+            if include_recent
+            else "a.status IN ('pending', 'claimed', 'in_progress')"
+        )
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT a.id, a.action, a.status, a.created_at, a.claimed_at, a.completed_at, a.message
                     FROM drone_actions a
-                    WHERE a.drone_id = %s AND a.status IN ('pending', 'claimed', 'in_progress')
+                    WHERE a.drone_id = %s AND {status_filter}
                     ORDER BY a.created_at DESC, a.id DESC
                     LIMIT 100
                     """,
