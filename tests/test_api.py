@@ -2542,7 +2542,8 @@ def test_background_polling_does_not_pin_global_loading_toast():
     assert "const controller = new AbortController();" in js
     assert "setInterval(() => loadPendingConnections({showLoader: false}), 30000)" in js
     assert "setInterval(() => loadNotifications({showLoader: false}), 60000)" in js
-    assert "loadDevices({showLoader: false})" in js
+    assert "loadDevices({showLoader: false, background: true})" in js
+    assert "loadDeviceActions({showLoader: false})" in js
     assert "if (devicesRefreshInFlight) return;" in js
     assert "if (pendingConnectionsInFlight) return;" in js
     assert "if (notificationsInFlight) return;" in js
@@ -4645,8 +4646,8 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "Auto-sync ROM metadata from this Drone" not in js
     assert "loadGameLogs({queue:" not in js
     assert "loadDeviceConfigs({queue:" not in js
-    assert "if (currentDeviceView === 'gamelogs') loadGameLogs();" in js
-    assert "if (currentDeviceView === 'configs') loadDeviceConfigs();" in js
+    assert "if (currentDeviceView === 'gamelogs') loadGameLogs({showLoader: false});" in js
+    assert "if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});" in js
 
 
 def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
@@ -4660,9 +4661,68 @@ def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
     assert "log_limit=${encodeURIComponent(logLimit)}" in js
     assert "if (content.textContent !== nextContent) {" in js
     assert "newestLogLinesFirst(source.content, getOvermindLogLineLimit())" in js
+    assert "async function loadGameLogs(options = {})" in js
+    assert "apiGet(`/api/devices/${deviceId}/gamelogs`, { showLoader: options.showLoader !== false })" in js
     assert "file.content || file.path" not in js
     assert "No log output reported yet." in js
     assert "join('\\\\n\\\\n')" not in js
+
+
+def test_background_device_refresh_updates_ui_without_rebuilding_current_view():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "const background = options.background === true;" in js
+    assert "if (background) {" in js
+    assert "updateDevicesListInPlace();" in js
+    assert "updateSelectedDeviceHeader();" in js
+    assert "updateDeviceAdminStatusInPlace();" in js
+    assert "function updateDeviceTileBadge(" in js
+    assert "function updateDevicesListInPlace()" in js
+    assert "function updateDeviceAdminStatusInPlace()" in js
+    assert "data-device-field=\"last-seen\"" in js
+    assert 'data-device-admin-field="screen-mode"' in js
+    assert 'data-device-admin-field="volume"' in js
+
+
+def test_navigation_renders_once_through_hash_route():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    select_start = js.index("function selectDevice(deviceId)")
+    select_source = js[select_start:js.index("async function loadGameLogs", select_start)]
+    assert "setRoute('devices', deviceId, 'systems');" in select_source
+    assert "updateSelectedDeviceWorkspace();" not in select_source
+    assert "switchDeviceView('systems'" not in select_source
+
+    route_start = js.index("function applyRouteFromHash()")
+    route_source = js[route_start:js.index("async function loadDeviceActions", route_start)]
+    assert "switchTab(route.tab, null, false);" in route_source
+    assert "updateSelectedDeviceWorkspace();" not in route_source
+
+    assert "if (updateUrl) {\n                    setRoute('devices', selectedDeviceId, currentDeviceView);\n                    return;" in js
+    assert "if (updateUrl) {\n                    setRoute(tabName);\n                    return;" in js
+
+
+def test_admin_action_refresh_skips_unchanged_data_and_preserves_open_results():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "async function loadDeviceActions(options = {})" in js
+    assert "const signature = JSON.stringify(actions);" in js
+    assert "renderedDeviceActionsSignature === signature && container.innerHTML.trim()" in js
+    assert "details[data-action-result-id][open]" in js
+    assert 'data-action-result-id="${cssSafeId(action.id)}"' in js
+    assert "if (openResultIds.has(details.dataset.actionResultId)) details.open = true;" in js
+
+
+def test_periodic_download_and_config_refreshes_preserve_rendered_ui():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "apiGet('/api/downloads', { showLoader: !options.quiet })" in js
+    assert "function updateSwarmDownloadsInPlace(rows)" in js
+    assert "if (options.quiet && updateSwarmDownloadsInPlace(rows)) {" in js
+    assert 'data-download-field="progress-bar"' in js
+    assert "async function loadDeviceConfigs(options = {})" in js
+    assert "if (container.dataset.configSignature === signature) return;" in js
+    assert "loadDeviceConfigs({showLoader: false})" in js
 
 
 def test_metadata_panels_submit_searches_explicitly_and_show_loading_toast():
@@ -4806,7 +4866,8 @@ def test_master_list_refreshes_devices_without_reapplying_route():
 
     assert "async function loadDevices(options = {})" in js
     assert "const applyRoute = options.applyRoute !== false;" in js
-    assert "if (applyRoute) applyRouteFromHash();" in js
+    assert "if (applyRoute) {" in js
+    assert "applyRouteFromHash();" in js
     assert "if (!currentDevices.length) await loadDevices({applyRoute: false});" in js
 
 

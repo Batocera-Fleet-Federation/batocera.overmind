@@ -91,6 +91,8 @@
             let loadingToastEl = null;
             let devicesRefreshTimer = null;
             let devicesRefreshInFlight = false;
+            let renderedDeviceActionsDeviceId = null;
+            let renderedDeviceActionsSignature = null;
             let pendingConnectionsInFlight = false;
             let downloadsRefreshTimer = null;
             let downloadsRefreshInFlight = false;
@@ -1014,7 +1016,7 @@
                 devicesRefreshTimer = setInterval(() => {
                     // only poll when on devices tab
                     if (currentTab === 'devices' && document.getElementById('devices-tab')?.style.display !== 'none') {
-                        loadDevices({showLoader: false});
+                        loadDevices({showLoader: false, background: true});
                     }
                 }, 30000);
             }
@@ -1551,6 +1553,7 @@
 
             async function loadDevices(options = {}) {
                 const applyRoute = options.applyRoute !== false;
+                const background = options.background === true;
                 if (devicesRefreshInFlight) return;
                 devicesRefreshInFlight = true;
                 try {
@@ -1558,11 +1561,27 @@
                     if (!response.ok) throw new Error('Failed to load devices');
                     const data = await response.json();
                     currentDevices = data.devices;
-                    if (selectedDeviceId && !currentDevices.some(d => d.device_id === selectedDeviceId)) selectedDeviceId = null;
+                    const selectedDeviceWasRemoved = Boolean(selectedDeviceId)
+                        && !currentDevices.some(d => d.device_id === selectedDeviceId);
+                    if (selectedDeviceWasRemoved) selectedDeviceId = null;
+                    if (background) {
+                        updateDevicesListInPlace();
+                        updateSelectedDeviceSummary();
+                        updateSelectedDeviceHeader();
+                        updateDeviceAdminStatusInPlace();
+                        if (selectedDeviceWasRemoved) {
+                            updateSelectedDeviceWorkspace();
+                            setRoute('devices', null, 'systems');
+                        }
+                        return;
+                    }
                     displayDevices();
-                    updateSelectedDeviceSummary();
-                    updateSelectedDeviceWorkspace();
-                    if (applyRoute) applyRouteFromHash();
+                    if (applyRoute) {
+                        applyRouteFromHash();
+                    } else {
+                        updateSelectedDeviceSummary();
+                        updateSelectedDeviceWorkspace();
+                    }
                 } catch (error) {
                     console.error('Error loading devices:', error);
                 } finally {
@@ -1711,25 +1730,63 @@
                 container.innerHTML = `
                     <div class="device-grid">
                         ${currentDevices.map(device => `
-                            <button type="button" class="card device-tile text-start border shadow-sm ${device.device_id === selectedDeviceId ? 'active' : ''}" onclick="selectDevice('${device.device_id}')">
+                            <button id="device-tile-${cssSafeId(device.device_id)}" type="button" class="card device-tile text-start border shadow-sm ${device.device_id === selectedDeviceId ? 'active' : ''}" onclick="selectDevice('${device.device_id}')">
                                 <div class="card-body">
                                     <div class="d-flex align-items-start justify-content-between gap-2 mb-2">
-                                        <h5 class="card-title mb-0">${device.device_name}</h5>
+                                        <h5 class="card-title mb-0" data-device-field="name">${device.device_name}</h5>
                                         <i class="bi bi-hdd-network text-muted"></i>
                                     </div>
-                                    <div class="small text-muted mb-1">Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}</div>
-                                    <div class="small text-muted mb-3">Games: ${Number(device.game_count ?? device.rom_count ?? 0).toLocaleString()} &middot; ROM Files: ${Number(device.rom_count || 0).toLocaleString()}</div>
+                                    <div class="small text-muted mb-1" data-device-field="batocera">Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}</div>
+                                    <div class="small text-muted mb-3" data-device-field="counts">Games: ${Number(device.game_count ?? device.rom_count ?? 0).toLocaleString()} &middot; ROM Files: ${Number(device.rom_count || 0).toLocaleString()}</div>
                                     <div class="mt-3 d-flex flex-wrap gap-1">
-                                        <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}">${device.online ? 'Online' : 'Offline'}</span>
-                                        <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
-                                        <span class="badge ${(device.public_reachability && device.public_reachability.resolvable) ? 'text-bg-success' : 'text-bg-secondary'}" title="Overmind public reachability probe (TCP connect to the registered public IP)">${(device.public_reachability && device.public_reachability.resolvable) ? 'Resolvable' : 'Not Resolvable'}</span>
+                                        <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}" data-device-field="online">${device.online ? 'Online' : 'Offline'}</span>
+                                        <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="connected">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
+                                        <span class="badge ${(device.public_reachability && device.public_reachability.resolvable) ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="resolvable" title="Overmind public reachability probe (TCP connect to the registered public IP)">${(device.public_reachability && device.public_reachability.resolvable) ? 'Resolvable' : 'Not Resolvable'}</span>
                                     </div>
-                                    <div class="small text-muted mt-3">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
+                                    <div class="small text-muted mt-3" data-device-field="last-seen">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
                             </button>
                         `).join('')}
                     </div>
                 `;
+            }
+
+            function updateDeviceTileBadge(tile, field, enabled, enabledText, disabledText, disabledClass) {
+                const badge = tile.querySelector(`[data-device-field="${field}"]`);
+                if (!badge) return;
+                badge.textContent = enabled ? enabledText : disabledText;
+                badge.classList.toggle('text-bg-success', enabled);
+                badge.classList.toggle(disabledClass, !enabled);
+                if (enabled) badge.classList.remove(disabledClass);
+            }
+
+            function updateDevicesListInPlace() {
+                const container = document.getElementById('devices-list');
+                const globalPanel = document.getElementById('swarm-global-panel');
+                if (!container || (globalPanel && globalPanel.style.display !== 'none')) return;
+                const tiles = Array.from(container.querySelectorAll('.device-tile[id^="device-tile-"]'));
+                const hasSameDevices = tiles.length === currentDevices.length
+                    && currentDevices.every(device => document.getElementById(`device-tile-${cssSafeId(device.device_id)}`));
+                if (!hasSameDevices) {
+                    displayDevices();
+                    return;
+                }
+                currentDevices.forEach(device => {
+                    const tile = document.getElementById(`device-tile-${cssSafeId(device.device_id)}`);
+                    if (!tile) return;
+                    tile.classList.toggle('active', device.device_id === selectedDeviceId);
+                    const name = tile.querySelector('[data-device-field="name"]');
+                    const batocera = tile.querySelector('[data-device-field="batocera"]');
+                    const counts = tile.querySelector('[data-device-field="counts"]');
+                    const lastSeen = tile.querySelector('[data-device-field="last-seen"]');
+                    if (name) name.textContent = device.device_name;
+                    if (batocera) batocera.textContent = `Batocera: ${(device.system_info || {}).batocera_version || 'n/a'}`;
+                    if (counts) counts.textContent = `Games: ${Number(device.game_count ?? device.rom_count ?? 0).toLocaleString()} \u00b7 ROM Files: ${Number(device.rom_count || 0).toLocaleString()}`;
+                    if (lastSeen) lastSeen.textContent = device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable';
+                    updateDeviceTileBadge(tile, 'online', Boolean(device.online), 'Online', 'Offline', 'text-bg-danger');
+                    updateDeviceTileBadge(tile, 'connected', Boolean(device.swarm_connected), 'Connected to Swarm', 'Not Connected to Swarm', 'text-bg-secondary');
+                    updateDeviceTileBadge(tile, 'resolvable', Boolean(device.public_reachability && device.public_reachability.resolvable), 'Resolvable', 'Not Resolvable', 'text-bg-secondary');
+                });
             }
 
             function setActiveSwarmView(viewName) {
@@ -1827,6 +1884,21 @@
                 return rows;
             }
 
+            function downloadRowKey(row) {
+                return `${row.target_drone_id || ''}:${row.job_id || row.id || ''}`;
+            }
+
+            function downloadStatusClass(status) {
+                return status === 'failed' ? 'danger' : status === 'completed' ? 'success' : status === 'cancelled' ? 'secondary' : 'primary';
+            }
+
+            function renderDownloadCancelButton(row) {
+                const active = ['queued', 'downloading'].includes(String(row.status || ''));
+                return active && canMutateSwarm()
+                    ? `<button class="btn btn-outline-danger btn-sm" onclick="cancelSwarmDownload('${escapeHtml(row.target_drone_id)}','${escapeHtml(row.job_id || row.id)}')"><i class="bi bi-x-circle"></i></button>`
+                    : '';
+            }
+
             function renderSwarmDownloadsTable(rows) {
                 return `<div class="table-responsive"><table class="table table-sm align-middle">
                     <thead><tr>
@@ -1834,24 +1906,56 @@
                     </tr></thead>
                     <tbody>${rows.map(row => {
                         const pct = Number(row.percentage || 0);
-                        const active = ['queued', 'downloading'].includes(String(row.status || ''));
-                        const canCancel = active && canMutateSwarm();
                         const fileLabel = [row.file_path || row.relative_path || row.rom_path || row.rom_name || '', row.artwork_type || ''].filter(Boolean).join(' / ');
-                        return `<tr>
+                        return `<tr id="swarm-download-${cssSafeId(downloadRowKey(row))}">
                             <td class="small"><div class="fw-semibold">${escapeHtml(row.target_device_name || row.target_drone_id || 'n/a')}</div><div class="small text-muted mono">${escapeHtml(row.target_drone_id || '')}</div></td>
                             <td class="small mono">${escapeHtml(row.source_drone_id || 'n/a')}</td>
-                            <td><span class="badge text-bg-${row.status === 'failed' ? 'danger' : row.status === 'completed' ? 'success' : row.status === 'cancelled' ? 'secondary' : 'primary'}">${escapeHtml(row.status || 'queued')}</span></td>
-                            <td class="small">${row.queue_position ? `#${escapeHtml(row.queue_position)}` : row.status === 'downloading' ? 'active' : ''}</td>
+                            <td><span class="badge text-bg-${downloadStatusClass(row.status)}" data-download-field="status">${escapeHtml(row.status || 'queued')}</span></td>
+                            <td class="small" data-download-field="queue">${row.queue_position ? `#${escapeHtml(row.queue_position)}` : row.status === 'downloading' ? 'active' : ''}</td>
                             <td class="small">${escapeHtml(fileLabel)}${row.asset_type ? `<div class="small text-muted">${escapeHtml(row.asset_type)}</div>` : ''}${row.failure_reason || row.error_message ? `<div class="text-danger">${escapeHtml(row.failure_reason || row.error_message)}</div>` : ''}</td>
                             <td class="small">${formatBytes(row.total_bytes || row.file_size)}</td>
-                            <td class="small">${formatBytes(row.downloaded_bytes || row.bytes_transferred)}</td>
-                            <td style="min-width:150px"><div class="progress" style="height:.55rem"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="small text-muted">${pct.toFixed(1)}%</div></td>
-                            <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ''}</td>
+                            <td class="small" data-download-field="downloaded">${formatBytes(row.downloaded_bytes || row.bytes_transferred)}</td>
+                            <td style="min-width:150px"><div class="progress" style="height:.55rem"><div class="progress-bar" data-download-field="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="small text-muted" data-download-field="progress-text">${pct.toFixed(1)}%</div></td>
+                            <td class="small" data-download-field="speed">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ''}</td>
                             <td class="small text-muted">${escapeHtml(row.started_at || row.download_started_at || row.created_at || '')}</td>
-                            <td class="small text-danger">${escapeHtml(row.failure_reason || row.error_message || row.cancel_reason || '')}</td>
-                            <td>${canCancel ? `<button class="btn btn-outline-danger btn-sm" onclick="cancelSwarmDownload('${escapeHtml(row.target_drone_id)}','${escapeHtml(row.job_id || row.id)}')"><i class="bi bi-x-circle"></i></button>` : ''}</td>
+                            <td class="small text-danger" data-download-field="reason">${escapeHtml(row.failure_reason || row.error_message || row.cancel_reason || '')}</td>
+                            <td data-download-field="cancel">${renderDownloadCancelButton(row)}</td>
                         </tr>`;
                     }).join('')}</tbody></table></div>`;
+            }
+
+            function updateSwarmDownloadsInPlace(rows) {
+                const existingRows = Array.from(document.querySelectorAll('[id^="swarm-download-"]'));
+                const hasSameRows = existingRows.length === rows.length
+                    && rows.every(row => document.getElementById(`swarm-download-${cssSafeId(downloadRowKey(row))}`));
+                if (!hasSameRows) return false;
+                rows.forEach(row => {
+                    const tableRow = document.getElementById(`swarm-download-${cssSafeId(downloadRowKey(row))}`);
+                    const pct = Math.max(0, Math.min(100, Number(row.percentage || 0)));
+                    const status = tableRow.querySelector('[data-download-field="status"]');
+                    const queue = tableRow.querySelector('[data-download-field="queue"]');
+                    const downloaded = tableRow.querySelector('[data-download-field="downloaded"]');
+                    const progressBar = tableRow.querySelector('[data-download-field="progress-bar"]');
+                    const progressText = tableRow.querySelector('[data-download-field="progress-text"]');
+                    const speed = tableRow.querySelector('[data-download-field="speed"]');
+                    const reason = tableRow.querySelector('[data-download-field="reason"]');
+                    const cancel = tableRow.querySelector('[data-download-field="cancel"]');
+                    if (status) {
+                        status.className = `badge text-bg-${downloadStatusClass(row.status)}`;
+                        status.textContent = row.status || 'queued';
+                    }
+                    if (queue) queue.textContent = row.queue_position ? `#${row.queue_position}` : row.status === 'downloading' ? 'active' : '';
+                    if (downloaded) downloaded.textContent = formatBytes(row.downloaded_bytes || row.bytes_transferred);
+                    if (progressBar) progressBar.style.width = `${pct}%`;
+                    if (progressText) progressText.textContent = `${pct.toFixed(1)}%`;
+                    if (speed) speed.textContent = row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : '';
+                    if (reason) reason.textContent = row.failure_reason || row.error_message || row.cancel_reason || '';
+                    if (cancel) {
+                        const nextCancel = renderDownloadCancelButton(row);
+                        if (cancel.innerHTML !== nextCancel) cancel.innerHTML = nextCancel;
+                    }
+                });
+                return true;
             }
 
             async function showSwarmDownloads(updateUrl = true, options = {}) {
@@ -1871,13 +1975,18 @@
                 panel.style.display = 'block';
                 if (!options.quiet) panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading downloads...</div></div>`;
                 try {
-                    const response = await apiGet('/api/downloads');
+                    const response = await apiGet('/api/downloads', { showLoader: !options.quiet });
                     if (!response.ok) throw new Error('Failed to load downloads');
                     const payload = await response.json();
                     const targets = payload.targets || [];
                     const rows = flattenDownloadTargets(targets);
                     if (!rows.length) {
-                        panel.innerHTML = '<div class="empty-state">No downloads in flight.</div>';
+                        if (panel.dataset.downloadState !== 'empty') panel.innerHTML = '<div class="empty-state">No downloads in flight.</div>';
+                        panel.dataset.downloadState = 'empty';
+                        startSwarmDownloadsAutoRefresh();
+                        return;
+                    }
+                    if (options.quiet && updateSwarmDownloadsInPlace(rows)) {
                         startSwarmDownloadsAutoRefresh();
                         return;
                     }
@@ -1888,6 +1997,7 @@
                         </div>
                         ${renderSwarmDownloadsTable(rows)}
                     </div></div>`;
+                    panel.dataset.downloadState = 'rows';
                     applyRbacUI();
                     startSwarmDownloadsAutoRefresh();
                 } catch (error) {
@@ -2161,34 +2271,31 @@
                 savesSearchQuery = '';
                 savesPage = 1;
                 selectedSaveKey = null;
-                displayDevices();
-                updateSelectedDeviceSummary();
-                updateSelectedDeviceWorkspace();
-                switchTab('devices', null, false);
-                switchDeviceView('systems', null, false);
                 setRoute('devices', deviceId, 'systems');
             }
 
-            async function loadGameLogs() {
+            async function loadGameLogs(options = {}) {
                 if (!selectedDeviceId) {
                     document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a Drone to view logs.</div>';
                     return;
                 }
+                const deviceId = selectedDeviceId;
                 try {
-                    const streamResp = await fetch(`/api/devices/${selectedDeviceId}/log-stream/view`, {
+                    const streamResp = await fetch(`/api/devices/${deviceId}/log-stream/view`, {
                         method: 'POST',
                         headers: { 'Authorization': `Bearer ${authToken}` }
                     });
                     await handleApiAuthFailure(streamResp);
                     const logLimit = getOvermindLogLineLimit();
                     const [logsResp, deviceResp] = await Promise.all([
-                        apiGet(`/api/devices/${selectedDeviceId}/gamelogs`),
-                        apiGet(`/api/devices/${selectedDeviceId}?log_limit=${encodeURIComponent(logLimit)}`)
+                        apiGet(`/api/devices/${deviceId}/gamelogs`, { showLoader: options.showLoader !== false }),
+                        apiGet(`/api/devices/${deviceId}?log_limit=${encodeURIComponent(logLimit)}`, { showLoader: options.showLoader !== false })
                     ]);
                     if (!logsResp.ok) throw new Error('Failed to load game logs');
                     if (!deviceResp.ok) throw new Error('Failed to load device details');
                     const logsData = await logsResp.json();
                     const deviceData = await deviceResp.json();
+                    if (selectedDeviceId !== deviceId) return;
                     displayCombinedLogs({
                         gamelogs: logsData.gamelogs || [],
                         emulator_configs: deviceData.emulator_configs || [],
@@ -2409,22 +2516,29 @@
                 }
             }
 
-            async function loadDeviceConfigs() {
+            async function loadDeviceConfigs(options = {}) {
                 const container = document.getElementById('configs-list');
                 if (!selectedDeviceId || !container) return;
+                const deviceId = selectedDeviceId;
                 try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}`);
+                    const response = await apiGet(`/api/devices/${deviceId}`, { showLoader: options.showLoader !== false });
                     if (!response.ok) throw new Error('Failed to load config data');
                     const device = await response.json();
+                    if (selectedDeviceId !== deviceId) return;
                     displayDeviceConfigs(device.emulator_configs || null);
                 } catch (error) {
-                    container.innerHTML = '<div class="empty-state">Unable to load emulator configs.</div>';
+                    if (selectedDeviceId === deviceId && !container.innerHTML.trim()) {
+                        container.innerHTML = '<div class="empty-state">Unable to load emulator configs.</div>';
+                    }
                 }
             }
 
             function displayDeviceConfigs(configPayload) {
                 const container = document.getElementById('configs-list');
                 const configs = configPayload && Array.isArray(configPayload.configs) ? configPayload.configs : [];
+                const signature = `${selectedDeviceId}:${JSON.stringify(configPayload || null)}`;
+                if (container.dataset.configSignature === signature) return;
+                container.dataset.configSignature = signature;
                 if (!configs.length) {
                     container.innerHTML = `<div class="card"><div class="card-body py-2">
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
@@ -3087,7 +3201,7 @@
                         Math.abs(p.level - currentVolume) < Math.abs(best.level - currentVolume) ? p : best, volumePresets[0]).level;
                 }
                 const volumeButtons = volumePresets.map(p => `
-                    <button class="btn btn-sm ${nearestPreset === p.level ? 'btn-primary' : 'btn-outline-primary'}" type="button"
+                    <button class="btn btn-sm ${nearestPreset === p.level ? 'btn-primary' : 'btn-outline-primary'}" type="button" data-volume-level="${p.level}"
                         onclick="queueDeviceVolume(${p.level})"><i class="bi ${p.icon} me-1"></i>${p.label}</button>
                 `).join('');
                 const screenModeButtons = [
@@ -3095,14 +3209,14 @@
                     { mode: 'kiosk', label: 'Kiosk', icon: 'bi-lock' },
                     { mode: 'kid', label: 'Kid', icon: 'bi-person' },
                 ].map(item => `
-                    <button class="btn btn-sm ${screenMode === item.mode ? 'btn-primary' : 'btn-outline-primary'}" type="button"
+                    <button class="btn btn-sm ${screenMode === item.mode ? 'btn-primary' : 'btn-outline-primary'}" type="button" data-screen-mode="${item.mode}"
                         onclick="queueDeviceScreenMode('${item.mode}')"><i class="bi ${item.icon} me-1"></i>${item.label}</button>
                 `).join('');
                 container.innerHTML = `
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
                             <strong><i class="bi bi-display me-1"></i>Screen Mode</strong>
-                            <span class="small text-muted">Current: ${screenMode || 'not yet reported'}</span>
+                            <span class="small text-muted" data-device-admin-field="screen-mode">Current: ${screenMode || 'not yet reported'}</span>
                         </div>
                         <div class="btn-group" role="group" aria-label="Screen mode">${screenModeButtons}</div>
                         <div class="small text-muted mt-2">Changing screen mode restarts EmulationStation on the device.</div>
@@ -3110,7 +3224,7 @@
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
                             <strong><i class="bi bi-volume-up me-1"></i>Volume</strong>
-                            <span class="small text-muted">Current: ${volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported'}</span>
+                            <span class="small text-muted" data-device-admin-field="volume">Current: ${volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported'}</span>
                         </div>
                         <div class="btn-group flex-wrap" role="group" aria-label="Volume presets">${volumeButtons}</div>
                     </div></div>
@@ -3145,6 +3259,37 @@
                 `;
                 applyRbacUI();
                 loadDeviceActions();
+            }
+
+            function updateDeviceAdminStatusInPlace() {
+                const container = document.getElementById('device-admin-panel');
+                const device = selectedDrone();
+                if (!container || !device) return;
+                const info = device.system_info || {};
+                const screenMode = ['full', 'kiosk', 'kid'].includes(String(info.screen_mode || '').toLowerCase())
+                    ? String(info.screen_mode).toLowerCase()
+                    : null;
+                const volumeKnown = Number.isFinite(Number(info.audio_volume));
+                const currentVolume = volumeKnown ? Number(info.audio_volume) : null;
+                const volumeLevels = [0, 25, 50, 75, 100];
+                const nearestVolume = volumeKnown
+                    ? volumeLevels.reduce((best, level) =>
+                        Math.abs(level - currentVolume) < Math.abs(best - currentVolume) ? level : best, volumeLevels[0])
+                    : null;
+                const screenStatus = container.querySelector('[data-device-admin-field="screen-mode"]');
+                const volumeStatus = container.querySelector('[data-device-admin-field="volume"]');
+                if (screenStatus) screenStatus.textContent = `Current: ${screenMode || 'not yet reported'}`;
+                if (volumeStatus) volumeStatus.textContent = `Current: ${volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported'}`;
+                container.querySelectorAll('[data-screen-mode]').forEach(button => {
+                    const active = button.dataset.screenMode === screenMode;
+                    button.classList.toggle('btn-primary', active);
+                    button.classList.toggle('btn-outline-primary', !active);
+                });
+                container.querySelectorAll('[data-volume-level]').forEach(button => {
+                    const active = Number(button.dataset.volumeLevel) === nearestVolume;
+                    button.classList.toggle('btn-primary', active);
+                    button.classList.toggle('btn-outline-primary', !active);
+                });
             }
 
             async function queueDeviceVolume(level) {
@@ -4008,22 +4153,29 @@
                 showTokenModal(data.drone_token, 'New Drone Authorization Token');
             }
 
+            function updateSelectedDeviceHeader() {
+                const title = document.getElementById('selected-device-title');
+                const idNode = document.getElementById('selected-device-id');
+                const device = currentDevices.find(d => d.device_id === selectedDeviceId);
+                if (title) title.textContent = device ? device.device_name : 'Selected Drone';
+                if (idNode) idNode.textContent = selectedDeviceId
+                    ? `Drone ID: ${device ? device.device_id : selectedDeviceId}`
+                    : '';
+            }
+
             function updateSelectedDeviceWorkspace() {
                 const workspace = document.getElementById('selected-device-workspace');
                 const listView = document.getElementById('device-list-view');
-                const title = document.getElementById('selected-device-title');
-                const idNode = document.getElementById('selected-device-id');
                 if (!workspace) return;
                 if (!selectedDeviceId) {
                     workspace.style.display = 'none';
                     if (listView) listView.style.display = 'block';
+                    updateSelectedDeviceHeader();
                     return;
                 }
-                const device = currentDevices.find(d => d.device_id === selectedDeviceId);
                 if (listView) listView.style.display = 'none';
                 workspace.style.display = 'block';
-                if (title) title.textContent = device ? device.device_name : 'Selected Drone';
-                if (idNode) idNode.textContent = device ? `Drone ID: ${device.device_id}` : `Drone ID: ${selectedDeviceId}`;
+                updateSelectedDeviceHeader();
                 renderDroneNetworkPanel();
                 renderDroneTokenPanel();
                 renderDroneSpeedPanel();
@@ -4053,7 +4205,7 @@
                             stopSelectedDeviceDataAutoRefresh();
                             return;
                         }
-                        loadDeviceActions();
+                        loadDeviceActions({showLoader: false});
                     }, 8000);
                     return;
                 }
@@ -4065,14 +4217,18 @@
                         stopSelectedDeviceDataAutoRefresh();
                         return;
                     }
-                    if (currentDeviceView === 'gamelogs') loadGameLogs();
-                    if (currentDeviceView === 'configs') loadDeviceConfigs();
+                    if (currentDeviceView === 'gamelogs') loadGameLogs({showLoader: false});
+                    if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});
                 }, 30000);
             }
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
                 currentDeviceView = ['bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'systems';
+                if (updateUrl) {
+                    setRoute('devices', selectedDeviceId, currentDeviceView);
+                    return;
+                }
                 startSelectedDeviceDataAutoRefresh(currentDeviceView);
                 document.querySelectorAll('.device-view-btn').forEach(btn => btn.classList.remove('active'));
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
@@ -4112,13 +4268,12 @@
                 if (currentDeviceView === 'admin') {
                     renderDeviceAdminPanel();
                     refreshSelectedDroneDetails()
-                        .then(() => renderDeviceAdminPanel())
+                        .then(() => updateDeviceAdminStatusInPlace())
                         .catch(error => console.error('Error refreshing selected Drone details:', error));
                 }
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
                 actionRefreshTimer = null;
                 applyRbacUI();
-                if (updateUrl) setRoute('devices', selectedDeviceId, currentDeviceView);
             }
 
             function setRoute(tabName, deviceId = selectedDeviceId, deviceView = currentDeviceView, swarmView = null) {
@@ -4316,8 +4471,6 @@
                     selectedDeviceId = route.deviceId;
                     currentDeviceView = route.deviceView || 'systems';
                 }
-                updateSelectedDeviceSummary();
-                updateSelectedDeviceWorkspace();
                 switchTab(route.tab, null, false);
                 if (selectedDeviceId && route.tab === 'devices') switchDeviceView(currentDeviceView, null, false);
                 if (!selectedDeviceId && route.tab === 'devices') {
@@ -4330,14 +4483,22 @@
                 updateSharedSwarmNavButton();
             }
 
-            async function loadDeviceActions() {
+            async function loadDeviceActions(options = {}) {
                 const container = document.getElementById('actions-list');
                 if (!selectedDeviceId || !container) return;
+                const deviceId = selectedDeviceId;
                 try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/actions`);
+                    const response = await apiGet(`/api/devices/${deviceId}/actions`, { showLoader: options.showLoader !== false });
                     if (!response.ok) throw new Error('Failed to load device actions');
                     const data = await response.json();
                     const actions = data.actions || [];
+                    if (selectedDeviceId !== deviceId) return;
+                    const signature = JSON.stringify(actions);
+                    if (renderedDeviceActionsDeviceId === deviceId && renderedDeviceActionsSignature === signature && container.innerHTML.trim()) return;
+                    const openResultIds = new Set(Array.from(container.querySelectorAll('details[data-action-result-id][open]'))
+                        .map(details => details.dataset.actionResultId));
+                    renderedDeviceActionsDeviceId = deviceId;
+                    renderedDeviceActionsSignature = signature;
                     if (!actions.length) {
                         container.innerHTML = '<div class="empty-state">No actions queued yet.</div>';
                         return;
@@ -4372,7 +4533,7 @@
                                 <td class="small">${escapeHtml(action.message || '')}</td>
                                 <td class="small">${result ? `
                                     <div class="text-muted">${escapeHtml(resultSummary)}</div>
-                                    <details class="mt-1">
+                                    <details class="mt-1" data-action-result-id="${cssSafeId(action.id)}">
                                         <summary>View returned data</summary>
                                         <pre class="small mt-2 p-2 rounded" style="white-space:pre-wrap;background:rgba(0,0,0,0.18);max-height:360px;overflow:auto;">${escapeHtml(JSON.stringify(result, null, 2))}</pre>
                                     </details>
@@ -4381,9 +4542,14 @@
                             }).join('')}</tbody>
                         </table>
                         </div>`;
+                    container.querySelectorAll('details[data-action-result-id]').forEach(details => {
+                        if (openResultIds.has(details.dataset.actionResultId)) details.open = true;
+                    });
                 } catch (error) {
                     console.error('Error loading actions:', error);
-                    container.innerHTML = '<div class="empty-state">Unable to load actions.</div>';
+                    if (selectedDeviceId === deviceId && !container.innerHTML.trim()) {
+                        container.innerHTML = '<div class="empty-state">Unable to load actions.</div>';
+                    }
                 }
             }
 
@@ -4914,6 +5080,10 @@
             }
 
             function switchTab(tabName, buttonEl = null, updateUrl = true) {
+                if (updateUrl) {
+                    setRoute(tabName);
+                    return;
+                }
                 activateNav(tabName);
                 document.querySelectorAll('.dashboard-tab').forEach(section => { section.style.display = 'none'; });
                 const tabMap = {
@@ -4949,7 +5119,6 @@
                 applyRbacUI();
                 setPageChrome(tabName);
                 updateSharedSwarmNavButton();
-                if (updateUrl) setRoute(tabName);
             }
 
             function showTokenModal(tokenValue, title = 'Drone Authorization Token') {
