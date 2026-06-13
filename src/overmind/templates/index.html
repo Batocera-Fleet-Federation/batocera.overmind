@@ -79,15 +79,14 @@
           <h3><i class="bi bi-lightning-charge me-2"></i>Quick setup</h3>
           <p style="color:var(--admin-muted)">Monitor and manage a machine in a few quick steps.</p>
           <ol>
-            <li><strong>Install the Drone.</strong> On the Batocera machine, open a terminal (SSH, or press <strong>F1</strong> &rarr; file manager &rarr; terminal) and run:</li>
+            <li><strong>Install the Drone.</strong> <small>On the Batocera machine, open a terminal (SSH, or press <strong>F1</strong> &rarr; file manager &rarr; terminal) and run:</small></li>
           </ol>
           <div style="margin:.75rem 0 1rem;">
             <code style="display:block;white-space:normal;word-break:break-all;line-height:1.5;padding:.75rem;">curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash</code>
           </div>
           <ol start="2">
-            <li><strong>Turn it on.</strong> Batocera v43+: <strong>System Settings</strong> &gt; <strong>Services</strong> &gt; enable <strong>DRONE_SERVER</strong>. Older versions: reboot.</li>
-            <li><strong>Open the Drone.</strong> The installer prints a green banner with this machine's address — usually <code>https://batocera.local</code>. Open it from any device on your network and sign in (user <code>batocera</code>, password <code>linux</code>).</li>
-            <li><strong>Connect it.</strong> Register at <code>batocera-swarm.com</code>, then <strong>My Swarm</strong> &gt; <strong>Generate Token</strong>. In the Drone app, open <strong>Admin</strong> &gt; <strong>Overmind Integration</strong>, set the Overmind URL to <code>https://www.batocera-swarm.com</code>, paste the token, and save. Approve the Drone from <strong>My Swarm</strong>.</li>
+            <li><strong>Open the Drone.</strong> <small>Open it from any device on your network.</small></li>
+            <li><strong>Connect it.</strong> <small>Create an Overmind account and register the Drone.</small></li>
           </ol>
           <div style="margin:1rem 0 0;padding:.9rem 1rem;border:1px solid rgba(52,211,153,0.35);background:rgba(52,211,153,0.10);border-radius:.75rem;color:var(--admin-text);font-weight:900;">
             <i class="bi bi-check-circle me-1" style="color:var(--admin-accent-green);"></i> Done — the machine reports status and accepts remote actions.
