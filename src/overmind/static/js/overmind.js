@@ -51,6 +51,13 @@
       banner.style.display = dismissed ? 'none' : 'flex';
     }
 
+    function recordLandingVisit() {
+      // Fire-and-forget: log this anonymous landing-page visit (server dedups by IP).
+      try {
+        fetch('/api/landing-visit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+      } catch (e) {}
+    }
+
     window.addEventListener('hashchange', () => {
       if (localStorage.getItem('auth_token')) return;
       const hash = window.location.hash || '';
@@ -117,6 +124,8 @@
             let syncActionsPageSize = 20;
             let auditLogOffset = 0;
             let auditLogPageSize = 20;
+            let visitorsOffset = 0;
+            let visitorsPageSize = 20;
             let notificationsRefreshTimer = null;
             let notificationsPageOffset = 0;
             const notificationsPageSize = 25;
@@ -149,6 +158,7 @@
 	                handleOAuthReturn();
 	                handleAuthHashActions();
                 const token = localStorage.getItem('auth_token');
+                if (!token) recordLandingVisit();
                 if (token) {
 	                    authToken = token;
                     routeSwarmId = parseRoute().swarmId || null;
@@ -4827,9 +4837,18 @@
                             </div>
                             <div id="audit-log-results"><div class="empty-state">Loading audit log…</div></div>
                         </div>
+                        <div class="device-card mt-3">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <h4 class="h5 mb-0">Site Visitors</h4>
+                                <span id="visitors-summary" class="d-flex flex-wrap gap-2"></span>
+                            </div>
+                            <div class="small text-muted mb-2">Unique IP addresses that loaded the landing page while signed out.</div>
+                            <div id="visitors-results"><div class="empty-state">Loading visitors…</div></div>
+                        </div>
                     `;
                     syncActionsOffset = 0;
                     auditLogOffset = 0;
+                    visitorsOffset = 0;
                     const pageSizeSelect = document.getElementById('sync-actions-page-size');
                     if (pageSizeSelect) pageSizeSelect.value = String(syncActionsPageSize);
                     const auditPageSizeSelect = document.getElementById('audit-log-page-size');
@@ -4837,6 +4856,7 @@
                     loadSuperAdminSyncActions();
                     loadSuperAdminSyncSummary();
                     loadSuperAdminAuditLog();
+                    loadSuperAdminVisitors();
                 } catch (error) {
                     console.error('Error loading super admin data:', error);
                     container.innerHTML = '<div class="empty-state">Unable to load super admin data.</div>';
@@ -5015,6 +5035,56 @@
                 } catch (error) {
                     console.error('Error loading audit log:', error);
                     results.innerHTML = '<div class="empty-state">Unable to load audit log.</div>';
+                }
+            }
+
+            function gotoVisitorsPage(offset) {
+                visitorsOffset = Math.max(0, Number(offset) || 0);
+                loadSuperAdminVisitors();
+            }
+
+            async function loadSuperAdminVisitors() {
+                const results = document.getElementById('visitors-results');
+                const summaryEl = document.getElementById('visitors-summary');
+                if (!results || !isSuperAdmin()) return;
+                const limit = visitorsPageSize;
+                const offset = visitorsOffset;
+                results.innerHTML = '<div class="empty-state">Loading visitors…</div>';
+                try {
+                    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+                    const response = await apiGet(`/api/admin/landing-visits?${params.toString()}`, { showLoader: false });
+                    if (!response.ok) throw new Error('Failed to load visitors');
+                    const data = await response.json();
+                    const visits = data.visits || [];
+                    const totalRows = Number(data.total_rows || 0);
+                    if (summaryEl) summaryEl.innerHTML = `
+                        <span class="badge text-bg-primary">Unique IPs: ${Number(data.unique || 0)}</span>
+                        <span class="badge text-bg-secondary">Total visits: ${Number(data.total || 0)}</span>`;
+                    const start = totalRows ? offset + 1 : 0;
+                    const end = offset + visits.length;
+                    const hasPrev = offset > 0;
+                    const hasNext = end < totalRows;
+                    results.innerHTML = `
+                        <div class="table-responsive"><table class="table table-sm align-middle">
+                            <thead><tr><th>IP Address</th><th>Visits</th><th>First Seen</th><th>Last Seen</th></tr></thead>
+                            <tbody>${visits.map(visit => `
+                                <tr>
+                                    <td class="mono">${escapeHtml(visit.ip || '')}</td>
+                                    <td>${Number(visit.visit_count || 0)}</td>
+                                    <td>${formatAdminDate(visit.first_seen)}</td>
+                                    <td>${formatAdminDate(visit.last_seen)}</td>
+                                </tr>`).join('') || '<tr><td colspan="4" class="text-muted">No visitors recorded yet.</td></tr>'}</tbody>
+                        </table></div>
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
+                            <span class="small text-muted">${totalRows ? `Showing ${start}–${end} of ${totalRows}` : 'No results'}</span>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary" type="button" ${hasPrev ? '' : 'disabled'} onclick="gotoVisitorsPage(${Math.max(0, offset - limit)})">Previous</button>
+                                <button class="btn btn-outline-secondary" type="button" ${hasNext ? '' : 'disabled'} onclick="gotoVisitorsPage(${offset + limit})">Next</button>
+                            </div>
+                        </div>`;
+                } catch (error) {
+                    console.error('Error loading visitors:', error);
+                    results.innerHTML = '<div class="empty-state">Unable to load visitors.</div>';
                 }
             }
 

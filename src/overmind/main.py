@@ -762,6 +762,15 @@ def verify_oauth_state(state_value: str, provider: str) -> bool:
         return False
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort real client IP, honoring the proxy/API-Gateway forwarded header."""
+    forwarded = request.headers.get("x-forwarded-for") or ""
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    client = request.client
+    return client.host if client else ""
+
+
 def get_public_base_url(request: Request) -> str:
     """Build redirect base URL from ENV or current request."""
     configured = os.getenv("OAUTH_REDIRECT_BASE_URL", "").strip().rstrip("/")
@@ -1358,6 +1367,16 @@ async def dismiss_notifications(payload: dict = None, authorization: Optional[st
     return {"status": "ok", "dismissed": count}
 
 
+@app.post("/api/landing-visit")
+async def record_landing_visit(request: Request):
+    """Public: log an anonymous landing-page visit by client IP (fire-and-forget)."""
+    try:
+        db.record_landing_visit(_client_ip(request), request.headers.get("user-agent"))
+    except Exception as error:
+        logger.warning("Failed to record landing visit: %s", error)
+    return {"status": "ok"}
+
+
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
@@ -1426,6 +1445,28 @@ async def admin_audit_log(
     offset = max(0, int(offset or 0))
     page = db.list_audit_events(search=q, limit=limit, offset=offset)
     return {"audit_events": page["events"], "total": page["total"], "limit": limit, "offset": offset}
+
+
+@app.get("/api/admin/landing-visits")
+async def admin_landing_visits(
+    limit: int = 20,
+    offset: int = 0,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Unique-visitor count and recent landing-page visitors (super admin only)."""
+    require_super_admin(authorization)
+    limit = max(1, min(int(limit or 20), 100))
+    offset = max(0, int(offset or 0))
+    stats = db.landing_visit_stats()
+    page = db.list_landing_visits(limit=limit, offset=offset)
+    return {
+        "unique": stats["unique"],
+        "total": stats["total"],
+        "visits": page["visits"],
+        "total_rows": page["total"],
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/api/admin/runtime-metrics")

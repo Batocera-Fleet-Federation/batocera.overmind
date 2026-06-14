@@ -218,7 +218,7 @@ class PostgresMetadataStore:
         except Exception:
             return None
         try:
-            timeout = max(1, int(os.getenv("OVERMIND_POSTGRES_CONNECT_TIMEOUT_SECONDS", "3")))
+            timeout = max(1, int(os.getenv("OVERMIND_POSTGRES_CONNECT_TIMEOUT_SECONDS", "8")))
             conn = psycopg.connect(self.url, connect_timeout=timeout)
             return _TimedConnection(conn) if _postgres_query_logging_enabled() else conn
         except Exception as error:
@@ -3321,6 +3321,61 @@ class PostgresMetadataStore:
                         "details": details, "created_at": row[8],
                     })
         return {"events": events, "total": total}
+
+    def record_landing_visit(self, ip: str, user_agent: Optional[str] = None) -> bool:
+        """Upsert one anonymous landing-page visit keyed by client IP."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None or not ip:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO landing_visits (ip, first_seen, last_seen, visit_count, user_agent)
+                    VALUES (%s, now(), now(), 1, %s)
+                    ON CONFLICT (ip) DO UPDATE SET
+                        last_seen = now(),
+                        visit_count = landing_visits.visit_count + 1,
+                        user_agent = COALESCE(EXCLUDED.user_agent, landing_visits.user_agent)
+                    """,
+                    (ip, user_agent),
+                )
+        return True
+
+    def landing_visit_stats(self) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*), COALESCE(sum(visit_count), 0) FROM landing_visits")
+                row = cur.fetchone()
+        return {"unique": int(row[0] or 0), "total": int(row[1] or 0)}
+
+    def list_landing_visits(self, limit: int = 20, offset: int = 0) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        row_limit = max(1, min(int(limit or 20), 100))
+        row_offset = max(0, int(offset or 0))
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM landing_visits")
+                total = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT ip, first_seen, last_seen, visit_count, user_agent
+                    FROM landing_visits
+                    ORDER BY last_seen DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (row_limit, row_offset),
+                )
+                visits = [
+                    {"ip": r[0], "first_seen": r[1], "last_seen": r[2], "visit_count": int(r[3] or 0), "user_agent": r[4]}
+                    for r in cur.fetchall()
+                ]
+        return {"visits": visits, "total": total}
 
     def summarize_sync_actions(self) -> Optional[dict]:
         """Counts of sync actions grouped by status (super-admin summary)."""

@@ -226,6 +226,7 @@ class OvermindDatabase:
         self.invitations: Dict[str, dict] = {}
         self.notifications: Dict[str, list] = {}
         self.audit_events: List[dict] = []
+        self.landing_visits: Dict[str, dict] = {}
         self._operation_depth = 0
         self._operation_dirty = False
         self._last_source_refresh_at = 0.0
@@ -450,6 +451,48 @@ class OvermindDatabase:
                        for field in ("event_type", "summary", "actor_email", "target_label"))
             ]
         return {"events": rows[offset:offset + limit], "total": len(rows)}
+
+    def record_landing_visit(self, ip: str, user_agent: Optional[str] = None) -> None:
+        """Log an anonymous landing-page visit by client IP (best-effort)."""
+        if not ip:
+            return
+        if postgres_store.available():
+            try:
+                postgres_store.record_landing_visit(ip, user_agent)
+                return
+            except Exception as error:
+                logger.warning("Failed to record landing visit: %s", error)
+        now = datetime.utcnow()
+        existing = self.landing_visits.get(ip)
+        if existing:
+            existing["last_seen"] = now
+            existing["visit_count"] = int(existing.get("visit_count", 0)) + 1
+            if user_agent:
+                existing["user_agent"] = user_agent
+        else:
+            self.landing_visits[ip] = {
+                "ip": ip, "first_seen": now, "last_seen": now, "visit_count": 1, "user_agent": user_agent,
+            }
+
+    def landing_visit_stats(self) -> dict:
+        if postgres_store.available():
+            stats = postgres_store.landing_visit_stats()
+            if stats is not None:
+                return stats
+        return {
+            "unique": len(self.landing_visits),
+            "total": sum(int(v.get("visit_count", 0)) for v in self.landing_visits.values()),
+        }
+
+    def list_landing_visits(self, limit: int = 20, offset: int = 0) -> dict:
+        limit = max(1, min(int(limit or 20), 100))
+        offset = max(0, int(offset or 0))
+        if postgres_store.available():
+            page = postgres_store.list_landing_visits(limit, offset)
+            if page is not None:
+                return page
+        rows = sorted(self.landing_visits.values(), key=lambda v: v.get("last_seen") or datetime.min, reverse=True)
+        return {"visits": rows[offset:offset + limit], "total": len(rows)}
 
     def summarize_sync_actions(self) -> dict:
         """Counts of all sync actions by status for the Super Admin summary."""

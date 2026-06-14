@@ -1031,6 +1031,30 @@ def test_admin_audit_log_and_sync_summary_are_super_admin_only(client):
     assert "total" in body and "by_status" in body
 
 
+def test_landing_visits_counted_by_unique_ip(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
+    admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
+
+    # Same IP twice -> one unique visitor, two total visits.
+    assert client.post("/api/landing-visit", headers={"X-Forwarded-For": "203.0.113.10"}).status_code == 200
+    assert client.post("/api/landing-visit", headers={"X-Forwarded-For": "203.0.113.10"}).status_code == 200
+    # A different IP -> a second unique visitor.
+    client.post("/api/landing-visit", headers={"X-Forwarded-For": "203.0.113.20"})
+
+    stats = client.get("/api/admin/landing-visits", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert stats["unique"] == 2
+    assert stats["total"] == 3
+    ips = {v["ip"] for v in stats["visits"]}
+    assert {"203.0.113.10", "203.0.113.20"} <= ips
+    repeat = next(v for v in stats["visits"] if v["ip"] == "203.0.113.10")
+    assert repeat["visit_count"] == 2
+
+    # Super-admin only.
+    client.post("/api/auth/register", json={"email": "reg@example.com", "username": "reg", "password": "testpass123"})
+    reg_token = client.post("/api/auth/login", json={"email": "reg@example.com", "password": "testpass123"}).json()["access_token"]
+    assert client.get("/api/admin/landing-visits", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
+
+
 def test_drone_reachability_notification_type_registered():
     from overmind import notification_delivery as nd
     from pathlib import Path as _Path
