@@ -4238,8 +4238,11 @@ class PostgresMetadataStore:
                 if not isinstance(values, dict):
                     continue
                 for name, value in values.items():
-                    number = value if isinstance(value, (int, float)) else None
-                    text = None if number is not None else str(value)
+                    # bool is a subclass of int, so it would be sent to the numeric
+                    # metric_value column and fail with DatatypeMismatch (double precision
+                    # vs boolean), aborting the whole state persist. Route bools to text.
+                    number = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+                    text = None if number is not None else (str(value) if value is not None else None)
                     cur.execute(
                         """
                         INSERT INTO drone_performance_metrics (drone_id, metric_group, metric_name, metric_value, metric_text)

@@ -171,3 +171,24 @@ def test_list_audit_events_returns_page(monkeypatch):
     assert page["total"] == 2
     assert len(page["events"]) == 2
     assert page["events"][1]["details"] == {"x": 1}
+
+
+def test_mirror_device_details_routes_boolean_metric_to_text():
+    # Regression: bool is a subclass of int, so a boolean performance metric used to be
+    # sent to the numeric metric_value column and fail with DatatypeMismatch, aborting the
+    # whole state persist. Booleans must route to metric_text instead.
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    store._mirror_device_details(cursor, {
+        "id": "drone-1",
+        "system_info": {"performance": {"cpu": {"throttled": True, "load": 1.5}}},
+    })
+    metric_params = {
+        params[2]: params
+        for sql, params in cursor.executed
+        if "INSERT INTO drone_performance_metrics" in sql
+    }
+    assert metric_params["throttled"][3] is None       # metric_value (numeric) not set
+    assert metric_params["throttled"][4] == "True"      # boolean stored as text
+    assert metric_params["load"][3] == 1.5              # real number still numeric
+    assert metric_params["load"][4] is None
