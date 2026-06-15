@@ -3525,6 +3525,48 @@ def test_heartbeat_accepts_saves_files_thumbprint_and_updates_last_seen(client):
     assert (datetime.utcnow() - refreshed["last_seen"]).total_seconds() < 60
 
 
+def test_heartbeat_accepts_download_queue_state_fields(client):
+    # Regression: the Drone's download snapshot gained queue-state fields (paused,
+    # queue_eta_seconds, queue_remaining_bytes, queue_estimate_*, ...). DroneDownloadsReport
+    # was strict (extra="forbid"), so those 422-ed the whole heartbeat -> last_seen never
+    # updated -> the Drone showed offline. The report is now extensible.
+    client.post("/api/auth/register", json={"email": "hb-dl@example.com", "username": "hb-dl-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("hb-dl@example.com")
+    db.create_device(user["id"], "drone-dl", "Drone DL", {"ip_address": "10.0.0.3"}, raw_token="drone-token-dl")
+    stale_device = db.get_device_by_device_id("drone-dl")
+    stale_device["last_seen"] = datetime.utcnow() - timedelta(hours=1)
+
+    response = client.post(
+        "/api/devices/drone-dl/heartbeat",
+        headers={"Authorization": "Bearer drone-token-dl"},
+        json={
+            "device_id": "drone-dl",
+            "device_name": "Drone DL",
+            "downloads": {
+                "target_drone_id": "drone-dl",
+                "concurrency": {"scope": "target_drone", "active_limit": 3},
+                "paused": False,
+                "queue_eta_seconds": None,
+                "queue_remaining_bytes": 0,
+                "queue_known_remaining_bytes": 0,
+                "queue_estimated_unknown_bytes": 0,
+                "queue_unknown_size_count": 0,
+                "queue_size_estimate_available": True,
+                "queue_estimate_speed_bps": 12000000,
+                "queue_estimate_speed_source": "active",
+                "queue_eta_state": "ready",
+                "active": [],
+                "queued": [],
+                "recent": [],
+                "downloads": [],
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    refreshed = db.get_device_by_device_id("drone-dl")
+    assert (datetime.utcnow() - refreshed["last_seen"]).total_seconds() < 60
+
+
 def test_heartbeat_accepts_screen_mode_and_audio_volume_in_system_info(client):
     client.post("/api/auth/register", json={"email": "hb-vol@example.com", "username": "hb-vol-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("hb-vol@example.com")

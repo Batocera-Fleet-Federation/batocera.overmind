@@ -238,7 +238,11 @@ class DroneDownloadItem(ExtensibleContractModel):
     completed_at: Optional[str] = None
 
 
-class DroneDownloadsReport(StrictContractModel):
+class DroneDownloadsReport(ExtensibleContractModel):
+    # Extensible: the Drone's download summary keeps adding queue-state fields
+    # (paused, queue_eta_seconds, queue_remaining_bytes, queue_estimate_*, ...).
+    # These are telemetry/display state, so accept newer fields instead of 422-ing
+    # the whole heartbeat — same rationale as DroneDownloadItem above.
     target_drone_id: Optional[str] = None
     concurrency: dict[str, Any] = Field(default_factory=lambda: {"scope": "target_drone", "active_limit": 1})
     active: list[DroneDownloadItem] = Field(default_factory=list)
