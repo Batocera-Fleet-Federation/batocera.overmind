@@ -1092,17 +1092,17 @@ def test_reachability_poll_emits_notification_on_status_flip(monkeypatch):
 
     monkeypatch.setattr(overmind_main.postgres_store, "insert_swarm_notification", fake_insert)
 
-    # Not Resolvable -> Resolvable
-    monkeypatch.setattr(overmind_main.networking, "tcp_port_open", lambda host, port, timeout: True)
+    # Not Resolvable -> Resolvable (the responder identifies as this Drone)
+    monkeypatch.setattr(overmind_main.networking, "probe_drone_identity", lambda host, port, timeout: "drone-x")
     result = overmind_main.poll_public_reachability_once()
     assert result["changed"] == 1
     assert captured["event_type"] == "drone_resolvable"
     assert captured["swarm_id"] == "swarm-1"
     assert "Drone X" in captured["message"]
 
-    # Resolvable -> Not Resolvable
+    # Resolvable -> Not Resolvable (nothing/no valid identity answers)
     device["public_reachability"]["resolvable"] = True
-    monkeypatch.setattr(overmind_main.networking, "tcp_port_open", lambda host, port, timeout: False)
+    monkeypatch.setattr(overmind_main.networking, "probe_drone_identity", lambda host, port, timeout: None)
     overmind_main.poll_public_reachability_once()
     assert captured["event_type"] == "drone_unresolvable"
 
@@ -1111,6 +1111,43 @@ def test_reachability_poll_emits_notification_on_status_flip(monkeypatch):
     captured.clear()
     overmind_main.poll_public_reachability_once()
     assert captured == {}
+
+
+def test_reachability_identity_check_handles_shared_public_ip(monkeypatch):
+    """Two Drones behind one public IP with 443 forwarded to only DroneA: a bare TCP
+    probe marked both reachable. The identity check confirms who actually answers, so
+    only the forwarded Drone is Resolvable and the other is correctly Not Resolvable."""
+    from overmind import main as overmind_main
+
+    drone_a = {
+        "id": "a", "device_id": "drone-a", "device_name": "A", "swarm_id": "s", "api_port": 443,
+        "network": {"public_ip": "9.9.9.9"}, "public_reachability": {"resolvable": False},
+    }
+    drone_b = {  # previously a false positive
+        "id": "b", "device_id": "drone-b", "device_name": "B", "swarm_id": "s", "api_port": 443,
+        "network": {"public_ip": "9.9.9.9"}, "public_reachability": {"resolvable": True},
+    }
+    monkeypatch.setattr(overmind_main.postgres_store, "list_all_approved_devices", lambda **k: [drone_a, drone_b])
+
+    writes = {}
+
+    def fake_update(internal_id, result):
+        writes[internal_id] = result
+        return True
+
+    monkeypatch.setattr(overmind_main.postgres_store, "update_device_reachability", fake_update)
+    monkeypatch.setattr(overmind_main.postgres_store, "insert_swarm_notification", lambda *a, **k: "nid")
+    # The forwarded port lands on Drone A regardless of which Drone we believe we're probing.
+    monkeypatch.setattr(overmind_main.networking, "probe_drone_identity", lambda host, port, timeout: "drone-a")
+
+    overmind_main.poll_public_reachability_once()
+
+    # Drone A's identity matches the responder -> Resolvable.
+    assert writes["a"]["resolvable"] is True
+    # Drone B: a *different* Drone answered -> Not Resolvable, with diagnostics.
+    assert writes["b"]["resolvable"] is False
+    assert writes["b"]["identity_mismatch"] is True
+    assert writes["b"]["answered_by"] == "drone-a"
 
 
 def test_device_game_count_vs_rom_file_count(client):

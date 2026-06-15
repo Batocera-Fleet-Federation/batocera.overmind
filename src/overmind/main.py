@@ -432,7 +432,7 @@ def poll_device_status_notifications_once() -> None:
         logger.warning("Failed to expire stale device actions: %s", error)
 
 
-def _emit_reachability_notification(device: dict, resolvable: bool) -> None:
+def _emit_reachability_notification(device: dict, resolvable: bool, answered_by: Optional[str] = None) -> None:
     """Record a swarm notification when a Drone flips Resolvable <-> Not Resolvable.
 
     Persisted directly to Postgres (delivery_pending) so the digest job emails users
@@ -447,11 +447,18 @@ def _emit_reachability_notification(device: dict, resolvable: bool) -> None:
     event_type = "drone_resolvable" if resolvable else "drone_unresolvable"
     title = "Drone became resolvable" if resolvable else "Drone became unresolvable"
     message = f"{label} is now {status} from Overmind."
+    if not resolvable and answered_by:
+        message = (
+            f"{label} is now Not Resolvable from Overmind: another Drone ({answered_by}) answers at its "
+            "public IP and port. If both Drones share one public IP, forward a different external port to this one."
+        )
     details = {
         "device": {"device_id": device.get("device_id"), "device_name": label},
         "status": status,
         "nature": status,
     }
+    if answered_by:
+        details["answered_by"] = answered_by
     try:
         postgres_store.insert_swarm_notification(swarm_id, event_type, title, message, details)
     except Exception as error:
@@ -476,15 +483,24 @@ def poll_public_reachability_once() -> dict:
     checked = 0
     changed = 0
 
-    def _probe(device: dict) -> tuple[dict, Optional[str], bool]:
+    def _probe(device: dict) -> tuple[dict, Optional[str], bool, Optional[str]]:
         network = device.get("network") if isinstance(device.get("network"), dict) else {}
         reachability = device.get("public_reachability") if isinstance(device.get("public_reachability"), dict) else {}
         public_ip = network.get("public_ip") or network.get("public") or reachability.get("public_ip")
         port = int(device.get("api_port") or 443)
-        resolvable = bool(public_ip) and networking.tcp_port_open(
-            str(public_ip), port, PUBLIC_REACHABILITY_PROBE_TIMEOUT_SECONDS
+        expected_id = str(device.get("device_id") or "").strip()
+        # Identity check, not just a TCP connect: two Drones can share one public IP
+        # (same NAT) with 443 forwarded to only one of them, so a bare connect would
+        # mark BOTH reachable. We confirm the responder's /health drone_id is *this*
+        # Drone; if another Drone answers (port-forward lands elsewhere) it is Not
+        # Resolvable, and we record who actually answered for diagnostics.
+        observed_id = (
+            networking.probe_drone_identity(str(public_ip), port, PUBLIC_REACHABILITY_PROBE_TIMEOUT_SECONDS)
+            if (public_ip and expected_id)
+            else None
         )
-        return device, (str(public_ip) if public_ip else None), resolvable
+        resolvable = bool(public_ip) and bool(expected_id) and observed_id is not None and observed_id == expected_id
+        return device, (str(public_ip) if public_ip else None), resolvable, observed_id
 
     pool = ThreadPoolExecutor(max_workers=PUBLIC_REACHABILITY_MAX_WORKERS)
     try:
@@ -494,11 +510,20 @@ def poll_public_reachability_once() -> dict:
                 logger.warning("Public reachability run budget reached; deferring remaining Drones to next run")
                 break
             try:
-                device, public_ip, resolvable = future.result()
+                device, public_ip, resolvable, observed_id = future.result()
             except Exception as error:
                 logger.warning("Public reachability probe failed: %s", error)
                 continue
             checked += 1
+            # A different Drone answering at this public IP:port (shared NAT /
+            # port-forward) is the actionable failure mode -- log who answered.
+            expected_id = str(device.get("device_id") or "").strip()
+            identity_mismatch = bool(public_ip and observed_id and expected_id and observed_id != expected_id)
+            if identity_mismatch:
+                logger.info(
+                    "Public reachability: %s not resolvable -- public IP %s:%s answered by a different Drone (%s)",
+                    expected_id, public_ip, int(device.get("api_port") or 443), observed_id,
+                )
             previous = bool((device.get("public_reachability") or {}).get("resolvable"))
             if resolvable == previous:
                 continue
@@ -507,10 +532,12 @@ def poll_public_reachability_once() -> dict:
                 "public_ip": public_ip,
                 "api_port": int(device.get("api_port") or 443) if resolvable else None,
                 "checked_at": datetime.utcnow(),
+                "answered_by": observed_id if identity_mismatch else None,
+                "identity_mismatch": identity_mismatch,
             }
             if postgres_store.update_device_reachability(str(device.get("id") or ""), result):
                 changed += 1
-                _emit_reachability_notification(device, resolvable)
+                _emit_reachability_notification(device, resolvable, answered_by=result["answered_by"])
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
