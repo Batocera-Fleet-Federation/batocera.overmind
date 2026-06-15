@@ -3577,6 +3577,25 @@ class PostgresMetadataStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    SELECT 1
+                    FROM drones
+                    WHERE device_id = %s
+                      AND approval_status = 'approved'
+                      AND removed_at IS NULL
+                    LIMIT 1
+                    """,
+                    (device_id,),
+                )
+                if cur.fetchone():
+                    cur.execute("DELETE FROM pending_drone_connections WHERE device_id = %s", (device_id,))
+                    return {
+                        "device_id": device_id,
+                        "device_name": device_name or device_id,
+                        "status": "approved",
+                        "_created": False,
+                    }
+                cur.execute(
+                    """
                     INSERT INTO pending_drone_connections
                         (device_id, user_id, swarm_id, device_name, batocera_info, authorization_token_id,
                          drone_token_hash, recovery_reason, requested_at, status)
@@ -3623,6 +3642,12 @@ class PostgresMetadataStore:
                            p.authorization_token_id, p.drone_token_hash, p.recovery_reason, p.requested_at, p.status
                     FROM pending_drone_connections p
                     WHERE p.status = 'pending'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM drones d
+                          WHERE d.device_id = p.device_id
+                            AND d.approval_status = 'approved'
+                            AND d.removed_at IS NULL
+                      )
                       AND (
                           p.user_id = %s
                           OR EXISTS (
@@ -3763,6 +3788,12 @@ class PostgresMetadataStore:
                     FROM pending_drone_connections p
                     WHERE p.device_id = %s
                       AND p.status = 'pending'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM drones d
+                          WHERE d.device_id = p.device_id
+                            AND d.approval_status = 'approved'
+                            AND d.removed_at IS NULL
+                      )
                       AND (
                           p.user_id = %s
                           OR EXISTS (

@@ -1597,6 +1597,17 @@ class OvermindDatabase:
         recovery_reason: Optional[str] = None,
     ) -> dict:
         """Record that a drone is attempting to connect to Overmind."""
+        existing_device = self.get_device_by_device_id(device_id)
+        if existing_device and existing_device.get("approval_status", "approved") == "approved" and not existing_device.get("removed_at"):
+            self.pending_drone_connections.pop(device_id, None)
+            if postgres_store.available():
+                postgres_store.delete_any_pending_drone_connection(device_id)
+            return {
+                "device_id": device_id,
+                "device_name": device_name or device_id,
+                "status": "approved",
+                "_created": False,
+            }
         if postgres_store.available():
             relational = postgres_store.upsert_pending_drone_connection(
                 device_id,
@@ -1608,6 +1619,9 @@ class OvermindDatabase:
                 recovery_reason=recovery_reason,
             )
             if relational is not None:
+                if relational.get("status") == "approved":
+                    self.pending_drone_connections.pop(device_id, None)
+                    return relational
                 self.pending_drone_connections[device_id] = relational
                 return relational
         now = datetime.utcnow()
@@ -1652,7 +1666,13 @@ class OvermindDatabase:
                 return relational
         visible = [
             conn for conn in self.pending_drone_connections.values()
-            if conn.get("status") == "pending" and conn.get("user_id") == user_id
+            if conn.get("status") == "pending"
+            and conn.get("user_id") == user_id
+            and str(conn.get("device_id")) not in {
+                str(device.get("device_id"))
+                for device in self.devices.values()
+                if device.get("approval_status", "approved") == "approved" and not device.get("removed_at")
+            }
         ]
         visible.sort(key=lambda row: row.get("last_seen"), reverse=True)
         return visible
@@ -1895,6 +1915,9 @@ class OvermindDatabase:
             self.user_devices.setdefault(user_id, [])
             if internal_id not in self.user_devices[user_id]:
                 self.user_devices[user_id].append(internal_id)
+            self.pending_drone_connections.pop(device_id, None)
+            if postgres_store.available():
+                postgres_store.delete_any_pending_drone_connection(device_id)
             return internal_id
 
         internal_id = str(uuid.uuid4())
@@ -1939,6 +1962,9 @@ class OvermindDatabase:
             f"{device_name or device_id} was added to the swarm.",
             {"device": {"device_id": device_id, "device_name": device_name or device_id}},
         )
+        self.pending_drone_connections.pop(device_id, None)
+        if postgres_store.available():
+            postgres_store.delete_any_pending_drone_connection(device_id)
         return internal_id
 
     def add_device_admin_claim(self, user_id: str, device_id: str) -> Optional[dict]:

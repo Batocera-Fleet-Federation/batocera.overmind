@@ -917,6 +917,26 @@ def test_pending_connections_exclude_approved_drones(client):
     }
     pending = db.get_all_pending_drone_connections()
     assert all(conn["device_id"] != "dup-drone" for conn in pending)
+    user_pending = db.get_pending_drone_connections(owner["id"])
+    assert all(conn["device_id"] != "dup-drone" for conn in user_pending)
+
+
+def test_approved_drone_cannot_recreate_pending_connection(client):
+    client.post("/api/auth/register", json={"email": "owner@example.com", "username": "owner-at-example.com", "password": "testpass123"})
+    owner = db.get_user_by_email("owner@example.com")
+    db.create_device(owner["id"], "approved-drone", "Approved Drone", {"ip_address": "1.2.3.4"}, raw_token="t")
+
+    pending = db.create_pending_drone_connection(
+        "approved-drone",
+        "Approved Drone",
+        {"network": {"ipv4": ["1.2.3.4"]}},
+        owner["id"],
+    )
+
+    assert pending["status"] == "approved"
+    assert "approved-drone" not in db.pending_drone_connections
+    assert db.get_pending_drone_connections(owner["id"]) == []
+    assert db.get_all_pending_drone_connections() == []
 
 
 def test_super_admin_sync_actions_listing_and_search(client):
@@ -5744,6 +5764,15 @@ def test_pending_drone_connections_prefer_direct_relational_store(monkeypatch):
     db.pending_drone_connections.clear()
     assert db.deny_pending_drone_connection("user-1", "relational-drone") is True
     assert pending_rows == {}
+
+
+def test_postgres_pending_drone_queries_exclude_approved_devices():
+    store_source = Path(__file__).resolve().parents[1].joinpath("src/overmind/postgres_store.py").read_text(encoding="utf-8")
+
+    assert "FROM drones d" in store_source
+    assert "d.device_id = p.device_id" in store_source
+    assert "d.approval_status = 'approved'" in store_source
+    assert "DELETE FROM pending_drone_connections WHERE device_id = %s" in store_source
 
 
 def test_relational_schema_declares_domain_tables():
