@@ -575,6 +575,15 @@
                 }
             }
 
+            function gotoNotificationsPage(offset) {
+                // Pager entry point: reflect the offset in the URL (so Back/refresh
+                // restore it) and reset scroll, then load the page.
+                const safe = Math.max(0, Number(offset) || 0);
+                updateRouteQuery({ np: safe > 0 ? safe : null });
+                loadNotificationsPage(safe);
+                scrollAppToTop();
+            }
+
             async function loadNotificationsPage(offset = notificationsPageOffset) {
                 const container = document.getElementById('notifications-page-content');
                 if (!container || !authToken) return;
@@ -602,8 +611,8 @@
                         <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
                             <div class="small text-muted">Showing ${pageStart}–${pageEnd} of ${total}</div>
                             <div class="btn-group">
-                                <button class="btn btn-outline-secondary btn-sm" type="button" ${hasPrev ? '' : 'disabled'} onclick="loadNotificationsPage(${Math.max(0, notificationsPageOffset - notificationsPageSize)})"><i class="bi bi-chevron-left"></i> Previous</button>
-                                <button class="btn btn-outline-secondary btn-sm" type="button" ${hasNext ? '' : 'disabled'} onclick="loadNotificationsPage(${notificationsPageOffset + notificationsPageSize})">Next <i class="bi bi-chevron-right"></i></button>
+                                <button class="btn btn-outline-secondary btn-sm" type="button" ${hasPrev ? '' : 'disabled'} onclick="gotoNotificationsPage(${Math.max(0, notificationsPageOffset - notificationsPageSize)})"><i class="bi bi-chevron-left"></i> Previous</button>
+                                <button class="btn btn-outline-secondary btn-sm" type="button" ${hasNext ? '' : 'disabled'} onclick="gotoNotificationsPage(${notificationsPageOffset + notificationsPageSize})">Next <i class="bi bi-chevron-right"></i></button>
                             </div>
                         </div>`;
                     container.innerHTML = `
@@ -2244,12 +2253,16 @@
 
             function setSwarmMasterPage(page) {
                 swarmMasterPage = Math.max(1, page);
+                updateRouteQuery({ mp: swarmMasterPage });
                 showSwarmMasterList(false);
+                scrollAppToTop();
             }
 
             function submitSwarmMasterSearch() {
                 swarmMasterPage = 1;
+                updateRouteQuery({ mp: 1 });
                 showSwarmMasterList(false);
+                scrollAppToTop();
             }
 
             async function queueBulkSwarmSync() {
@@ -2751,7 +2764,9 @@
                 const input = document.getElementById('device-rom-search');
                 deviceRomSearchQuery = (input ? input.value : '').trim();
                 masterRomPage = 1;
+                updateRouteQuery({ rq: deviceRomSearchQuery, rp: 1, rs: null });
                 loadSwarmRomAvailabilityPanel();
+                scrollAppToTop();
             }
 
             function handleDeviceRomSearchKeydown(event) {
@@ -2762,19 +2777,25 @@
 
             function setMasterRomPage(page) {
                 masterRomPage = Math.max(1, page);
+                updateRouteQuery({ rp: masterRomPage });
                 loadSwarmRomAvailabilityPanel();
+                scrollAppToTop();
             }
 
             function setSystemPage(systemName, page) {
                 systemPageState[systemName] = Math.max(1, page);
+                updateRouteQuery({ syn: systemName, syp: systemPageState[systemName] });
                 loadSystemRomPage(systemName);
+                scrollAppToTop();
             }
 
             function handleDeviceRomFilterChange() {
                 // Trigger server-side reload of the master table when filters change
                 masterRomPage = 1;
                 selectedMasterRomKey = null;
+                updateRouteQuery({ rp: 1, rs: null });
                 loadSwarmRomAvailabilityPanel();
+                scrollAppToTop();
             }
 
             async function populateSystemFilterOptions() {
@@ -3072,11 +3093,13 @@
                 });
                 if (isOpen) {
                     if (masterKey && selectedMasterRomKey === masterKey) selectedMasterRomKey = null;
+                    updateRouteQuery({ rs: selectedMasterRomKey });
                     return;
                 }
                 detail.style.display = 'table-row';
                 if (trigger) trigger.classList.add('is-expanded');
                 selectedMasterRomKey = masterKey || null;
+                updateRouteQuery({ rs: selectedMasterRomKey });
             }
 
             function renderSystemRomPage(systemName) {
@@ -3685,14 +3708,18 @@
 
             function setMasterBiosPage(page) {
                 masterBiosPage = Math.max(1, page);
+                updateRouteQuery({ bp: masterBiosPage });
                 loadDeviceBiosPanel();
+                scrollAppToTop();
             }
 
             function submitBiosSearch() {
                 const input = document.getElementById('device-bios-search');
                 biosSearchQuery = input ? input.value : '';
                 masterBiosPage = 1;
+                updateRouteQuery({ bq: (biosSearchQuery || '').trim(), bp: 1 });
                 loadDeviceBiosPanel();
+                scrollAppToTop();
             }
 
             function handleBiosSearchKeydown(event) {
@@ -3704,7 +3731,9 @@
             function handleBiosStatusFilter(event) {
                 biosStatusFilter = event.target.value || '';
                 masterBiosPage = 1;
+                updateRouteQuery({ bst: biosStatusFilter, bp: 1 });
                 loadDeviceBiosPanel();
+                scrollAppToTop();
             }
 
             async function loadDeviceBiosPanel() {
@@ -3831,14 +3860,18 @@
 
             function setMasterArtworkPage(page) {
                 masterArtworkPage = Math.max(1, page);
+                updateRouteQuery({ ap: masterArtworkPage });
                 loadDeviceArtworkPanel();
+                scrollAppToTop();
             }
 
             function submitArtworkSearch() {
                 const input = document.getElementById('device-artwork-search');
                 artworkSearchQuery = input ? input.value : '';
                 masterArtworkPage = 1;
+                updateRouteQuery({ aq: (artworkSearchQuery || '').trim(), ap: 1 });
                 loadDeviceArtworkPanel();
+                scrollAppToTop();
             }
 
             function handleArtworkSearchKeydown(event) {
@@ -3850,13 +3883,17 @@
             function handleArtworkStatusFilter(event) {
                 artworkStatusFilter = event.target.value || '';
                 masterArtworkPage = 1;
+                updateRouteQuery({ ast: artworkStatusFilter, ap: 1 });
                 loadDeviceArtworkPanel();
+                scrollAppToTop();
             }
 
             function handleArtworkTypeFilter(event) {
                 artworkTypeFilter = event.target.value || '';
                 masterArtworkPage = 1;
+                updateRouteQuery({ atp: artworkTypeFilter, ap: 1 });
                 loadDeviceArtworkPanel();
+                scrollAppToTop();
             }
 
             function normalizeArtworkSelection(values, allValue) {
@@ -4303,6 +4340,85 @@
                 applyRbacUI();
             }
 
+            // --- Hash query-string navigation state -------------------------------
+            // The route path (#/devices/device/{id}/{view}) identifies the screen;
+            // a query string appended to the hash (…?sp=2&sq=mario) carries the
+            // page / search / filter / selection for whatever list is on screen so
+            // the browser location reflects every navigation and Back/Forward and
+            // refresh restore the exact spot. Paging/search/filter use replaceState
+            // (no history flood); drilling into a device/detail uses a real history
+            // step via setRoute, so Back returns to the list at the page you left.
+            function getRouteQuery() {
+                const raw = window.location.hash || '';
+                const qIndex = raw.indexOf('?');
+                return new URLSearchParams(qIndex >= 0 ? raw.slice(qIndex + 1) : '');
+            }
+            // Page-number params are omitted from the URL when they equal 1 so a
+            // first page produces a clean hash; non-page params (searches, filters,
+            // selections) are only dropped when blank.
+            const ROUTE_PAGE_KEYS = new Set(['sp', 'rp', 'syp', 'bp', 'ap', 'mp']);
+            function updateRouteQuery(updates, options = {}) {
+                const raw = window.location.hash || '#/devices';
+                const qIndex = raw.indexOf('?');
+                const path = qIndex >= 0 ? raw.slice(0, qIndex) : raw;
+                const params = new URLSearchParams(qIndex >= 0 ? raw.slice(qIndex + 1) : '');
+                Object.entries(updates).forEach(([key, value]) => {
+                    const blank = value === null || value === undefined || value === '';
+                    const defaultPage = ROUTE_PAGE_KEYS.has(key) && (value === 1 || value === '1');
+                    if (blank || defaultPage) {
+                        params.delete(key);
+                    } else {
+                        params.set(key, String(value));
+                    }
+                });
+                const qs = params.toString();
+                const nextHash = qs ? `${path}?${qs}` : path;
+                if (window.location.hash === nextHash) return;
+                if (options.push) {
+                    window.location.hash = nextHash; // new history entry; triggers hashchange
+                } else {
+                    history.replaceState(null, '', nextHash); // update URL in place, no re-route
+                }
+            }
+            function scrollAppToTop() {
+                // Reset scroll on navigation/paging so the viewport never stays parked
+                // at the bottom of the previous content.
+                try {
+                    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+                } catch (e) {
+                    window.scrollTo(0, 0);
+                }
+                ['.dashboard-content', '.app-main', '#app'].forEach(sel => {
+                    const node = document.querySelector(sel);
+                    if (node) node.scrollTop = 0;
+                });
+            }
+            // Restore the on-screen list state (page/search/filter/selection) from the
+            // hash query before the panel loaders run, so Back/Forward/refresh land on
+            // the same page. Absent params reset to defaults, so switching screens
+            // (which produces a query-less hash) clears stale paging.
+            function hydrateNavStateFromHash() {
+                const q = getRouteQuery();
+                const intParam = (key) => Math.max(1, Number.parseInt(q.get(key) || '1', 10) || 1);
+                savesPage = intParam('sp');
+                savesSearchQuery = q.get('sq') || '';
+                selectedSaveKey = q.get('ss') || null;
+                masterRomPage = intParam('rp');
+                deviceRomSearchQuery = q.get('rq') || '';
+                selectedMasterRomKey = q.get('rs') || null;
+                const sysName = q.get('syn') || '';
+                systemPageState = sysName ? { [sysName]: intParam('syp') } : {};
+                masterBiosPage = intParam('bp');
+                biosSearchQuery = q.get('bq') || '';
+                biosStatusFilter = q.get('bst') || '';
+                masterArtworkPage = intParam('ap');
+                artworkSearchQuery = q.get('aq') || '';
+                artworkStatusFilter = q.get('ast') || '';
+                artworkTypeFilter = q.get('atp') || '';
+                swarmMasterPage = intParam('mp');
+                notificationsPageOffset = Math.max(0, Number.parseInt(q.get('np') || '0', 10) || 0);
+            }
+
             function setRoute(tabName, deviceId = selectedDeviceId, deviceView = currentDeviceView, swarmView = null) {
                 let hash = `#/${tabName}`;
                 if (tabName === 'devices') {
@@ -4343,7 +4459,9 @@
 
             function setSavesPage(page) {
                 savesPage = Math.max(1, page);
+                updateRouteQuery({ sp: savesPage });
                 loadDeviceSavesPanel();
+                scrollAppToTop();
             }
 
             function submitSavesSearch() {
@@ -4351,7 +4469,9 @@
                 savesSearchQuery = (input ? input.value : '').trim();
                 savesPage = 1;
                 selectedSaveKey = null;
+                updateRouteQuery({ sq: savesSearchQuery, sp: 1, ss: null });
                 loadDeviceSavesPanel();
+                scrollAppToTop();
             }
 
             function handleSavesSearchKeydown(event) {
@@ -4376,6 +4496,7 @@
                     if (trigger) trigger.classList.add('is-expanded');
                     selectedSaveKey = key || null;
                 }
+                updateRouteQuery({ ss: selectedSaveKey });
             }
 
             function renderDeviceSavesTable(payload) {
@@ -4487,6 +4608,7 @@
 
             function applyRouteFromHash() {
                 const route = parseRoute();
+                hydrateNavStateFromHash();
                 routeSwarmId = route.swarmId || null;
                 if (route.tab === 'devices' && route.swarmId && currentSwarms.some(s => s.id === route.swarmId)) {
                     selectedSwarmId = route.swarmId;
@@ -4508,6 +4630,7 @@
                     else showSwarmHome(false);
                 }
                 updateSharedSwarmNavButton();
+                scrollAppToTop();
             }
 
             async function loadDeviceActions(options = {}) {
