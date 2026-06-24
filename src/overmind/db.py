@@ -2661,6 +2661,7 @@ class OvermindDatabase:
         action_label = {
             "restart": "Remote Restart",
             "set_screen_mode": "Set Screen Mode",
+            "set_idle_volume_automation": "Idle Volume Automation",
         }.get(
             str(action.get("action") or ""),
             str(action.get("action") or "action").replace("_", " ").title(),

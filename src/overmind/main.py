@@ -79,6 +79,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "restart",
     "set_screen_mode",
     "set_volume",
+    "set_idle_volume_automation",
     "collect_rom_metadata",
     "rebuild_asset_metadata",
     "purge_asset_cache",
@@ -2173,6 +2174,26 @@ async def create_device_action(
                 detail="Screen mode must be one of: full, kiosk, kid",
             )
         action_payload = {**action_payload, "mode": mode}
+    if action_type == "set_idle_volume_automation":
+        normalized: dict = {}
+        if "enabled" in action_payload:
+            normalized["enabled"] = bool(action_payload.get("enabled"))
+        if action_payload.get("idle_minutes") is not None:
+            try:
+                normalized["idle_minutes"] = max(1, min(1440, int(action_payload["idle_minutes"])))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="idle_minutes must be a number")
+        if action_payload.get("target_volume") is not None:
+            try:
+                normalized["target_volume"] = max(0, min(100, int(action_payload["target_volume"])))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_volume must be a number")
+        if not normalized:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide at least one of: enabled, idle_minutes, target_volume",
+            )
+        action_payload = normalized
     if action_type in {"rebuild_asset_metadata", "purge_asset_cache"}:
         db.clear_device_asset_metadata(device["user_id"], device_id)
     action = db.create_device_action(device["user_id"], device_id, action_type, action_payload)

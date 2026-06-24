@@ -47,6 +47,43 @@ def _is_excluded_emulator_config_path(value: str) -> bool:
     return bool({"log", "logs"} & {part for part in lowered.split("/") if part})
 
 
+def _idle_volume_automation_columns(info: dict) -> tuple:
+    """Extract (enabled, idle_minutes, target) from a Drone's reported system_info.
+
+    The Drone reports idle-volume automation as a nested ``idle_volume_automation``
+    dict; Overmind stores it as three explicit columns for the per-Drone admin UI.
+    Returns (None, None, None) when the Drone has not reported it.
+    """
+    raw = info.get("idle_volume_automation")
+    if not isinstance(raw, dict):
+        return (None, None, None)
+    enabled = raw.get("enabled")
+    try:
+        idle_minutes = int(raw["idle_minutes"]) if raw.get("idle_minutes") is not None else None
+    except (TypeError, ValueError):
+        idle_minutes = None
+    try:
+        target = int(raw["target_volume"]) if raw.get("target_volume") is not None else None
+    except (TypeError, ValueError):
+        target = None
+    return (bool(enabled) if enabled is not None else None, idle_minutes, target)
+
+
+def _idle_volume_automation_dict(enabled, idle_minutes, target):
+    """Rebuild the nested idle_volume_automation dict from stored columns.
+
+    Returns None when the Drone has never reported it (all columns NULL) so the
+    UI can show "not yet reported" rather than a misleading default.
+    """
+    if enabled is None and idle_minutes is None and target is None:
+        return None
+    return {
+        "enabled": bool(enabled),
+        "idle_minutes": idle_minutes,
+        "target_volume": target,
+    }
+
+
 def _is_lambda_runtime() -> bool:
     return (os.getenv("OVERMIND_RUNTIME") or "").strip().lower() == "lambda" or bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
@@ -261,13 +298,16 @@ class PostgresMetadataStore:
             with conn.cursor() as cur:
                 if system_info and isinstance(system_info, dict):
                     info = system_info
+                    iva = _idle_volume_automation_columns(info)
                     cur.execute(
                         """
                         INSERT INTO drone_system_info
                             (drone_id, hostname, model, system_name, architecture, cpu_model, cpu_cores,
                              cpu_threads, cpu_max_frequency, memory_available, memory_total,
-                             batocera_version, screen_mode, audio_volume, container, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                             batocera_version, screen_mode, audio_volume,
+                             idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
+                             container, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         ON CONFLICT (drone_id) DO UPDATE SET
                             hostname          = COALESCE(EXCLUDED.hostname,          drone_system_info.hostname),
                             model             = COALESCE(EXCLUDED.model,             drone_system_info.model),
@@ -282,6 +322,9 @@ class PostgresMetadataStore:
                             batocera_version  = COALESCE(EXCLUDED.batocera_version,  drone_system_info.batocera_version),
                             screen_mode       = COALESCE(EXCLUDED.screen_mode,       drone_system_info.screen_mode),
                             audio_volume      = COALESCE(EXCLUDED.audio_volume,      drone_system_info.audio_volume),
+                            idle_volume_enabled      = COALESCE(EXCLUDED.idle_volume_enabled,      drone_system_info.idle_volume_enabled),
+                            idle_volume_idle_minutes = COALESCE(EXCLUDED.idle_volume_idle_minutes, drone_system_info.idle_volume_idle_minutes),
+                            idle_volume_target       = COALESCE(EXCLUDED.idle_volume_target,       drone_system_info.idle_volume_target),
                             container         = COALESCE(EXCLUDED.container,         drone_system_info.container),
                             updated_at        = now()
                         """,
@@ -300,6 +343,9 @@ class PostgresMetadataStore:
                             info.get("batocera_version"),
                             info.get("screen_mode"),
                             info.get("audio_volume"),
+                            iva[0],
+                            iva[1],
+                            iva[2],
                             info.get("container"),
                         ),
                     )
@@ -1321,7 +1367,8 @@ class PostgresMetadataStore:
                    n.api_port, n.scheme, n.reachable_url, n.public_resolvable, n.public_ip, n.checked_at,
                    s.hostname, s.model, s.system_name, s.architecture, s.cpu_model, s.cpu_cores, s.cpu_threads,
                    s.cpu_max_frequency, s.memory_available, s.memory_total, s.batocera_version,
-                   s.screen_mode, s.audio_volume, s.container
+                   s.screen_mode, s.audio_volume, s.container,
+                   s.idle_volume_enabled, s.idle_volume_idle_minutes, s.idle_volume_target
             FROM drones d
             LEFT JOIN drone_network_state n ON n.drone_id = d.id
             LEFT JOIN drone_system_info s ON s.drone_id = d.id
@@ -1340,6 +1387,7 @@ class PostgresMetadataStore:
                 hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
                 cpu_max_frequency, memory_available, memory_total, batocera_version,
                 screen_mode, audio_volume, container,
+                idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
             ) = row
             device = {
                 "id": internal_id,
@@ -1379,6 +1427,9 @@ class PostgresMetadataStore:
                     "batocera_version": batocera_version,
                     "screen_mode": screen_mode,
                     "audio_volume": audio_volume,
+                    "idle_volume_automation": _idle_volume_automation_dict(
+                        idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target
+                    ),
                     "container": container,
                 },
             }
@@ -1857,6 +1908,7 @@ class PostgresMetadataStore:
             hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
             cpu_max_frequency, memory_available, memory_total, batocera_version,
             screen_mode, audio_volume, container,
+            idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
             cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer,
             valid_from, valid_until, serial_number, overmind_signed_at,
             auto_sync_enabled, auto_sync_systems, ipv4, ipv6, hostnames, macs, last_speed_sample,
@@ -1931,6 +1983,9 @@ class PostgresMetadataStore:
                 "batocera_version": batocera_version,
                 "screen_mode": screen_mode,
                 "audio_volume": audio_volume,
+                "idle_volume_automation": _idle_volume_automation_dict(
+                    idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target
+                ),
                 "container": container,
             },
             "batocera_info": {},
@@ -1983,6 +2038,7 @@ class PostgresMetadataStore:
                    si.hostname, si.model, si.system_name, si.architecture, si.cpu_model, si.cpu_cores,
                    si.cpu_threads, si.cpu_max_frequency, si.memory_available, si.memory_total,
                    si.batocera_version, si.screen_mode, si.audio_volume, si.container,
+                   si.idle_volume_enabled, si.idle_volume_idle_minutes, si.idle_volume_target,
                    dc.status, dc.fingerprint, dc.sha256_fingerprint, dc.public_certificate, dc.subject,
                    dc.issuer, dc.valid_from, dc.valid_until, dc.serial_number, dc.overmind_signed_at,
                    COALESCE(p.enabled, false),
@@ -4221,13 +4277,15 @@ class PostgresMetadataStore:
                     (device.get("id"), address_type, str(network.get(key))),
                 )
         info = device.get("system_info") if isinstance(device.get("system_info"), dict) else {}
+        iva = _idle_volume_automation_columns(info)
         cur.execute(
             """
             INSERT INTO drone_system_info
                 (drone_id, hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
                  cpu_max_frequency, memory_available, memory_total, batocera_version, screen_mode,
-                 audio_volume, container, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                 audio_volume, idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
+                 container, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (drone_id) DO UPDATE SET
                 hostname = EXCLUDED.hostname,
                 model = EXCLUDED.model,
@@ -4242,6 +4300,9 @@ class PostgresMetadataStore:
                 batocera_version = EXCLUDED.batocera_version,
                 screen_mode = EXCLUDED.screen_mode,
                 audio_volume = EXCLUDED.audio_volume,
+                idle_volume_enabled = EXCLUDED.idle_volume_enabled,
+                idle_volume_idle_minutes = EXCLUDED.idle_volume_idle_minutes,
+                idle_volume_target = EXCLUDED.idle_volume_target,
                 container = EXCLUDED.container,
                 updated_at = now()
             """,
@@ -4260,6 +4321,9 @@ class PostgresMetadataStore:
                 info.get("batocera_version"),
                 info.get("screen_mode"),
                 info.get("audio_volume"),
+                iva[0],
+                iva[1],
+                iva[2],
                 info.get("container"),
             ),
         )

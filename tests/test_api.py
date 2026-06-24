@@ -4710,6 +4710,75 @@ def test_screen_mode_action_is_supported_and_validated(client):
     assert update_response.status_code == 400
 
 
+def test_idle_volume_automation_action_is_supported_and_validated(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_idle_volume_automation", "payload": {"enabled": True, "idle_minutes": 7, "target_volume": 10}},
+    )
+    assert response.status_code == 200, response.text
+    action = response.json()["action"]
+    assert action["action"] == "set_idle_volume_automation"
+    assert action["payload"] == {"enabled": True, "idle_minutes": 7, "target_volume": 10}
+
+    # Out-of-range values are clamped server-side.
+    clamped = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_idle_volume_automation", "payload": {"idle_minutes": 99999, "target_volume": -10}},
+    )
+    assert clamped.status_code == 200
+    assert clamped.json()["action"]["payload"] == {"idle_minutes": 1440, "target_volume": 0}
+
+    # An empty payload is rejected.
+    empty = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_idle_volume_automation", "payload": {}},
+    )
+    assert empty.status_code == 400
+
+    # Non-numeric values are rejected.
+    bad = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_idle_volume_automation", "payload": {"idle_minutes": "soon"}},
+    )
+    assert bad.status_code == 400
+
+
+def test_heartbeat_stores_idle_volume_automation(client):
+    client.post("/api/auth/register", json={"email": "hb-iva@example.com", "username": "hb-iva-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("hb-iva@example.com")
+    db.create_device(user["id"], "drone-iva", "Drone IVA", {"ip_address": "10.0.0.3"}, raw_token="drone-token-iva")
+
+    response = client.post(
+        "/api/devices/drone-iva/heartbeat",
+        headers={"Authorization": "Bearer drone-token-iva"},
+        json={
+            "device_id": "drone-iva",
+            "system_info": {
+                "hostname": "drone-iva",
+                "idle_volume_automation": {"enabled": True, "idle_minutes": 5, "target_volume": 25},
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    refreshed = db.get_device_by_device_id("drone-iva")
+    assert refreshed["system_info"]["idle_volume_automation"] == {
+        "enabled": True,
+        "idle_minutes": 5,
+        "target_volume": 25,
+    }
+
+
 def test_delete_actions_clears_device_queue(client):
     seed_test_fleet()
     token = client.post(
@@ -4832,6 +4901,8 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "queueDeviceAction('enable_kiosk'" not in js
     assert "queueDeviceAction('disable_kiosk'" not in js
     assert "queueDeviceVolume(" in js
+    assert "renderIdleVolumeCard(info)" in js
+    assert "queueDeviceAction('set_idle_volume_automation'" in js
     assert '<table class="table table-sm align-middle">' in js
     assert "deleteDeviceActions()" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
@@ -5824,6 +5895,9 @@ def test_relational_schema_declares_domain_tables():
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in migration_sql
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS screen_mode" in migration_sql
     assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS audio_volume" in migration_sql
+    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_enabled" in migration_sql
+    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_idle_minutes" in migration_sql
+    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_target" in migration_sql
     assert "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint" in migration_sql
     assert "def store_device_emulator_configs" in store_source
     assert "def get_device_emulator_configs" in store_source
@@ -5976,6 +6050,7 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                     None, None, None, None, "kid", 65, None,
+                    None, None, None,
                 )]
             if "FROM device_admin_claims" in self.sql:
                 return []
@@ -6037,6 +6112,7 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None,
+                    None, None, None,
                 )]
             if "FROM gameplay_sessions" in self.sql:
                 return [("game-1", "d1", "snes", "Game", "Game.zip", "abc", received_at, 60, received_at)]
@@ -6102,6 +6178,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                         None, None, None, None, None,
+                        None, None, None,
                     ), (
                         "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
                         None, "source-hash", reported_at, reported_at,
@@ -6110,6 +6187,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         443, "https", "https://drone-b:443", True, "198.51.100.2", reported_at,
                         None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None,
+                    None, None, None,
                 )]
             if "FROM drone_certificates" in self.sql:
                 return [("d2", "loaded", "fp", "sha", "-----BEGIN CERTIFICATE-----\\npeer\\n-----END CERTIFICATE-----", "subject", "issuer", None, None, "1", None, reported_at)]

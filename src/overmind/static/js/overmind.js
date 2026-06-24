@@ -3278,6 +3278,7 @@
                         </div>
                         <div class="btn-group flex-wrap" role="group" aria-label="Volume presets">${volumeButtons}</div>
                     </div></div>
+                    ${renderIdleVolumeCard(info)}
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <strong><i class="bi bi-power me-1"></i>Power</strong>
                         <div class="mt-2">
@@ -3344,6 +3345,64 @@
 
             async function queueDeviceVolume(level) {
                 await queueDeviceAction('set_volume', { payload: { level } });
+            }
+
+            function renderIdleVolumeCard(info) {
+                const automation = (info && typeof info.idle_volume_automation === 'object' && info.idle_volume_automation) || null;
+                const reported = !!automation;
+                const enabled = reported ? !!automation.enabled : false;
+                const idleMinutes = reported && Number.isFinite(Number(automation.idle_minutes)) ? Number(automation.idle_minutes) : 5;
+                const targetVolume = reported && Number.isFinite(Number(automation.target_volume)) ? Number(automation.target_volume) : 25;
+                const current = !reported
+                    ? 'not yet reported'
+                    : (enabled
+                        ? `on — lower to ${targetVolume}% after ${idleMinutes} min idle`
+                        : 'off');
+                return `
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-volume-down me-1"></i>Idle Volume Automation</strong>
+                            <span class="small text-muted" data-device-admin-field="idle-volume">Current: ${escapeHtml(current)}</span>
+                        </div>
+                        <div class="small text-muted mb-2">Lower the Drone's output volume after a period with no controller or keyboard input. The volume stays lowered until the device is used again.</div>
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" role="switch" id="idle-volume-enabled" ${enabled ? 'checked' : ''}>
+                            <label class="form-check-label" for="idle-volume-enabled">Enable idle volume lowering</label>
+                        </div>
+                        <div class="row g-2 align-items-end">
+                            <div class="col-sm-5">
+                                <label class="form-label small mb-1" for="idle-volume-minutes">Idle minutes</label>
+                                <input class="form-control form-control-sm" type="number" id="idle-volume-minutes" min="1" max="1440" step="1" value="${idleMinutes}">
+                            </div>
+                            <div class="col-sm-5">
+                                <label class="form-label small mb-1" for="idle-volume-target">Target volume (%)</label>
+                                <input class="form-control form-control-sm" type="number" id="idle-volume-target" min="0" max="100" step="5" value="${targetVolume}">
+                            </div>
+                            <div class="col-sm-2">
+                                <button class="btn btn-primary btn-sm w-100" type="button" onclick="queueDeviceIdleVolume()"><i class="bi bi-save me-1"></i>Save</button>
+                            </div>
+                        </div>
+                        <div class="small text-muted mt-2">0 = mute. Applied on the Drone within about a minute.</div>
+                    </div></div>
+                `;
+            }
+
+            async function queueDeviceIdleVolume() {
+                const enabled = !!document.getElementById('idle-volume-enabled')?.checked;
+                const idleMinutes = parseInt(document.getElementById('idle-volume-minutes')?.value, 10);
+                const targetVolume = parseInt(document.getElementById('idle-volume-target')?.value, 10);
+                if (!Number.isFinite(idleMinutes) || idleMinutes < 1 || idleMinutes > 1440) {
+                    showMessage('Idle minutes must be between 1 and 1440.', 'danger');
+                    return;
+                }
+                if (!Number.isFinite(targetVolume) || targetVolume < 0 || targetVolume > 100) {
+                    showMessage('Target volume must be between 0 and 100.', 'danger');
+                    return;
+                }
+                await queueDeviceAction('set_idle_volume_automation', {
+                    confirm: false,
+                    payload: { enabled, idle_minutes: idleMinutes, target_volume: targetVolume },
+                });
             }
 
             async function queueDeviceScreenMode(mode) {
@@ -4714,6 +4773,7 @@
                     refresh_emulator_list: 'refresh emulator list',
                     set_screen_mode: 'set screen mode',
                     set_volume: 'set volume',
+                    set_idle_volume_automation: 'update idle volume automation',
                     collect_rom_metadata: 'collect ROM and system metadata',
                     collect_game_logs: 'collect Game Logs',
                     collect_emulator_configs: 'collect emulator configs',
@@ -4768,6 +4828,7 @@
                     rebuild_asset_metadata: 'Rebuild Asset Metadata',
                     set_screen_mode: 'Set Screen Mode',
                     set_volume: 'Set Volume',
+                    set_idle_volume_automation: 'Idle Volume Automation',
                     purge_asset_cache: 'Purge Asset Cache',
                     collect_game_logs: 'Game Logs',
                     collect_emulator_configs: 'Emulator Configs',
@@ -4783,6 +4844,7 @@
                 if (result.type === 'emulator_list_refresh') return result.emulationstation_restarted ? 'EmulationStation restart issued' : 'EmulationStation restart was not issued';
                 if (result.type === 'screen_mode') return `Screen mode set to ${result.mode || 'unknown'}${result.emulationstation_restarted ? '; EmulationStation restarted' : ''}`;
                 if (result.type === 'audio_volume') return result.muted ? 'Volume muted' : `Volume set to ${result.level}%`;
+                if (result.type === 'idle_volume_automation') return result.enabled ? `Idle volume on: lower to ${result.target_volume}% after ${result.idle_minutes} min idle` : 'Idle volume automation disabled';
                 if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;
                 if (result.type === 'game_logs') return `${(result.sessions || []).length} parsed play sessions, ${(result.logs || []).length} logs`;
                 if (result.type === 'emulator_configs') return `${(result.configs || []).length} config files`;
