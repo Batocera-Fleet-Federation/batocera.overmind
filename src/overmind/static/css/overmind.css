@@ -1451,6 +1451,10 @@
                     -webkit-overflow-scrolling: touch;
                 }
                 .bff-segmented .btn { flex: 0 0 auto; white-space: nowrap; }
+                /* Drone sub-nav (Systems/Bios/.../Admin): icon-only to avoid overflow */
+                .device-view-btn .device-view-label { display: none; }
+                .device-view-btn i { margin-right: 0 !important; }
+                .device-view-btn { padding-left: 0.6rem; padding-right: 0.6rem; }
                 /* Stacked label:value tables on phone widths */
                 table.bff-stack thead { display: none; }
                 table.bff-stack,
