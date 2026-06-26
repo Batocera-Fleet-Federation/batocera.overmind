@@ -4903,7 +4903,7 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "queueDeviceVolume(" in js
     assert "renderIdleVolumeCard(info)" in js
     assert "queueDeviceAction('set_idle_volume_automation'" in js
-    assert '<table class="table table-sm align-middle">' in js
+    assert '<table class="table table-sm align-middle bff-stack">' in js
     assert "deleteDeviceActions()" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
     assert "onclick=\"queueDeviceAction('collect_emulator_configs')\"" not in html

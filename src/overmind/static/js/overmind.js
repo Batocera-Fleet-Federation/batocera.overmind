@@ -58,6 +58,40 @@
       } catch (e) {}
     }
 
+    // Stamp each `table.bff-stack` cell with the column header text so the CSS can render
+    // a label:value stacked card per row on phone widths (see overmind.css .bff-stack).
+    function decorateStackTables(root) {
+      const scope = root || document;
+      scope.querySelectorAll('table.bff-stack').forEach((table) => {
+        const headers = Array.from(table.querySelectorAll('thead th')).map((th) => th.textContent.trim());
+        if (!headers.length) return;
+        table.querySelectorAll('tbody tr').forEach((tr) => {
+          Array.from(tr.children).forEach((td, index) => {
+            if (td.colSpan && td.colSpan > 1) return; // full-width/empty-state rows
+            if (index < headers.length && !td.hasAttribute('data-label')) {
+              td.setAttribute('data-label', headers[index]);
+            }
+          });
+        });
+      });
+    }
+
+    function setupStackTables() {
+      const target = document.getElementById('app') || document.body;
+      if (!target) return;
+      let scheduled = false;
+      const observer = new MutationObserver(() => {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => {
+          scheduled = false;
+          decorateStackTables(target);
+        });
+      });
+      observer.observe(target, { childList: true, subtree: true });
+      decorateStackTables(target);
+    }
+
     window.addEventListener('hashchange', () => {
       if (localStorage.getItem('auth_token')) return;
       const hash = window.location.hash || '';
@@ -152,6 +186,7 @@
             document.addEventListener('DOMContentLoaded', async () => {
                 initFeedbackBanner();
                 setupInactivityTracking();
+                setupStackTables();
                 setupAccountMenu();
                 setupNotificationMenu();
 	                loadAuthProviders();
@@ -617,7 +652,7 @@
                         </div>`;
                     container.innerHTML = `
                         <div class="table-responsive">
-                            <table class="table table-sm align-middle notifications-table">
+                            <table class="table table-sm align-middle notifications-table bff-stack">
                                 <thead>
                                     <tr>
                                         <th>Status</th>
@@ -1449,7 +1484,7 @@
                     const members = access.members || [];
                     const invites = access.invitations || [];
                     container.innerHTML = `
-                        <div class="table-responsive"><table class="table table-sm align-middle">
+                        <div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                             <thead><tr><th>Email</th><th>Role</th><th>Registration</th><th>Status</th><th></th></tr></thead>
                             <tbody>
                                 ${members.map(m => `<tr><td>${escapeHtml(m.email || '')}</td><td>${escapeHtml(roleLabel(m.role))}</td><td>registered</td><td>${escapeHtml(m.status || 'accepted')}</td><td>${canMutateSwarm() && m.role === 'overseer' ? `<button class="btn btn-outline-danger btn-sm" title="Remove this Overseer from the swarm" onclick="removeSwarmMember('${escapeHtml(m.user_id)}')"><i class="bi bi-person-x me-1"></i>Remove Overseer</button>` : ''}</td></tr>`).join('')}
@@ -1936,7 +1971,7 @@
             }
 
             function renderSwarmDownloadsTable(rows) {
-                return `<div class="table-responsive"><table class="table table-sm align-middle">
+                return `<div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                     <thead><tr>
                         <th>Target</th><th>Source</th><th>Status</th><th>Queue</th><th>File</th><th>Size</th><th>Downloaded</th><th>Progress</th><th>Speed</th><th>Started</th><th>Reason</th><th></th>
                     </tr></thead>
@@ -2094,7 +2129,7 @@
                             </div>
                             <button class="btn btn-primary" onclick="showSwarmSyncActivity(false)">Search</button>
                         </div>
-                        <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                        <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
                             <th>Status</th><th>Transfer</th><th>Asset</th><th>Fingerprint</th><th>Duration</th><th>Time</th>
                         </tr></thead><tbody>
                             ${rows.map(row => {
@@ -2226,7 +2261,7 @@
                             </div>
                         </div>
                         ${paginationHtml}
-                        <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                        <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
                             <th>System</th><th>ROM</th><th>Size</th><th>Drones</th>
                         </tr></thead><tbody>
                             ${rows.map(row => {
@@ -2436,7 +2471,7 @@
                 }).join('');
                 return `${header}
                     <div class="table-responsive">
-                        <table class="table table-sm table-hover align-middle gameplay-history-table">
+                        <table class="table table-sm table-hover align-middle gameplay-history-table bff-stack">
                             <thead><tr>
                                 <th>System</th><th>Game</th><th>ROM Path</th><th>Played</th><th>Duration</th>
                             </tr></thead>
@@ -3126,7 +3161,7 @@
                 const artworkLookup = buildArtworkLookup(artworkPayload.artwork || [], systemName);
                 target.innerHTML = `
                     <div class="table-responsive ms-3 mt-2">
-                    <table class="table table-sm align-middle rom-artwork-table">
+                    <table class="table table-sm align-middle rom-artwork-table bff-stack">
                         <thead><tr>
                             <th>ROM</th>
                             <th class="text-nowrap">Size</th>
@@ -3151,7 +3186,7 @@
                     </div>
                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 ms-3 mt-2 small text-muted">
                         <span>Showing ${total ? start + 1 : 0}-${Math.min(start + perPage, total)} of ${total}</span>
-                        <div class="btn-group btn-group-sm" role="group" aria-label="${escapeHtml(systemName)} pages">
+                        <div class="btn-group btn-group-sm bff-segmented" role="group" aria-label="${escapeHtml(systemName)} pages">
                             <button class="btn btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setSystemPage(${JSON.stringify(systemName)}, ${page - 1})">Previous</button>
                             <button class="btn btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
                             <button class="btn btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setSystemPage(${JSON.stringify(systemName)}, ${page + 1})">Next</button>
@@ -3268,7 +3303,7 @@
                             <strong><i class="bi bi-display me-1"></i>Screen Mode</strong>
                             <span class="small text-muted" data-device-admin-field="screen-mode">Current: ${screenMode || 'not yet reported'}</span>
                         </div>
-                        <div class="btn-group" role="group" aria-label="Screen mode">${screenModeButtons}</div>
+                        <div class="btn-group bff-segmented" role="group" aria-label="Screen mode">${screenModeButtons}</div>
                         <div class="small text-muted mt-2">Changing screen mode restarts EmulationStation on the device.</div>
                     </div></div>
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
@@ -3659,13 +3694,13 @@
                             <div id="sync-system-buttons" class="d-flex flex-wrap gap-2 mb-3"></div>
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                                 <div class="small text-muted">Page ${page} of ${pageCount} · ${perPage} per page</div>
-                                <div class="btn-group" role="group" aria-label="Master ROM pagination">
+                                <div class="btn-group bff-segmented" role="group" aria-label="Master ROM pagination">
                                     <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterRomPage(${Math.max(1, page - 1)})">Previous</button>
                                     ${paginationButtons.join('')}
                                     <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterRomPage(${Math.min(pageCount, page + 1)})">Next</button>
                                 </div>
                             </div>
-                            <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
                                 <th>System</th>
                                 <th>ROM</th>
                                 <th>Source</th>
@@ -3828,7 +3863,7 @@
                         if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
                     }
                     const pagination = `
-                        <div class="btn-group" role="group" aria-label="BIOS pagination">
+                        <div class="btn-group bff-segmented" role="group" aria-label="BIOS pagination">
                             <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterBiosPage(${Math.max(1, page - 1)})">Previous</button>
                             ${paginationButtons.join('')}
                             <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterBiosPage(${Math.min(pageCount, page + 1)})">Next</button>
@@ -3860,7 +3895,7 @@
                                 </div>
                                 ${pagination}
                             </div>
-                            <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
                                 <th>BIOS</th>
                                 <th>MD5</th>
                                 <th>Size</th>
@@ -4112,7 +4147,7 @@
                         return `<option value="${escapeHtml(value)}" ${artworkTypeFilter === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
                     }).join('');
                     const pagination = `
-                        <div class="btn-group" role="group" aria-label="Artwork pagination">
+                        <div class="btn-group bff-segmented" role="group" aria-label="Artwork pagination">
                             <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterArtworkPage(${Math.max(1, page - 1)})">Previous</button>
                             <button class="btn btn-sm btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
                             <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterArtworkPage(${Math.min(pageCount, page + 1)})">Next</button>
@@ -4154,7 +4189,7 @@
                                 </div>
                                 ${pagination}
                             </div>
-                            <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>
+                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
                                 <th>ROM</th>
                                 <th>Type</th>
                                 <th>Source</th>
@@ -4621,14 +4656,14 @@
                         </div>
                         <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                             <div class="small text-muted">Page ${page} of ${pageCount} · ${perPage} per page</div>
-                            <div class="btn-group" role="group" aria-label="Saves pagination">
+                            <div class="btn-group bff-segmented" role="group" aria-label="Saves pagination">
                                 <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setSavesPage(${Math.max(1, page - 1)})">Previous</button>
                                 ${pageButtons.join('')}
                                 <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setSavesPage(${Math.min(pageCount, page + 1)})">Next</button>
                             </div>
                         </div>
                         <div class="table-responsive">
-                            <table class="table table-sm align-middle">
+                            <table class="table table-sm align-middle bff-stack">
                                 <thead><tr><th>System</th><th>Save</th><th>Size</th></tr></thead>
                                 <tbody>${body}</tbody>
                             </table>
@@ -4720,7 +4755,7 @@
                     };
                     container.innerHTML = `
                         <div class="table-responsive">
-                        <table class="table table-sm align-middle">
+                        <table class="table table-sm align-middle bff-stack">
                             <thead><tr>
                                 <th>Action</th>
                                 <th>Status</th>
@@ -4937,7 +4972,7 @@
                     container.innerHTML = `
                         <div class="device-card mb-3">
                             <h4 class="h5">Pending Drone Connections</h4>
-                            <div class="table-responsive"><table class="table table-sm align-middle">
+                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                                 <thead><tr><th>Name</th><th>Drone ID</th><th>Reason</th><th>Network</th><th>Requested</th><th>Assign Swarm</th><th></th></tr></thead>
                                 <tbody>${pendingConnections.map(conn => {
                                     const info = conn.batocera_info || {};
@@ -4959,7 +4994,7 @@
                         </div>
                         <div class="device-card mb-3">
                             <h4 class="h5">Users</h4>
-                            <div class="table-responsive"><table class="table table-sm align-middle">
+                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                                 <thead><tr><th>Email</th><th>Name</th><th>Swarm</th><th>Provider</th><th>Status</th><th>Drones</th><th></th></tr></thead>
                                 <tbody>${users.map(user => `
                                     <tr>
@@ -4975,7 +5010,7 @@
                         </div>
                         <div class="device-card mb-3">
                             <h4 class="h5">Drones</h4>
-                            <div class="table-responsive"><table class="table table-sm align-middle">
+                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                                 <thead><tr><th>Name</th><th>Drone ID</th><th>Owner</th><th>Swarm</th><th>Status</th><th>Last Seen</th><th></th></tr></thead>
                                 <tbody>${drones.map(drone => `
                                     <tr>
@@ -5107,7 +5142,7 @@
                     const hasPrev = offset > 0;
                     const hasNext = end < total;
                     results.innerHTML = `
-                        <div class="table-responsive"><table class="table table-sm align-middle">
+                        <div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                             <thead><tr><th>User</th><th>Email</th><th>Drone</th><th>System</th><th>ROM</th><th>Action</th><th>Status</th><th>Created</th></tr></thead>
                             <tbody>${actions.map(action => `
                                 <tr>
@@ -5199,7 +5234,7 @@
                     const hasPrev = offset > 0;
                     const hasNext = end < total;
                     results.innerHTML = `
-                        <div class="table-responsive"><table class="table table-sm align-middle">
+                        <div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                             <thead><tr><th>When</th><th>Event</th><th>Summary</th><th>Actor</th><th>Target</th></tr></thead>
                             <tbody>${events.map(event => `
                                 <tr>
@@ -5250,7 +5285,7 @@
                     const hasPrev = offset > 0;
                     const hasNext = end < totalRows;
                     results.innerHTML = `
-                        <div class="table-responsive"><table class="table table-sm align-middle">
+                        <div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                             <thead><tr><th>IP Address</th><th>Visits</th><th>First Seen</th><th>Last Seen</th></tr></thead>
                             <tbody>${visits.map(visit => `
                                 <tr>

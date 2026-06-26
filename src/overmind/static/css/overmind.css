@@ -1440,6 +1440,51 @@
             .table td {
                 border-color: var(--admin-border);
             }
+            /* Shared BFF mobile patterns (mirrored in drone.css) */
+            @media (max-width: 767.98px) {
+                /* Segmented button groups: swipe horizontally instead of overflowing */
+                .bff-segmented {
+                    display: flex;
+                    flex-wrap: nowrap;
+                    max-width: 100%;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+                .bff-segmented .btn { flex: 0 0 auto; white-space: nowrap; }
+                /* Stacked label:value tables on phone widths */
+                table.bff-stack thead { display: none; }
+                table.bff-stack,
+                table.bff-stack tbody,
+                table.bff-stack tr,
+                table.bff-stack td { display: block; width: 100%; }
+                table.bff-stack tr {
+                    border: 1px solid var(--admin-border);
+                    border-radius: 0.5rem;
+                    margin-bottom: 0.6rem;
+                    padding: 0.25rem 0.6rem;
+                    background: rgba(255, 255, 255, 0.02);
+                }
+                table.bff-stack td {
+                    border: 0;
+                    background: transparent;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    gap: 1rem;
+                    padding: 0.4rem 0.15rem;
+                    text-align: right;
+                    word-break: break-word;
+                }
+                table.bff-stack td::before {
+                    content: attr(data-label);
+                    font-weight: 700;
+                    color: var(--admin-muted);
+                    text-align: left;
+                    flex: 0 0 auto;
+                }
+                table.bff-stack td:empty { display: none; }
+                table.bff-stack td[data-label=""]::before { content: none; }
+            }
             .gameplay-history-table {
                 margin-bottom: 0;
             }
@@ -1665,7 +1710,7 @@
 
             @media (max-width: 991.98px) {
                 .sidebar { min-height: auto; }
-                .sidebar .btn { width: 100%; }
+                .sidebar .btn { width: auto; }
                 .sidebar .menu-label { display: none !important; }
                 .sidebar .resource-links {
                     display: inline-flex;
@@ -1685,11 +1730,26 @@
                 .sidebar .account-menu {
                     flex: 0 0 auto;
                 }
+                /* Match the Drone navbar: one swipeable row instead of stacking */
                 .nav-actions {
                     width: 100%;
                     justify-content: flex-start;
                     align-items: center;
-                    overflow: visible;
+                    flex-wrap: nowrap;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                    padding-bottom: 0.15rem;
+                }
+                .nav-actions .btn:not(.account-menu-item),
+                .nav-actions .nav-btn:not(.account-menu-item) { flex: 0 0 auto; width: auto; white-space: nowrap; }
+                /* A horizontally-scrolling nav clips absolute dropdowns; pin them to the
+                   viewport like the notification panel so they stay fully visible. */
+                .account-menu-panel {
+                    position: fixed;
+                    top: 4.75rem;
+                    right: 0.75rem;
+                    left: auto;
+                    z-index: 10002;
                 }
                 .device-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             }
@@ -1708,6 +1768,6 @@
                     overflow-wrap: anywhere;
                 }
                 .nav-actions .nav-btn:not(.notification-button) {
-                    flex: 1 1 10rem;
+                    flex: 0 0 auto;
                 }
             }
