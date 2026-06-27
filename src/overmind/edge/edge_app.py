@@ -16,7 +16,9 @@ requiring a database.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
+import socket
 import ssl
 import sys
 from dataclasses import dataclass
@@ -27,6 +29,9 @@ from .registry import PresenceRegistry
 from .server import MuxServer
 
 _UNSET = object()
+
+#: (device_id, online, reflexive_endpoint) -> None
+PresenceWriter = Callable[[str, bool, Optional[str]], None]
 
 
 def _env_bool(default: bool, *names: str) -> bool:
@@ -47,6 +52,7 @@ class EdgeConfig:
     allow_insecure: bool = False
     ping_interval: float = 20.0
     auth_mode: str = "db"  # "db" | "allow-all" (dev only)
+    node_id: str = ""  # identifies this Edge node (for cross-node presence, Phase 2)
 
     @classmethod
     def from_env(cls) -> "EdgeConfig":
@@ -59,6 +65,7 @@ class EdgeConfig:
             allow_insecure=_env_bool(False, "EDGE_ALLOW_INSECURE"),
             ping_interval=float(os.environ.get("EDGE_PING_INTERVAL", "20")),
             auth_mode=(os.environ.get("EDGE_AUTH") or "db").strip().lower(),
+            node_id=(os.environ.get("EDGE_NODE_ID") or socket.gethostname()),
         )
 
 
@@ -106,14 +113,55 @@ def _log(message: str) -> None:
     print(f"[edge] {message}", file=sys.stdout, flush=True)
 
 
-def build_registry(log: Callable[[str], None] = _log) -> PresenceRegistry:
-    return PresenceRegistry(
-        on_connect=lambda entry: log(
+def make_db_presence_writer(
+    *,
+    edge_node: Optional[str] = None,
+    executor: Optional[concurrent.futures.Executor] = None,
+    log: Callable[[str], None] = _log,
+) -> PresenceWriter:
+    """Return a presence writer that persists Edge presence to Postgres off the
+    event loop. Best-effort: failures are logged, never raised, so a flaky DB can
+    never break a Drone's connection."""
+    own_executor = executor or concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="edge-presence"
+    )
+
+    def write(device_id: str, online: bool, reflexive_endpoint: Optional[str]) -> None:
+        def task() -> None:
+            try:
+                from overmind.postgres_store import postgres_store
+
+                postgres_store.update_device_edge_presence(
+                    device_id,
+                    online=online,
+                    edge_node=edge_node,
+                    reflexive_endpoint=reflexive_endpoint,
+                )
+            except Exception as error:  # noqa: BLE001 -- best-effort persistence
+                log(f"presence persist failed for device={device_id}: {error}")
+
+        own_executor.submit(task)
+
+    return write
+
+
+def build_registry(
+    log: Callable[[str], None] = _log, presence_writer: Optional[PresenceWriter] = None
+) -> PresenceRegistry:
+    def on_connect(entry) -> None:
+        log(
             f"connected device={entry.device_id} reflexive={entry.reflexive_addr} "
             f"caps={entry.capabilities}"
-        ),
-        on_disconnect=lambda entry: log(f"disconnected device={entry.device_id}"),
-    )
+        )
+        if presence_writer is not None:
+            presence_writer(entry.device_id, True, entry.reflexive_addr)
+
+    def on_disconnect(entry) -> None:
+        log(f"disconnected device={entry.device_id}")
+        if presence_writer is not None:
+            presence_writer(entry.device_id, False, entry.reflexive_addr)
+
+    return PresenceRegistry(on_connect=on_connect, on_disconnect=on_disconnect)
 
 
 def build_server(
@@ -121,6 +169,7 @@ def build_server(
     *,
     authenticator: Optional[Authenticator] = None,
     registry: Optional[PresenceRegistry] = None,
+    presence_writer: Optional[PresenceWriter] = None,
     ssl_context: object = _UNSET,
     log: Callable[[str], None] = _log,
 ) -> MuxServer:
@@ -134,7 +183,7 @@ def build_server(
     if authenticator is None:
         authenticator = build_authenticator(config)
     if registry is None:
-        registry = build_registry(log)
+        registry = build_registry(log, presence_writer=presence_writer)
     if ssl_context is _UNSET:
         ssl_context = build_ssl_context(config)
     return MuxServer(
@@ -150,7 +199,8 @@ def build_server(
 
 def main() -> None:
     config = EdgeConfig.from_env()
-    server = build_server(config)
+    presence_writer = make_db_presence_writer(edge_node=config.node_id)
+    server = build_server(config, presence_writer=presence_writer)
     tls_mode = "upstream" if config.allow_insecure and not config.tls_cert else "local"
     _log(
         f"starting edge mux server on {config.host}:{config.port} "

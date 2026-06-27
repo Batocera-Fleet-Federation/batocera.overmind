@@ -2354,6 +2354,48 @@ class PostgresMetadataStore:
                 )
         return True
 
+    def update_device_edge_presence(
+        self,
+        device_id: str,
+        *,
+        online: bool,
+        edge_node: Optional[str] = None,
+        reflexive_endpoint: Optional[str] = None,
+    ) -> bool:
+        """Record Edge mux presence for a Drone, keyed by its device_id.
+
+        Lean writer (mirrors update_device_reachability): a single targeted UPSERT
+        into drone_network_state that resolves device_id -> internal id in SQL and
+        only touches edge_* columns, so it never clobbers reachability or any
+        column owned by another writer. Returns True if a matching device existed.
+        """
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        online = bool(online)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO drone_network_state
+                        (drone_id, edge_online, edge_node, reflexive_endpoint,
+                         edge_connected_at, updated_at)
+                    SELECT d.id, %s, %s, %s,
+                           CASE WHEN %s THEN now() ELSE NULL END, now()
+                    FROM devices d
+                    WHERE d.device_id = %s
+                    ON CONFLICT (drone_id) DO UPDATE SET
+                        edge_online        = EXCLUDED.edge_online,
+                        edge_node          = EXCLUDED.edge_node,
+                        reflexive_endpoint = COALESCE(EXCLUDED.reflexive_endpoint,
+                                                      drone_network_state.reflexive_endpoint),
+                        edge_connected_at  = EXCLUDED.edge_connected_at,
+                        updated_at         = now()
+                    """,
+                    (online, edge_node, reflexive_endpoint, online, device_id),
+                )
+                return cur.rowcount > 0
+
     def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
         where = """
             d.device_id = %s

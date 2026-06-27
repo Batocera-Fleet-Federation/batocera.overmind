@@ -15,11 +15,50 @@ from overmind.edge.auth import AllowAllAuthenticator, DbAuthenticator
 from overmind.edge.edge_app import (
     EdgeConfig,
     build_authenticator,
+    build_registry,
     build_server,
     build_ssl_context,
+    make_db_presence_writer,
 )
 from overmind.edge.registry import PresenceEntry, PresenceRegistry
 from overmind.edge.server import MuxServer
+from overmind.postgres_store import PostgresMetadataStore
+
+
+class _FakeCursor:
+    def __init__(self, rowcount=1):
+        self.executed = []
+        self.rowcount = rowcount
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def cursor(self):
+        return self._cursor
+
+
+class _SyncExecutor:
+    """Runs submitted work inline so presence-writer tests are deterministic."""
+
+    def submit(self, fn):
+        fn()
 
 
 def _reader(data: bytes):
@@ -345,6 +384,79 @@ class EdgeAppTests(unittest.TestCase):
                     writer.close()
 
         asyncio.run(scenario())
+
+
+class StorePresenceTests(unittest.TestCase):
+    def _store_with_cursor(self, cursor):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: _FakeConn(cursor)
+        return store
+
+    def test_update_device_edge_presence_online(self):
+        cursor = _FakeCursor(rowcount=1)
+        store = self._store_with_cursor(cursor)
+        ok = store.update_device_edge_presence(
+            "dev1", online=True, edge_node="node-a", reflexive_endpoint="9.9.9.9:5"
+        )
+        self.assertTrue(ok)
+        sql, params = cursor.executed[0]
+        self.assertIn("drone_network_state", sql)
+        self.assertIn("edge_online", sql)
+        # (online, edge_node, reflexive, online-again-for-CASE, device_id)
+        self.assertEqual(params, (True, "node-a", "9.9.9.9:5", True, "dev1"))
+
+    def test_update_device_edge_presence_offline_no_match(self):
+        cursor = _FakeCursor(rowcount=0)
+        store = self._store_with_cursor(cursor)
+        self.assertFalse(store.update_device_edge_presence("missing", online=False))
+        _, params = cursor.executed[0]
+        self.assertEqual(params, (False, None, None, False, "missing"))
+
+    def test_update_device_edge_presence_no_connection(self):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: None
+        self.assertFalse(store.update_device_edge_presence("dev1", online=True))
+
+
+class PresenceWiringTests(unittest.TestCase):
+    def test_build_registry_invokes_presence_writer(self):
+        calls = []
+        registry = build_registry(
+            presence_writer=lambda device_id, online, refl: calls.append((device_id, online, refl))
+        )
+        registry.register(
+            PresenceEntry(device_id="d1", session_id="s1", reflexive_addr="1.1.1.1:9")
+        )
+        registry.deregister("d1", "s1")
+        self.assertEqual(calls, [("d1", True, "1.1.1.1:9"), ("d1", False, "1.1.1.1:9")])
+
+    def test_make_db_presence_writer_persists(self):
+        import overmind.postgres_store as ps
+
+        captured = {}
+
+        def fake(device_id, **kwargs):
+            captured.update({"device_id": device_id, **kwargs})
+            return True
+
+        with mock.patch.object(ps.postgres_store, "update_device_edge_presence", side_effect=fake):
+            writer = make_db_presence_writer(edge_node="node-x", executor=_SyncExecutor())
+            writer("d7", True, "2.2.2.2:7")
+        self.assertEqual(captured["device_id"], "d7")
+        self.assertTrue(captured["online"])
+        self.assertEqual(captured["edge_node"], "node-x")
+        self.assertEqual(captured["reflexive_endpoint"], "2.2.2.2:7")
+
+    def test_make_db_presence_writer_swallows_errors(self):
+        import overmind.postgres_store as ps
+
+        logs = []
+        with mock.patch.object(
+            ps.postgres_store, "update_device_edge_presence", side_effect=RuntimeError("db down")
+        ):
+            writer = make_db_presence_writer(executor=_SyncExecutor(), log=logs.append)
+            writer("d7", True, None)  # must not raise
+        self.assertTrue(any("presence persist failed" in message for message in logs))
 
 
 if __name__ == "__main__":
