@@ -43,6 +43,7 @@ class EdgeConfig:
     port: int = 9443
     tls_cert: Optional[str] = None
     tls_key: Optional[str] = None
+    tls_self_signed: bool = False
     allow_insecure: bool = False
     ping_interval: float = 20.0
     auth_mode: str = "db"  # "db" | "allow-all" (dev only)
@@ -54,6 +55,7 @@ class EdgeConfig:
             port=int(os.environ.get("EDGE_PORT", "9443")),
             tls_cert=(os.environ.get("EDGE_TLS_CERT") or "").strip() or None,
             tls_key=(os.environ.get("EDGE_TLS_KEY") or "").strip() or None,
+            tls_self_signed=_env_bool(False, "EDGE_TLS_SELF_SIGNED"),
             allow_insecure=_env_bool(False, "EDGE_ALLOW_INSECURE"),
             ping_interval=float(os.environ.get("EDGE_PING_INTERVAL", "20")),
             auth_mode=(os.environ.get("EDGE_AUTH") or "db").strip().lower(),
@@ -62,15 +64,25 @@ class EdgeConfig:
 
 def build_ssl_context(config: EdgeConfig) -> Optional[ssl.SSLContext]:
     """Build the server-side TLS context, or None when TLS is terminated upstream."""
-    if config.tls_cert and config.tls_key:
+    cert, key = config.tls_cert, config.tls_key
+    if not (cert and key) and config.tls_self_signed:
+        # Self-signed is for local/dev (and self-host without a real cert); Drones
+        # connect with verification disabled. Reuses Overmind's generator.
+        from overmind.tls_server import ensure_self_signed_cert
+
+        gen_key, gen_cert = ensure_self_signed_cert()
+        if gen_key and gen_cert:
+            cert, key = str(gen_cert), str(gen_key)
+    if cert and key:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certfile=config.tls_cert, keyfile=config.tls_key)
+        context.load_cert_chain(certfile=cert, keyfile=key)
         return context
     if config.allow_insecure:
         return None
     raise RuntimeError(
-        "Edge TLS not configured: set EDGE_TLS_CERT + EDGE_TLS_KEY, or set "
-        "EDGE_ALLOW_INSECURE=1 when TLS is terminated upstream (e.g. by a load balancer)."
+        "Edge TLS not configured: set EDGE_TLS_CERT + EDGE_TLS_KEY, "
+        "EDGE_TLS_SELF_SIGNED=1 (dev/self-host), or EDGE_ALLOW_INSECURE=1 when TLS "
+        "is terminated upstream (e.g. by a load balancer)."
     )
 
 

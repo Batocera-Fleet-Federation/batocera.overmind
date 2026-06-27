@@ -289,6 +289,18 @@ class EdgeAppTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             build_ssl_context(config)
 
+    def test_build_ssl_context_self_signed(self):
+        import shutil
+        import ssl
+        import tempfile
+
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl not available to generate a self-signed cert")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"TLS_SELF_SIGNED_DIR": tmp}, clear=False):
+                context = build_ssl_context(EdgeConfig(tls_self_signed=True))
+        self.assertIsInstance(context, ssl.SSLContext)
+
     def test_build_authenticator_allow_all(self):
         auth = build_authenticator(EdgeConfig(auth_mode="allow-all"))
         self.assertIsInstance(auth, AllowAllAuthenticator)
