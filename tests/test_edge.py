@@ -418,6 +418,33 @@ class StorePresenceTests(unittest.TestCase):
         self.assertFalse(store.update_device_edge_presence("dev1", online=True))
 
 
+class DeviceRowMappingTests(unittest.TestCase):
+    """_device_from_row must surface the edge_online / reflexive_endpoint columns
+    that _select_device_sql now projects (positions 26 & 27, after checked_at)."""
+
+    def _row(self):
+        # Mostly-None row of the exact width _device_from_row unpacks; the helper
+        # tolerates None everywhere (list(x or []), bool(x), isinstance checks).
+        # Update the width here if the device column list changes.
+        row = [None] * 61
+        row[1] = "bff-drone-a"  # device_id
+        row[25] = True  # edge_online
+        row[26] = "203.0.113.9:5555"  # reflexive_endpoint
+        return tuple(row)
+
+    def test_maps_edge_presence_columns(self):
+        device = PostgresMetadataStore()._device_from_row(self._row())
+        self.assertEqual(device["device_id"], "bff-drone-a")
+        self.assertTrue(device["edge_online"])
+        self.assertEqual(device["reflexive_endpoint"], "203.0.113.9:5555")
+
+    def test_edge_online_defaults_false(self):
+        row = list(self._row())
+        row[25] = None  # no presence row joined
+        device = PostgresMetadataStore()._device_from_row(tuple(row))
+        self.assertFalse(device["edge_online"])
+
+
 class PresenceWiringTests(unittest.TestCase):
     def test_build_registry_invokes_presence_writer(self):
         calls = []

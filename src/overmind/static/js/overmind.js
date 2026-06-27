@@ -1813,6 +1813,7 @@
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}" data-device-field="online">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="connected">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
                                         <span class="badge ${(device.public_reachability && device.public_reachability.resolvable) ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="resolvable" title="Overmind public reachability probe (TCP connect to the registered public IP)">${(device.public_reachability && device.public_reachability.resolvable) ? 'Resolvable' : 'Not Resolvable'}</span>
+                                        <span class="badge ${device.edge_online ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="edge" title="Connected to Overmind via the outbound Edge link (no router port-forward required)">${device.edge_online ? 'Online via Edge' : 'Not on Edge'}</span>
                                     </div>
                                     <div class="small text-muted mt-3" data-device-field="last-seen">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
@@ -1857,6 +1858,7 @@
                     updateDeviceTileBadge(tile, 'online', Boolean(device.online), 'Online', 'Offline', 'text-bg-danger');
                     updateDeviceTileBadge(tile, 'connected', Boolean(device.swarm_connected), 'Connected to Swarm', 'Not Connected to Swarm', 'text-bg-secondary');
                     updateDeviceTileBadge(tile, 'resolvable', Boolean(device.public_reachability && device.public_reachability.resolvable), 'Resolvable', 'Not Resolvable', 'text-bg-secondary');
+                    updateDeviceTileBadge(tile, 'edge', Boolean(device.edge_online), 'Online via Edge', 'Not on Edge', 'text-bg-secondary');
                 });
             }
 
