@@ -444,3 +444,537 @@ class DroneEmulatorConfigsUpload(StrictContractModel):
     type: Optional[Literal["emulator_configs"]] = "emulator_configs"
     incremental: bool = True
     configs: list[DroneEmulatorConfigFile] = Field(default_factory=list)
+
+
+# ==================== Phase 1 request models ====================
+# These replace `payload: dict` handlers so Swagger documents the body. Fields are
+# Optional to preserve each handler's existing validation/status-code behavior
+# (handlers still raise their own 400s); PATCH handlers read model_dump(exclude_unset=True).
+
+
+class NotificationIdsRequest(BaseModel):
+    """Optional id list for marking/dismissing notifications (omitted body = all)."""
+    ids: Optional[list[str]] = None
+
+
+class InvitationAcceptRequest(BaseModel):
+    token: Optional[str] = None
+
+
+class SwarmMemberUpdateRequest(BaseModel):
+    role: Optional[str] = None
+
+
+class SwarmRenameRequest(BaseModel):
+    name: Optional[str] = None
+
+
+class ProfileUpdateRequest(BaseModel):
+    """Partial profile update; only provided fields are applied (PATCH semantics)."""
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    avatar_data_url: Optional[str] = None
+    fleet_settings: Optional[dict] = None
+    notification_settings: Optional[dict] = None
+
+
+# ==================== Phase 1 response models ====================
+# Permissive (extra="allow"): declared fields are documented in OpenAPI while any
+# additional keys the handlers return (e.g. splatted DB records) pass through unchanged.
+
+
+class StatusResponse(ExtensibleContractModel):
+    status: str
+
+
+class MessageResponse(ExtensibleContractModel):
+    message: str
+
+
+class UserSummary(ExtensibleContractModel):
+    id: str
+    email: str
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+
+
+class SwarmSummary(ExtensibleContractModel):
+    id: Optional[str] = None
+    name: Optional[str] = None
+    owner_id: Optional[str] = None
+    role: Optional[str] = None
+    current: Optional[bool] = None
+    created_at: Optional[Any] = None
+
+
+class LoginResponse(ExtensibleContractModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserSummary
+    swarms: list[SwarmSummary] = Field(default_factory=list)
+
+
+class AuthProvidersResponse(ExtensibleContractModel):
+    providers: dict[str, bool] = Field(default_factory=dict)
+
+
+class SwarmListResponse(ExtensibleContractModel):
+    swarms: list[SwarmSummary] = Field(default_factory=list)
+
+
+class SwarmEnvelope(ExtensibleContractModel):
+    swarm: SwarmSummary
+
+
+class SwarmAccessData(ExtensibleContractModel):
+    members: list[Any] = Field(default_factory=list)
+    invitations: list[Any] = Field(default_factory=list)
+
+
+class SwarmAccessResponse(ExtensibleContractModel):
+    access: SwarmAccessData
+    role: Optional[str] = None
+
+
+class InvitationSummary(ExtensibleContractModel):
+    id: Optional[str] = None
+    swarm_id: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[Any] = None
+    expires_at: Optional[Any] = None
+
+
+class InvitationEnvelope(ExtensibleContractModel):
+    invitation: InvitationSummary
+
+
+class ResendInvitationResponse(ExtensibleContractModel):
+    status: str
+    invitation: InvitationSummary
+
+
+class RemoveInvitationResponse(ExtensibleContractModel):
+    status: str
+    invitation_id: str
+
+
+class InvitationStatusResponse(ExtensibleContractModel):
+    status: str
+    email: Optional[str] = None
+    swarm_id: Optional[str] = None
+    role: Optional[str] = None
+    registered: Optional[bool] = None
+
+
+class AcceptInvitationResponse(ExtensibleContractModel):
+    status: str
+    swarm_id: str
+
+
+class SwarmMemberUpdateResponse(ExtensibleContractModel):
+    status: str
+    role: str
+
+
+class MarkNotificationsResponse(ExtensibleContractModel):
+    status: str
+    marked_read: int
+
+
+class DismissNotificationsResponse(ExtensibleContractModel):
+    status: str
+    dismissed: int
+
+
+class NotificationListResponse(ExtensibleContractModel):
+    notifications: list[Any] = Field(default_factory=list)
+    unread_count: int = 0
+    total_count: int = 0
+    limit: int = 0
+    offset: int = 0
+
+
+class ProfileResponse(ExtensibleContractModel):
+    id: str
+    email: str
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    avatar_data_url: Optional[str] = None
+    fleet_settings: dict = Field(default_factory=dict)
+    notification_settings: dict = Field(default_factory=dict)
+
+
+class HiveEntry(ExtensibleContractModel):
+    swarm_id: Optional[str] = None
+    swarm_name: Optional[str] = None
+    owner_username: Optional[str] = None
+    owner_avatar_data_url: Optional[str] = None
+    drone_count: Optional[int] = None
+    current: Optional[bool] = None
+    viewer_role: Optional[str] = None
+    can_view: Optional[bool] = None
+
+
+class HiveResponse(ExtensibleContractModel):
+    hive: list[HiveEntry] = Field(default_factory=list)
+    swarms: list[Any] = Field(default_factory=list)
+
+
+# ==================== Phase 2-4 request models ====================
+# Extend ExtensibleContractModel (extra="allow") so any key the client sends still flows
+# through model_dump() even when not declared here — handlers keep reading a dict, so
+# their behaviour is unchanged; declared fields just document the body in Swagger.
+
+
+class AdminAssignRequest(ExtensibleContractModel):
+    swarm_id: Optional[str] = None
+
+
+class DroneClaimRequest(ExtensibleContractModel):
+    device_id: Optional[str] = None
+    drone_id: Optional[str] = None
+    device_name: Optional[str] = None
+    drone_name: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    ip_address: Optional[str] = None
+    scheme: Optional[str] = None
+    reachable_url: Optional[str] = None
+    api_port: Optional[int] = None
+    network: Optional[dict] = None
+    system_info: Optional[dict] = None
+    certificate: Optional[dict] = None
+    batocera_info: Optional[dict] = None
+
+
+class IntegrationTokenCreateRequest(ExtensibleContractModel):
+    label: Optional[str] = None
+
+
+class SignCsrRequest(ExtensibleContractModel):
+    csr_pem: Optional[str] = None
+    days: Optional[int] = None
+
+
+class AutoSyncUpdateRequest(ExtensibleContractModel):
+    enabled: Optional[bool] = None
+    systems: Optional[list[str]] = None
+
+
+class DeviceActionRequest(ExtensibleContractModel):
+    action: Optional[str] = None
+    payload: Optional[dict] = None
+
+
+class SyncRomRequest(ExtensibleContractModel):
+    system_name: Optional[str] = None
+    system: Optional[str] = None
+    rom_name: Optional[str] = None
+    file_path: Optional[str] = None
+    file_size: Optional[int] = None
+    entry_type: Optional[str] = None
+    fingerprint: Optional[str] = None
+    rom_fingerprint: Optional[str] = None
+    devices: Optional[list[Any]] = None
+
+
+class SyncBiosRequest(ExtensibleContractModel):
+    bios_name: Optional[str] = None
+    name: Optional[str] = None
+    file_path: Optional[str] = None
+    relative_path: Optional[str] = None
+    file_size: Optional[int] = None
+    bios_md5: Optional[str] = None
+    md5: Optional[str] = None
+    devices: Optional[list[Any]] = None
+
+
+class SyncArtworkRequest(ExtensibleContractModel):
+    artwork_type: Optional[str] = None
+    system_name: Optional[str] = None
+    system: Optional[str] = None
+    rom_name: Optional[str] = None
+    rom_path: Optional[str] = None
+    file_path: Optional[str] = None
+    devices: Optional[list[Any]] = None
+
+
+class SyncArtworkBulkRequest(ExtensibleContractModel):
+    artwork_type: Optional[str] = None
+    systems: Optional[list[str]] = None
+    devices: Optional[list[Any]] = None
+
+
+class SyncSystemRequest(ExtensibleContractModel):
+    system: Optional[str] = None
+    system_name: Optional[str] = None
+    devices: Optional[list[Any]] = None
+
+
+class BulkSyncRequest(ExtensibleContractModel):
+    device_ids: Optional[list[str]] = None
+    systems: Optional[list[str]] = None
+
+
+# ==================== Phase 2-4 response models ====================
+# Permissive: declared fields are documented; only fields each handler always returns are
+# declared so the serialized JSON keeps the same key set (extra keys pass through).
+
+
+class DeviceModel(ExtensibleContractModel):
+    """Core, always-present subset of presenters.device_response (the rest pass through)."""
+    id: Optional[str] = None
+    device_id: Optional[str] = None
+    device_name: Optional[str] = None
+    online: Optional[bool] = None
+    status: Optional[str] = None
+    swarm_connected: Optional[bool] = None
+    rom_count: Optional[int] = None
+    game_count: Optional[int] = None
+
+
+class GenericObjectResponse(ExtensibleContractModel):
+    """Open object passthrough for opaque dict payloads (job results, signed cert, summaries)."""
+
+
+class HealthResponse(ExtensibleContractModel):
+    status: str
+    version: str
+
+
+class AdminOverviewResponse(ExtensibleContractModel):
+    users: list[Any] = Field(default_factory=list)
+    swarms: list[Any] = Field(default_factory=list)
+    drones: list[Any] = Field(default_factory=list)
+    pending_connections: list[Any] = Field(default_factory=list)
+
+
+class AdminSyncActionsResponse(ExtensibleContractModel):
+    sync_actions: list[Any] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+
+
+class AdminAuditLogResponse(ExtensibleContractModel):
+    audit_events: list[Any] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+
+
+class AdminLandingVisitsResponse(ExtensibleContractModel):
+    unique: int = 0
+    total: int = 0
+    visits: list[Any] = Field(default_factory=list)
+    total_rows: int = 0
+    limit: int = 0
+    offset: int = 0
+
+
+class MetricsResponse(ExtensibleContractModel):
+    metrics: Any = None
+
+
+class RuntimeLogsResponse(ExtensibleContractModel):
+    logs: Any = None
+
+
+class AdminAssignResponse(ExtensibleContractModel):
+    status: str
+    device: DeviceModel
+
+
+class DevicesListResponse(ExtensibleContractModel):
+    devices: list[DeviceModel] = Field(default_factory=list)
+
+
+class DeviceTokenResponse(ExtensibleContractModel):
+    device: DeviceModel
+    drone_token: Optional[str] = None
+
+
+class PeerCertificateResponse(ExtensibleContractModel):
+    device_id: str
+    certificate_pem: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class DeviceRegisterResponse(ExtensibleContractModel):
+    message: Optional[str] = None
+    status: str
+    device_id: str
+    drone_token: Optional[str] = None
+
+
+class AcceptDroneConnectionResponse(ExtensibleContractModel):
+    message: str
+    device: DeviceModel
+    drone_token: Optional[str] = None
+
+
+class IntegrationTokensResponse(ExtensibleContractModel):
+    tokens: list[Any] = Field(default_factory=list)
+
+
+class IntegrationTokenEnvelope(ExtensibleContractModel):
+    token: dict = Field(default_factory=dict)
+
+
+class DroneConnectionsResponse(ExtensibleContractModel):
+    connections: list[Any] = Field(default_factory=list)
+
+
+class AutoSyncPolicyResponse(ExtensibleContractModel):
+    auto_sync_policy: Any = None
+
+
+class ActionsResponse(ExtensibleContractModel):
+    actions: list[Any] = Field(default_factory=list)
+
+
+class DeleteActionsResponse(ExtensibleContractModel):
+    status: str
+    deleted_count: int = 0
+
+
+class DownloadsResponse(ExtensibleContractModel):
+    concurrency: dict = Field(default_factory=dict)
+    targets: list[Any] = Field(default_factory=list)
+
+
+class ActionEnvelope(ExtensibleContractModel):
+    action: Optional[Any] = None
+
+
+class ActionQueuedResponse(ExtensibleContractModel):
+    status: str
+    action: Optional[Any] = None
+
+
+class ClaimActionsResponse(ExtensibleContractModel):
+    actions: list[Any] = Field(default_factory=list)
+    action: Optional[Any] = None
+
+
+class SyncRomResponse(ExtensibleContractModel):
+    action: Optional[Any] = None
+    artwork_actions: list[Any] = Field(default_factory=list)
+    artwork_action_count: int = 0
+
+
+class SyncArtworkBulkResponse(ExtensibleContractModel):
+    status: str
+    systems: list[Any] = Field(default_factory=list)
+    source_device_ids: list[Any] = Field(default_factory=list)
+    action_count: int = 0
+    queued_artwork_count: int = 0
+    skipped_artwork_count: int = 0
+    actions: list[Any] = Field(default_factory=list)
+
+
+class BulkSyncResponse(ExtensibleContractModel):
+    status: str
+    device_count: int = 0
+    systems: list[Any] = Field(default_factory=list)
+    action_count: int = 0
+    queued_rom_count: int = 0
+    artwork_action_count: int = 0
+    actions: list[Any] = Field(default_factory=list)
+    artwork_actions: list[Any] = Field(default_factory=list)
+
+
+class HeartbeatResponse(ExtensibleContractModel):
+    actions: list[Any] = Field(default_factory=list)
+    swarm: list[Any] = Field(default_factory=list)
+    log_stream_requested: bool = False
+    romset_files_thumbprint: Optional[str] = None
+    bios_files_thumbprint: Optional[str] = None
+    saves_files_thumbprint: Optional[str] = None
+
+
+class AssetMetadataAck(ExtensibleContractModel):
+    rom_count: int = 0
+    bios_count: int = 0
+    artwork_count: int = 0
+    saves_count: int = 0
+
+
+class SpeedUploadResponse(ExtensibleContractModel):
+    bytes_received: int = 0
+
+
+class SpeedSamplesResponse(ExtensibleContractModel):
+    samples: list[Any] = Field(default_factory=list)
+
+
+class LogStreamResponse(ExtensibleContractModel):
+    status: str
+    ttl_seconds: int = 0
+
+
+class DeviceRomsResponse(ExtensibleContractModel):
+    """get_device_roms returns one of three shapes; route uses response_model_exclude_none."""
+    roms: Optional[list[Any]] = None
+    total: Optional[int] = None
+    page: Optional[int] = None
+    per_page: Optional[int] = None
+    systems: Optional[dict] = None
+
+
+class MasterRomsResponse(ExtensibleContractModel):
+    roms: list[Any] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    per_page: int = 100
+
+
+class BiosListResponse(ExtensibleContractModel):
+    bios: list[Any] = Field(default_factory=list)
+
+
+class MasterBiosResponse(ExtensibleContractModel):
+    bios: list[Any] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    per_page: int = 100
+
+
+class MasterArtworkResponse(ExtensibleContractModel):
+    artwork: list[Any] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    per_page: int = 100
+
+
+class DeviceSavesResponse(ExtensibleContractModel):
+    saves: list[Any] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    per_page: int = 100
+
+
+class RomUpdateResponse(ExtensibleContractModel):
+    message: str
+    system_name: str
+    rom_count: int = 0
+    rom_ids: list[Any] = Field(default_factory=list)
+
+
+class SyncActivityResponse(ExtensibleContractModel):
+    activity: list[Any] = Field(default_factory=list)
+
+
+class SystemsResponse(ExtensibleContractModel):
+    systems: Any = None
+
+
+class GameplayLogResponse(ExtensibleContractModel):
+    message: str
+    gamelog_id: Any = None
+
+
+class GamelogsResponse(ExtensibleContractModel):
+    gamelogs: list[Any] = Field(default_factory=list)

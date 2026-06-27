@@ -34,6 +34,34 @@ from overmind.models import (
     SwarmCreateRequest, SwarmInviteRequest,
     DroneActionCompleteRequest, DroneAssetMetadataUpload, DroneDownloadsReport, DroneEmulatorConfigsUpload,
     DroneGameLogsUpload, DroneHeartbeatRequest, DroneLogSourcesUpload, DronePeerChecksUpload, DroneSpeedSampleUpload,
+    # Phase 1 request models
+    NotificationIdsRequest, InvitationAcceptRequest, SwarmMemberUpdateRequest, SwarmRenameRequest,
+    ProfileUpdateRequest,
+    # Phase 1 response models
+    StatusResponse, MessageResponse, LoginResponse, AuthProvidersResponse,
+    SwarmListResponse, SwarmEnvelope, SwarmAccessResponse,
+    InvitationEnvelope, ResendInvitationResponse, RemoveInvitationResponse,
+    InvitationStatusResponse, AcceptInvitationResponse, SwarmMemberUpdateResponse,
+    MarkNotificationsResponse, DismissNotificationsResponse, NotificationListResponse,
+    ProfileResponse, HiveResponse,
+    # Phase 2-4 request models
+    AdminAssignRequest, DroneClaimRequest, IntegrationTokenCreateRequest, SignCsrRequest,
+    AutoSyncUpdateRequest, DeviceActionRequest, SyncRomRequest, SyncBiosRequest,
+    SyncArtworkRequest, SyncArtworkBulkRequest, SyncSystemRequest, BulkSyncRequest,
+    # Phase 2-4 response models
+    DeviceModel, GenericObjectResponse, HealthResponse,
+    AdminOverviewResponse, AdminSyncActionsResponse, AdminAuditLogResponse,
+    AdminLandingVisitsResponse, MetricsResponse, RuntimeLogsResponse, AdminAssignResponse,
+    DevicesListResponse, DeviceTokenResponse, PeerCertificateResponse,
+    DeviceRegisterResponse, AcceptDroneConnectionResponse,
+    IntegrationTokensResponse, IntegrationTokenEnvelope, DroneConnectionsResponse,
+    AutoSyncPolicyResponse, ActionsResponse, DeleteActionsResponse, DownloadsResponse,
+    ActionEnvelope, ActionQueuedResponse, ClaimActionsResponse, SyncRomResponse,
+    SyncArtworkBulkResponse, BulkSyncResponse, HeartbeatResponse, AssetMetadataAck,
+    SpeedUploadResponse, SpeedSamplesResponse, LogStreamResponse,
+    DeviceRomsResponse, MasterRomsResponse, BiosListResponse, MasterBiosResponse,
+    MasterArtworkResponse, DeviceSavesResponse, RomUpdateResponse, SyncActivityResponse,
+    SystemsResponse, GameplayLogResponse, GamelogsResponse,
 )
 from overmind.db import db, ADMIN_ALERT_SWARM_ID
 from overmind import auth
@@ -1060,7 +1088,7 @@ async def register(user_data: UserRegister):
     )
 
 
-@app.post("/api/auth/login")
+@app.post("/api/auth/login", response_model=LoginResponse)
 async def login(credentials: UserLogin):
     """Login user and return access token."""
     user = _authenticate_password_user(str(credentials.email), credentials.password)
@@ -1073,20 +1101,20 @@ async def login(credentials: UserLogin):
     return build_login_response(user)
 
 
-@app.post("/api/auth/refresh")
+@app.post("/api/auth/refresh", response_model=LoginResponse)
 async def refresh_auth_token(authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     return build_login_response(user)
 
 
-@app.post("/api/auth/verify-email")
+@app.post("/api/auth/verify-email", response_model=StatusResponse)
 async def verify_email_code(payload: EmailVerificationRequest):
     if not db.verify_email_code(str(payload.email), payload.code):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code")
     return {"status": "verified"}
 
 
-@app.post("/api/auth/resend-verification")
+@app.post("/api/auth/resend-verification", response_model=StatusResponse)
 async def resend_verification_email(payload: EmailVerificationResendRequest):
     user = db.get_user_by_email(str(payload.email))
     if user and not user.get("email_verified"):
@@ -1094,7 +1122,7 @@ async def resend_verification_email(payload: EmailVerificationResendRequest):
     return {"status": "sent"}
 
 
-@app.get("/api/auth/verify-email")
+@app.get("/api/auth/verify-email", response_class=RedirectResponse)
 async def verify_email_link(token: str):
     user = db.verify_email_token(token, verify_secret_token)
     if not user:
@@ -1102,7 +1130,7 @@ async def verify_email_link(token: str):
     return RedirectResponse(f"{emailer.base_url()}/#verified=1")
 
 
-@app.post("/api/auth/forgot-password")
+@app.post("/api/auth/forgot-password", response_model=MessageResponse)
 async def forgot_password(payload: ForgotPasswordRequest):
     user = db.get_user_by_email(str(payload.email))
     if user and user.get("auth_provider") in (None, "password") and user.get("password"):
@@ -1113,14 +1141,14 @@ async def forgot_password(payload: ForgotPasswordRequest):
     return {"message": "If an eligible account exists, a password reset email has been sent."}
 
 
-@app.post("/api/auth/reset-password")
+@app.post("/api/auth/reset-password", response_model=StatusResponse)
 async def reset_password(payload: ResetPasswordRequest):
     if not db.consume_password_reset(payload.token, auth.hash_password(payload.password), verify_secret_token):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired password reset token")
     return {"status": "password_updated"}
 
 
-@app.get("/api/auth/providers")
+@app.get("/api/auth/providers", response_model=AuthProvidersResponse)
 async def auth_providers():
     """Return social auth providers enabled by ENV VARs."""
     return {
@@ -1131,7 +1159,7 @@ async def auth_providers():
     }
 
 
-@app.post("/api/auth/{provider}")
+@app.post("/api/auth/{provider}", response_model=LoginResponse)
 async def social_auth_dev(provider: str, payload: SocialAuthRequest):
     """Sign up or log in with a configured social provider.
 
@@ -1145,7 +1173,7 @@ async def social_auth_dev(provider: str, payload: SocialAuthRequest):
     return build_login_response(user)
 
 
-@app.get("/api/auth/{provider}/start")
+@app.get("/api/auth/{provider}/start", response_class=RedirectResponse)
 async def social_auth_start(provider: str, request: Request):
     """Redirect to a configured Google or GitHub OAuth screen."""
     config = OAUTH_PROVIDERS.get(provider)
@@ -1167,7 +1195,7 @@ async def social_auth_start(provider: str, request: Request):
     return RedirectResponse(f"{config['auth_url']}?{urllib.parse.urlencode(params)}")
 
 
-@app.get("/api/auth/{provider}/callback")
+@app.get("/api/auth/{provider}/callback", response_class=RedirectResponse)
 async def social_auth_callback(provider: str, request: Request):
     """Complete OAuth, create/login the Overlord, and return to the UI."""
     config = OAUTH_PROVIDERS.get(provider)
@@ -1354,14 +1382,14 @@ def _heartbeat_batocera_info(heartbeat: dict) -> dict:
 
 # ==================== Swarms ====================
 
-@app.get("/api/swarms")
+@app.get("/api/swarms", response_model=SwarmListResponse)
 async def list_swarms(authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     default_swarm_id = db.default_swarm_id(user["id"])
     return {"swarms": [{**swarm, "current": swarm.get("id") == default_swarm_id} for swarm in db.get_user_swarms(user["id"])]}
 
 
-@app.get("/api/notifications")
+@app.get("/api/notifications", response_model=NotificationListResponse)
 async def list_notifications(limit: int = 50, offset: int = 0, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     limit = max(1, min(int(limit or 50), 500))
@@ -1379,23 +1407,23 @@ async def list_notifications(limit: int = 50, offset: int = 0, authorization: Op
     }
 
 
-@app.post("/api/notifications/read")
-async def mark_notifications_read(payload: dict = None, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/notifications/read", response_model=MarkNotificationsResponse)
+async def mark_notifications_read(payload: Optional[NotificationIdsRequest] = None, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
-    ids = payload.get("ids") if isinstance(payload, dict) and isinstance(payload.get("ids"), list) else None
+    ids = payload.ids if payload else None
     count = db.mark_notifications_read(user["id"], ids)
     return {"status": "ok", "marked_read": count}
 
 
-@app.post("/api/notifications/dismiss")
-async def dismiss_notifications(payload: dict = None, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/notifications/dismiss", response_model=DismissNotificationsResponse)
+async def dismiss_notifications(payload: Optional[NotificationIdsRequest] = None, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
-    ids = payload.get("ids") if isinstance(payload, dict) and isinstance(payload.get("ids"), list) else None
+    ids = payload.ids if payload else None
     count = db.dismiss_notifications(user["id"], ids)
     return {"status": "ok", "dismissed": count}
 
 
-@app.post("/api/landing-visit")
+@app.post("/api/landing-visit", response_model=StatusResponse)
 async def record_landing_visit(request: Request):
     """Public: log an anonymous landing-page visit by client IP (fire-and-forget)."""
     try:
@@ -1405,7 +1433,7 @@ async def record_landing_visit(request: Request):
     return {"status": "ok"}
 
 
-@app.get("/api/admin/overview")
+@app.get("/api/admin/overview", response_model=AdminOverviewResponse)
 async def admin_overview(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
     db.refresh_admin_overview_state()
@@ -1424,9 +1452,10 @@ async def admin_overview(authorization: Optional[str] = Header(default=None)):
     return {"users": users, "swarms": swarms, "drones": drones, "pending_connections": pending_connections}
 
 
-@app.post("/api/admin/drone-connections/{device_id}/assign")
-async def admin_assign_drone_connection(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/admin/drone-connections/{device_id}/assign", response_model=AdminAssignResponse)
+async def admin_assign_drone_connection(device_id: str, body: AdminAssignRequest, authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
+    payload = body.model_dump(exclude_none=True)
     swarm_id = str((payload or {}).get("swarm_id") or "").strip()
     if not swarm_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="swarm_id is required")
@@ -1436,7 +1465,7 @@ async def admin_assign_drone_connection(device_id: str, payload: dict, authoriza
     return {"status": "assigned", "device": device_response(device)}
 
 
-@app.get("/api/admin/sync-actions")
+@app.get("/api/admin/sync-actions", response_model=AdminSyncActionsResponse)
 async def admin_sync_actions(
     q: Optional[str] = None,
     limit: int = 20,
@@ -1452,7 +1481,7 @@ async def admin_sync_actions(
     return {"sync_actions": page["actions"], "total": page["total"], "limit": limit, "offset": offset}
 
 
-@app.get("/api/admin/sync-actions/summary")
+@app.get("/api/admin/sync-actions/summary", response_model=GenericObjectResponse)
 async def admin_sync_actions_summary(authorization: Optional[str] = Header(default=None)):
     """Status counts across all sync actions (super admin only)."""
     require_super_admin(authorization)
@@ -1460,7 +1489,7 @@ async def admin_sync_actions_summary(authorization: Optional[str] = Header(defau
     return db.summarize_sync_actions()
 
 
-@app.get("/api/admin/audit-log")
+@app.get("/api/admin/audit-log", response_model=AdminAuditLogResponse)
 async def admin_audit_log(
     q: Optional[str] = None,
     limit: int = 20,
@@ -1475,7 +1504,7 @@ async def admin_audit_log(
     return {"audit_events": page["events"], "total": page["total"], "limit": limit, "offset": offset}
 
 
-@app.get("/api/admin/landing-visits")
+@app.get("/api/admin/landing-visits", response_model=AdminLandingVisitsResponse)
 async def admin_landing_visits(
     limit: int = 20,
     offset: int = 0,
@@ -1497,19 +1526,19 @@ async def admin_landing_visits(
     }
 
 
-@app.get("/api/admin/runtime-metrics")
+@app.get("/api/admin/runtime-metrics", response_model=MetricsResponse)
 async def admin_runtime_metrics(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
     return {"metrics": collect_runtime_metrics(Path.cwd())}
 
 
-@app.get("/api/admin/runtime-logs")
+@app.get("/api/admin/runtime-logs", response_model=RuntimeLogsResponse)
 async def admin_runtime_logs(authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
     return {"logs": stream_log_snapshot()}
 
 
-@app.post("/api/admin/run-job")
+@app.post("/api/admin/run-job", response_model=GenericObjectResponse)
 async def admin_run_scheduled_job(job: str, authorization: Optional[str] = Header(default=None)):
     """Trigger a scheduled maintenance job on demand (super admin only)."""
     require_super_admin(authorization)
@@ -1520,7 +1549,7 @@ async def admin_run_scheduled_job(job: str, authorization: Optional[str] = Heade
     return result
 
 
-@app.delete("/api/admin/users/{user_id}")
+@app.delete("/api/admin/users/{user_id}", response_model=StatusResponse)
 async def admin_delete_user(user_id: str, authorization: Optional[str] = Header(default=None)):
     user = require_super_admin(authorization)
     if user_id == user["id"]:
@@ -1530,7 +1559,7 @@ async def admin_delete_user(user_id: str, authorization: Optional[str] = Header(
     return {"status": "deleted", "user_id": user_id}
 
 
-@app.delete("/api/admin/drones/{device_id}")
+@app.delete("/api/admin/drones/{device_id}", response_model=StatusResponse)
 async def admin_delete_drone(device_id: str, authorization: Optional[str] = Header(default=None)):
     require_super_admin(authorization)
     if not db.admin_delete_device(device_id):
@@ -1538,14 +1567,14 @@ async def admin_delete_drone(device_id: str, authorization: Optional[str] = Head
     return {"status": "deleted", "device_id": device_id}
 
 
-@app.post("/api/swarms")
+@app.post("/api/swarms", response_model=SwarmEnvelope)
 async def create_swarm(payload: SwarmCreateRequest, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     swarm = db.create_swarm(user["id"], payload.name)
     return {"swarm": {**swarm, "role": OWNER_ROLE}}
 
 
-@app.get("/api/swarms/{swarm_id}/access")
+@app.get("/api/swarms/{swarm_id}/access", response_model=SwarmAccessResponse)
 async def get_swarm_access(swarm_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
@@ -1554,7 +1583,7 @@ async def get_swarm_access(swarm_id: str, authorization: Optional[str] = Header(
     return {"access": access, "role": member.get("role") if member else None}
 
 
-@app.post("/api/swarms/{swarm_id}/invitations")
+@app.post("/api/swarms/{swarm_id}/invitations", response_model=InvitationEnvelope)
 async def invite_swarm_member(swarm_id: str, payload: SwarmInviteRequest, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
@@ -1581,7 +1610,7 @@ async def invite_swarm_member(swarm_id: str, payload: SwarmInviteRequest, author
     return {"invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
 
 
-@app.post("/api/swarms/{swarm_id}/invitations/{invitation_id}/resend")
+@app.post("/api/swarms/{swarm_id}/invitations/{invitation_id}/resend", response_model=ResendInvitationResponse)
 async def resend_swarm_invitation(swarm_id: str, invitation_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
@@ -1609,7 +1638,7 @@ async def resend_swarm_invitation(swarm_id: str, invitation_id: str, authorizati
     return {"status": "sent", "invitation": {k: v for k, v in invite.items() if k != "token_hash"}}
 
 
-@app.delete("/api/swarms/{swarm_id}/invitations/{invitation_id}")
+@app.delete("/api/swarms/{swarm_id}/invitations/{invitation_id}", response_model=RemoveInvitationResponse)
 async def remove_swarm_invitation(swarm_id: str, invitation_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
@@ -1621,7 +1650,7 @@ async def remove_swarm_invitation(swarm_id: str, invitation_id: str, authorizati
     return {"status": "removed", "invitation_id": invitation_id}
 
 
-@app.get("/api/invitations/status")
+@app.get("/api/invitations/status", response_model=InvitationStatusResponse)
 async def invitation_status(token: str):
     invite = db.find_invitation_by_token(token, verify_secret_token)
     if not invite:
@@ -1651,10 +1680,10 @@ async def invitation_status(token: str):
     }
 
 
-@app.post("/api/invitations/accept")
-async def accept_invitation(payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/invitations/accept", response_model=AcceptInvitationResponse)
+async def accept_invitation(payload: InvitationAcceptRequest, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
-    token = str(payload.get("token") or "")
+    token = str(payload.token or "")
     invite = db.find_invitation_by_token(token, verify_secret_token)
     if not invite:
         print(f"Invitation rejected for user={user.get('email')}: invalid")
@@ -1680,7 +1709,7 @@ async def accept_invitation(payload: dict, authorization: Optional[str] = Header
     return {"status": "accepted", "swarm_id": invite["swarm_id"]}
 
 
-@app.delete("/api/swarms/{swarm_id}/members/{target_user_id}")
+@app.delete("/api/swarms/{swarm_id}/members/{target_user_id}", response_model=StatusResponse)
 async def remove_swarm_member(swarm_id: str, target_user_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
@@ -1699,12 +1728,12 @@ async def remove_swarm_member(swarm_id: str, target_user_id: str, authorization:
     return {"status": "removed"}
 
 
-@app.patch("/api/swarms/{swarm_id}/members/{target_user_id}")
-async def update_swarm_member(swarm_id: str, target_user_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.patch("/api/swarms/{swarm_id}/members/{target_user_id}", response_model=SwarmMemberUpdateResponse)
+async def update_swarm_member(swarm_id: str, target_user_id: str, payload: SwarmMemberUpdateRequest, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
     require_swarm_role(user, swarm_id, {OWNER_ROLE})
-    role = str(payload.get("role") or "").lower()
+    role = str(payload.role or "").lower()
     if role != READONLY_ROLE:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="role must be overseer")
     if not db.update_swarm_member_role(swarm_id, target_user_id, role):
@@ -1712,12 +1741,12 @@ async def update_swarm_member(swarm_id: str, target_user_id: str, payload: dict,
     return {"status": "updated", "role": role}
 
 
-@app.patch("/api/swarms/{swarm_id}")
-async def update_swarm(swarm_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.patch("/api/swarms/{swarm_id}", response_model=SwarmEnvelope)
+async def update_swarm(swarm_id: str, payload: SwarmRenameRequest, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     selected_swarm_id(user, swarm_id)
     require_swarm_role(user, swarm_id, {OWNER_ROLE})
-    name = str(payload.get("name") or "").strip()
+    name = str(payload.name or "").strip()
     if not name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="name is required")
     if len(name) > 80:
@@ -1730,7 +1759,7 @@ async def update_swarm(swarm_id: str, payload: dict, authorization: Optional[str
 
 # ==================== Device Management ====================
 
-@app.post("/api/devices/register")
+@app.post("/api/devices/register", response_model=DeviceRegisterResponse)
 async def register_device(device_data: DeviceRegister, authorization: Optional[str] = Header(default=None)):
     """Register an authorized Drone and return its bearer token."""
     db.refresh_persistent_state()
@@ -1851,9 +1880,10 @@ async def register_device(device_data: DeviceRegister, authorization: Optional[s
     }
 
 
-@app.post("/api/drones/claim-ownership")
-async def claim_drone_ownership(payload: dict):
+@app.post("/api/drones/claim-ownership", response_model=DeviceRegisterResponse)
+async def claim_drone_ownership(body: DroneClaimRequest):
     """Claim a Drone directly with Overmind account credentials."""
+    payload = body.model_dump(exclude_none=True)
     device_id = str(payload.get("device_id") or payload.get("drone_id") or "").strip()
     device_name = str(payload.get("device_name") or payload.get("drone_name") or device_id or "Drone").strip()
     email = str(payload.get("email") or "").strip()
@@ -1889,22 +1919,23 @@ async def claim_drone_ownership(payload: dict):
     return {"status": "claimed", "device_id": device_id, "drone_token": None}
 
 
-@app.get("/api/integration-tokens")
+@app.get("/api/integration-tokens", response_model=IntegrationTokensResponse)
 async def list_integration_tokens(authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     return {"tokens": db.get_integration_tokens(user["id"])}
 
 
-@app.post("/api/integration-tokens")
-async def create_integration_token(payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/integration-tokens", response_model=IntegrationTokenEnvelope)
+async def create_integration_token(body: IntegrationTokenCreateRequest, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
+    payload = body.model_dump(exclude_none=True)
     token = db.create_integration_token(user["id"], str(payload.get("label") or "Drone onboarding"))
     public = {k: v for k, v in token.items() if k != "token_hash"}
     public["authorization_token"] = public.pop("raw_token_once")
     return {"token": public}
 
 
-@app.delete("/api/integration-tokens/{token_id}")
+@app.delete("/api/integration-tokens/{token_id}", response_model=StatusResponse)
 async def revoke_integration_token(token_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     if not db.revoke_integration_token(user["id"], token_id):
@@ -1912,7 +1943,7 @@ async def revoke_integration_token(token_id: str, authorization: Optional[str] =
     return {"status": "revoked", "id": token_id}
 
 
-@app.get("/api/drone-connections")
+@app.get("/api/drone-connections", response_model=DroneConnectionsResponse)
 async def list_drone_connections(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List pending drone connection attempts for the Overlord."""
     user = get_current_user(authorization)
@@ -1922,7 +1953,7 @@ async def list_drone_connections(swarm_id: Optional[str] = None, authorization: 
     return {"connections": db.get_pending_drone_connections(user["id"])}
 
 
-@app.post("/api/drone-connections/{device_id}/accept")
+@app.post("/api/drone-connections/{device_id}/accept", response_model=AcceptDroneConnectionResponse)
 async def accept_drone_connection(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Accept a pending drone connection."""
     user = get_current_user(authorization)
@@ -1939,7 +1970,7 @@ async def accept_drone_connection(device_id: str, authorization: Optional[str] =
     }
 
 
-@app.post("/api/drone-connections/{device_id}/deny")
+@app.post("/api/drone-connections/{device_id}/deny", response_model=MessageResponse)
 async def deny_drone_connection(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Deny a pending drone connection."""
     user = get_current_user(authorization)
@@ -1951,7 +1982,7 @@ async def deny_drone_connection(device_id: str, authorization: Optional[str] = H
     return {"message": "Drone connection denied.", "device_id": device_id}
 
 
-@app.get("/api/devices")
+@app.get("/api/devices", response_model=DevicesListResponse)
 async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List all devices for the authenticated user."""
     user = get_current_user(authorization)
@@ -1968,7 +1999,7 @@ async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[s
     }
 
 
-@app.get("/api/devices/{device_id}")
+@app.get("/api/devices/{device_id}", response_model=DeviceModel)
 async def get_device(device_id: str, log_limit: int = 10, authorization: Optional[str] = Header(default=None)):
     """Get device details."""
     user = get_current_user(authorization)
@@ -1989,7 +2020,7 @@ async def get_device(device_id: str, log_limit: int = 10, authorization: Optiona
     return response
 
 
-@app.get("/api/devices/{device_id}/peer-certificate/{peer_id}")
+@app.get("/api/devices/{device_id}/peer-certificate/{peer_id}", response_model=PeerCertificateResponse)
 async def get_peer_certificate(device_id: str, peer_id: str, authorization: Optional[str] = Header(default=None)):
     """Return public certificate trust material for an approved peer Drone."""
     device = get_current_drone(device_id, authorization)
@@ -2006,10 +2037,11 @@ async def get_peer_certificate(device_id: str, peer_id: str, authorization: Opti
     return {"device_id": peer_id, "certificate_pem": public_cert, "metadata": safe_meta}
 
 
-@app.post("/api/devices/{device_id}/certificate/sign")
-async def sign_device_certificate(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/devices/{device_id}/certificate/sign", response_model=GenericObjectResponse)
+async def sign_device_certificate(device_id: str, body: SignCsrRequest, authorization: Optional[str] = Header(default=None)):
     """Sign a CSR for an already approved Drone."""
     device = get_current_drone(device_id, authorization)
+    payload = body.model_dump(exclude_none=True)
     csr_pem = str(payload.get("csr_pem") or "")
     if "BEGIN CERTIFICATE REQUEST" not in csr_pem:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="csr_pem is required")
@@ -2024,7 +2056,7 @@ async def sign_device_certificate(device_id: str, payload: dict, authorization: 
     return signed
 
 
-@app.post("/api/devices/{device_id}/disconnect")
+@app.post("/api/devices/{device_id}/disconnect", response_model=StatusResponse)
 async def disconnect_device_from_drone(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Allow an approved Drone to disconnect itself from its swarm."""
     device = get_current_drone(device_id, authorization)
@@ -2033,7 +2065,7 @@ async def disconnect_device_from_drone(device_id: str, authorization: Optional[s
     return {"status": "disconnected", "device_id": device_id}
 
 
-@app.post("/api/devices/{device_id}/token/rotate")
+@app.post("/api/devices/{device_id}/token/rotate", response_model=DeviceTokenResponse)
 async def rotate_device_token(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Rotate a Drone bearer token. The raw value is returned once."""
     user = get_current_user(authorization)
@@ -2047,10 +2079,10 @@ async def rotate_device_token(device_id: str, authorization: Optional[str] = Hea
     return {"device": device_response(rotated["device"]), "drone_token": rotated["token"]}
 
 
-@app.patch("/api/devices/{device_id}/auto-sync")
+@app.patch("/api/devices/{device_id}/auto-sync", response_model=AutoSyncPolicyResponse)
 async def update_device_auto_sync(
     device_id: str,
-    payload: dict,
+    body: AutoSyncUpdateRequest,
     authorization: Optional[str] = Header(default=None),
 ):
     """Update per-Drone ROM metadata sync policy."""
@@ -2059,6 +2091,7 @@ async def update_device_auto_sync(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     require_device_admin(user, device)
+    payload = body.model_dump(exclude_none=True)
     systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
     policy = db.update_device_auto_sync_policy(device["user_id"], device_id, bool(payload.get("enabled")), systems)
     if policy is None:
@@ -2066,7 +2099,7 @@ async def update_device_auto_sync(
     return {"auto_sync_policy": policy}
 
 
-@app.delete("/api/devices/{device_id}")
+@app.delete("/api/devices/{device_id}", response_model=MessageResponse)
 async def delete_device(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Delete a device and its associated ROM/gameplay data."""
     user = get_current_user(authorization)
@@ -2079,7 +2112,7 @@ async def delete_device(device_id: str, authorization: Optional[str] = Header(de
     return {"message": "Device deleted successfully", "device_id": device_id}
 
 
-@app.get("/api/devices/{device_id}/actions")
+@app.get("/api/devices/{device_id}/actions", response_model=ActionsResponse)
 async def list_device_actions(device_id: str, authorization: Optional[str] = Header(default=None)):
     """List actions for a device."""
     user = get_current_user(authorization)
@@ -2092,7 +2125,7 @@ async def list_device_actions(device_id: str, authorization: Optional[str] = Hea
     return {"actions": actions}
 
 
-@app.delete("/api/devices/{device_id}/actions")
+@app.delete("/api/devices/{device_id}/actions", response_model=DeleteActionsResponse)
 async def delete_device_actions(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Clear queued or in-progress remote actions for a device."""
     user = get_current_user(authorization)
@@ -2106,7 +2139,7 @@ async def delete_device_actions(device_id: str, authorization: Optional[str] = H
     return {"status": "deleted", "deleted_count": deleted_count}
 
 
-@app.get("/api/downloads")
+@app.get("/api/downloads", response_model=DownloadsResponse)
 async def list_downloads(device_id: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     if device_id:
@@ -2120,7 +2153,7 @@ async def list_downloads(device_id: Optional[str] = None, authorization: Optiona
     }
 
 
-@app.post("/api/devices/{device_id}/downloads/{job_id}/cancel")
+@app.post("/api/devices/{device_id}/downloads/{job_id}/cancel", response_model=ActionQueuedResponse)
 async def cancel_device_download(device_id: str, job_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
@@ -2133,7 +2166,7 @@ async def cancel_device_download(device_id: str, job_id: str, authorization: Opt
     return {"status": "queued", "action": action}
 
 
-@app.post("/api/devices/{device_id}/downloads")
+@app.post("/api/devices/{device_id}/downloads", response_model=StatusResponse)
 async def update_device_downloads(device_id: str, payload: DroneDownloadsReport, authorization: Optional[str] = Header(default=None)):
     """Persist a live download-state snapshot pushed by a Drone."""
     get_current_drone(device_id, authorization)
@@ -2148,10 +2181,10 @@ async def update_device_downloads(device_id: str, payload: DroneDownloadsReport,
     return {"status": "accepted"}
 
 
-@app.post("/api/devices/{device_id}/actions")
+@app.post("/api/devices/{device_id}/actions", response_model=ActionEnvelope)
 async def create_device_action(
     device_id: str,
-    payload: dict,
+    body: DeviceActionRequest,
     authorization: Optional[str] = Header(default=None),
 ):
     """Queue a remote action for a device."""
@@ -2160,6 +2193,7 @@ async def create_device_action(
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     require_device_admin(user, device)
+    payload = body.model_dump(exclude_none=True)
     action_type = str(payload.get("action") or "").strip().lower()
     if action_type == "reboot":
         action_type = "restart"
@@ -2202,15 +2236,15 @@ async def create_device_action(
     return {"action": action}
 
 
-@app.post("/api/devices/{device_id}/actions/claim")
-async def claim_device_action(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/devices/{device_id}/actions/claim", response_model=ClaimActionsResponse)
+async def claim_device_action(device_id: str, payload: Optional[dict] = None, authorization: Optional[str] = Header(default=None)):
     """Claim all currently pending actions for a polling drone."""
     get_current_drone(device_id, authorization)
     actions = db.claim_pending_device_actions(device_id)
     return {"actions": actions, "action": actions[0] if actions else None}
 
 
-@app.post("/api/devices/{device_id}/heartbeat")
+@app.post("/api/devices/{device_id}/heartbeat", response_model=HeartbeatResponse)
 async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, authorization: Optional[str] = Header(default=None)):
     """Update drone last-seen and return the next pending action, if any."""
     heartbeat = payload.model_dump(exclude_none=True)
@@ -2297,7 +2331,7 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
     }
 
 
-@app.post("/api/devices/{device_id}/rom-metadata")
+@app.post("/api/devices/{device_id}/rom-metadata", response_model=AssetMetadataAck)
 async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataUpload, authorization: Optional[str] = Header(default=None)):
     """Receive full asset metadata snapshots from a Drone outside heartbeat."""
     device = get_current_drone(device_id, authorization)
@@ -2317,7 +2351,7 @@ async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataU
     return {"rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork), "saves_count": len(saves)}
 
 
-@app.post("/api/drones/rom-metadata")
+@app.post("/api/drones/rom-metadata", response_model=AssetMetadataAck)
 async def upload_drone_rom_metadata_by_payload(payload: DroneAssetMetadataUpload, authorization: Optional[str] = Header(default=None)):
     device_id = str(payload.device_id or "").strip()
     if not device_id:
@@ -2325,7 +2359,7 @@ async def upload_drone_rom_metadata_by_payload(payload: DroneAssetMetadataUpload
     return await upload_drone_rom_metadata(device_id, payload, authorization)
 
 
-@app.post("/api/devices/{device_id}/events")
+@app.post("/api/devices/{device_id}/events", response_model=StatusResponse)
 async def add_drone_event(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     """Persist Drone telemetry events using the existing Drone bearer token."""
     get_current_drone(device_id, authorization)
@@ -2335,7 +2369,7 @@ async def add_drone_event(device_id: str, payload: dict, authorization: Optional
     return {"status": "accepted"}
 
 
-@app.post("/api/devices/{device_id}/peer-checks")
+@app.post("/api/devices/{device_id}/peer-checks", response_model=StatusResponse)
 async def add_peer_checks(device_id: str, payload: DronePeerChecksUpload, authorization: Optional[str] = Header(default=None)):
     """Persist peer-to-peer health results reported by a Drone."""
     get_current_drone(device_id, authorization)
@@ -2346,7 +2380,7 @@ async def add_peer_checks(device_id: str, payload: DronePeerChecksUpload, author
     return {"status": "accepted"}
 
 
-@app.post("/api/devices/{device_id}/actions/{action_id}/complete")
+@app.post("/api/devices/{device_id}/actions/{action_id}/complete", response_model=StatusResponse)
 async def complete_device_action(device_id: str, action_id: str, payload: DroneActionCompleteRequest, authorization: Optional[str] = Header(default=None)):
     """Mark a claimed device action completed or failed."""
     get_current_drone(device_id, authorization)
@@ -2361,7 +2395,7 @@ async def complete_device_action(device_id: str, action_id: str, payload: DroneA
     return {"status": "accepted"}
 
 
-@app.post("/api/devices/{device_id}/speed")
+@app.post("/api/devices/{device_id}/speed", response_model=StatusResponse)
 async def add_speed_sample(device_id: str, payload: DroneSpeedSampleUpload, authorization: Optional[str] = Header(default=None)):
     """Store a Drone upload/download speed sample."""
     get_current_drone(device_id, authorization)
@@ -2372,7 +2406,7 @@ async def add_speed_sample(device_id: str, payload: DroneSpeedSampleUpload, auth
     return {"status": "accepted"}
 
 
-@app.get("/api/devices/{device_id}/speed/download")
+@app.get("/api/devices/{device_id}/speed/download", response_class=Response)
 async def download_speed_probe(device_id: str, bytes: int = 262144, authorization: Optional[str] = Header(default=None)):
     """Return bounded bytes for a Drone to measure Overmind download throughput."""
     get_current_drone(device_id, authorization)
@@ -2380,7 +2414,7 @@ async def download_speed_probe(device_id: str, bytes: int = 262144, authorizatio
     return Response(content=b"0" * size, media_type="application/octet-stream")
 
 
-@app.post("/api/devices/{device_id}/speed/upload")
+@app.post("/api/devices/{device_id}/speed/upload", response_model=SpeedUploadResponse)
 async def upload_speed_probe(device_id: str, request: Request, authorization: Optional[str] = Header(default=None)):
     """Accept bounded bytes for a Drone to measure Overmind upload throughput."""
     get_current_drone(device_id, authorization)
@@ -2390,7 +2424,7 @@ async def upload_speed_probe(device_id: str, request: Request, authorization: Op
     return {"bytes_received": len(body)}
 
 
-@app.get("/api/devices/{device_id}/speed")
+@app.get("/api/devices/{device_id}/speed", response_model=SpeedSamplesResponse)
 async def get_speed_samples(device_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     samples = db.get_speed_samples(user["id"], device_id)
@@ -2399,45 +2433,48 @@ async def get_speed_samples(device_id: str, authorization: Optional[str] = Heade
     return {"samples": samples}
 
 
-@app.get("/api/profile")
+@app.get("/api/profile", response_model=ProfileResponse)
 async def get_profile(authorization: Optional[str] = Header(default=None)):
     """Get profile and user settings."""
     user = get_current_user(authorization)
     return profile_response(user)
 
 
-@app.patch("/api/profile")
-async def update_profile(payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.patch("/api/profile", response_model=ProfileResponse)
+async def update_profile(payload: ProfileUpdateRequest, authorization: Optional[str] = Header(default=None)):
     """Update profile and user settings."""
     user = get_current_user(authorization)
     user_id = user["id"]
+    # Only fields the client actually sent are applied (PATCH semantics); exclude_unset
+    # preserves the original "key present?" checks below.
+    fields = payload.model_dump(exclude_unset=True)
 
-    if "username" in payload:
-        username = str(payload.get("username") or "").strip()
+    if "username" in fields:
+        username = str(fields.get("username") or "").strip()
         if not username:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username is required")
         if db.username_exists(username, exclude_user_id=user_id):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already registered")
-        payload["username"] = username
+        fields["username"] = username
 
-    if "username" in payload or "full_name" in payload or "avatar_data_url" in payload:
+    if "username" in fields or "full_name" in fields or "avatar_data_url" in fields:
         db.update_user_profile(
             user_id,
-            username=payload.get("username") if "username" in payload else None,
-            full_name=payload.get("full_name") if "full_name" in payload else None,
-            avatar_data_url=payload.get("avatar_data_url") if "avatar_data_url" in payload else None,
+            username=fields.get("username") if "username" in fields else None,
+            full_name=fields.get("full_name") if "full_name" in fields else None,
+            avatar_data_url=fields.get("avatar_data_url") if "avatar_data_url" in fields else None,
         )
 
-    if "fleet_settings" in payload and isinstance(payload["fleet_settings"], dict):
-        db.update_user_fleet_settings(user_id, payload["fleet_settings"])
+    if "fleet_settings" in fields and isinstance(fields["fleet_settings"], dict):
+        db.update_user_fleet_settings(user_id, fields["fleet_settings"])
 
-    if "notification_settings" in payload and isinstance(payload["notification_settings"], dict):
-        db.update_user_notification_settings(user_id, payload["notification_settings"])
+    if "notification_settings" in fields and isinstance(fields["notification_settings"], dict):
+        db.update_user_notification_settings(user_id, fields["notification_settings"])
 
     return profile_response(db.get_user(user_id))
 
 
-@app.get("/api/hive")
+@app.get("/api/hive", response_model=HiveResponse)
 async def get_hive(authorization: Optional[str] = Header(default=None)):
     """Return a privacy-safe public swarm directory."""
     user = get_current_user(authorization)
@@ -2447,7 +2484,7 @@ async def get_hive(authorization: Optional[str] = Header(default=None)):
 
 # ==================== ROM Management ====================
 
-@app.post("/api/devices/{device_id}/roms")
+@app.post("/api/devices/{device_id}/roms", response_model=RomUpdateResponse)
 async def update_device_roms(
     device_id: str,
     rom_data: RomListUpdate,
@@ -2473,7 +2510,7 @@ async def update_device_roms(
     }
 
 
-@app.get("/api/devices/{device_id}/roms")
+@app.get("/api/devices/{device_id}/roms", response_model=DeviceRomsResponse, response_model_exclude_none=True)
 async def get_device_roms(
     device_id: str,
     system_name: Optional[str] = None,
@@ -2512,7 +2549,7 @@ async def get_device_roms(
     return {"roms": roms}
 
 
-@app.get("/api/devices/{device_id}/master-roms")
+@app.get("/api/devices/{device_id}/master-roms", response_model=MasterRomsResponse)
 async def get_device_master_roms(
     device_id: str,
     q: Optional[str] = None,
@@ -2555,7 +2592,7 @@ async def get_device_master_roms(
     }
 
 
-@app.get("/api/master-roms")
+@app.get("/api/master-roms", response_model=MasterRomsResponse)
 async def get_swarm_master_roms(
     q: Optional[str] = None,
     system: Optional[str] = None,
@@ -2569,7 +2606,7 @@ async def get_swarm_master_roms(
     return {"roms": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
-@app.get("/api/devices/{device_id}/bios")
+@app.get("/api/devices/{device_id}/bios", response_model=BiosListResponse)
 async def get_device_bios(device_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
@@ -2578,7 +2615,7 @@ async def get_device_bios(device_id: str, authorization: Optional[str] = Header(
     return {"bios": db.get_device_bios(device_id)}
 
 
-@app.get("/api/devices/{device_id}/saves")
+@app.get("/api/devices/{device_id}/saves", response_model=DeviceSavesResponse)
 async def get_device_saves(
     device_id: str,
     q: Optional[str] = None,
@@ -2614,7 +2651,7 @@ async def get_device_saves(
     return {"saves": saves[start:start + per_page], "total": total, "page": page, "per_page": per_page}
 
 
-@app.get("/api/devices/{device_id}/master-bios")
+@app.get("/api/devices/{device_id}/master-bios", response_model=MasterBiosResponse)
 async def get_device_master_bios(
     device_id: str,
     q: Optional[str] = None,
@@ -2641,7 +2678,7 @@ async def get_device_master_bios(
     return {"bios": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
-@app.get("/api/master-bios")
+@app.get("/api/master-bios", response_model=MasterBiosResponse)
 async def get_swarm_master_bios(
     q: Optional[str] = None,
     page: int = 1,
@@ -2653,7 +2690,7 @@ async def get_swarm_master_bios(
     return {"bios": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
-@app.get("/api/devices/{device_id}/master-artwork")
+@app.get("/api/devices/{device_id}/master-artwork", response_model=MasterArtworkResponse)
 async def get_device_master_artwork(
     device_id: str,
     q: Optional[str] = None,
@@ -2684,8 +2721,9 @@ async def get_device_master_artwork(
     return {"artwork": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
-@app.post("/api/devices/{device_id}/sync-rom")
-async def sync_device_rom(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/devices/{device_id}/sync-rom", response_model=SyncRomResponse)
+async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: Optional[str] = Header(default=None)):
+    payload = body.model_dump(exclude_none=True)
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
@@ -2742,8 +2780,9 @@ async def sync_device_rom(device_id: str, payload: dict, authorization: Optional
     return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
 
 
-@app.post("/api/devices/{device_id}/sync-bios")
-async def sync_device_bios(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/devices/{device_id}/sync-bios", response_model=ActionEnvelope)
+async def sync_device_bios(device_id: str, body: SyncBiosRequest, authorization: Optional[str] = Header(default=None)):
+    payload = body.model_dump(exclude_none=True)
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
@@ -2794,8 +2833,9 @@ async def sync_device_bios(device_id: str, payload: dict, authorization: Optiona
     return {"action": action}
 
 
-@app.post("/api/devices/{device_id}/sync-artwork")
-async def sync_device_artwork(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/devices/{device_id}/sync-artwork", response_model=ActionEnvelope)
+async def sync_device_artwork(device_id: str, body: SyncArtworkRequest, authorization: Optional[str] = Header(default=None)):
+    payload = body.model_dump(exclude_none=True)
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
@@ -2848,8 +2888,9 @@ async def sync_device_artwork(device_id: str, payload: dict, authorization: Opti
     return {"action": action}
 
 
-@app.post("/api/devices/{device_id}/sync-artwork-bulk")
-async def sync_device_artwork_bulk(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/devices/{device_id}/sync-artwork-bulk", response_model=SyncArtworkBulkResponse)
+async def sync_device_artwork_bulk(device_id: str, body: SyncArtworkBulkRequest, authorization: Optional[str] = Header(default=None)):
+    payload = body.model_dump(exclude_none=True)
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
@@ -2946,8 +2987,9 @@ async def sync_device_artwork_bulk(device_id: str, payload: dict, authorization:
     }
 
 
-@app.post("/api/devices/{device_id}/sync-system")
-async def sync_device_system(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/devices/{device_id}/sync-system", response_model=SyncRomResponse)
+async def sync_device_system(device_id: str, body: SyncSystemRequest, authorization: Optional[str] = Header(default=None)):
+    payload = body.model_dump(exclude_none=True)
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
@@ -2990,9 +3032,10 @@ async def sync_device_system(device_id: str, payload: dict, authorization: Optio
     return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
 
 
-@app.post("/api/bulk-sync")
-async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(default=None)):
+@app.post("/api/bulk-sync", response_model=BulkSyncResponse)
+async def bulk_sync_drones(body: BulkSyncRequest, authorization: Optional[str] = Header(default=None)):
     """Queue sync actions so selected Drones converge for the selected systems."""
+    payload = body.model_dump(exclude_none=True)
     user = get_current_user(authorization)
     raw_device_ids = payload.get("device_ids") if isinstance(payload.get("device_ids"), list) else []
     raw_systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
@@ -3121,7 +3164,7 @@ async def bulk_sync_drones(payload: dict, authorization: Optional[str] = Header(
     }
 
 
-@app.post("/api/devices/{device_id}/sync-activity")
+@app.post("/api/devices/{device_id}/sync-activity", response_model=StatusResponse)
 async def add_device_sync_activity(device_id: str, payload: dict, authorization: Optional[str] = Header(default=None)):
     get_current_drone(device_id, authorization)
     entry = db.add_rom_sync_activity(device_id, payload)
@@ -3130,7 +3173,7 @@ async def add_device_sync_activity(device_id: str, payload: dict, authorization:
     return {"status": "accepted"}
 
 
-@app.get("/api/devices/{device_id}/sync-activity")
+@app.get("/api/devices/{device_id}/sync-activity", response_model=SyncActivityResponse)
 async def get_device_sync_activity(device_id: str, authorization: Optional[str] = Header(default=None)):
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
@@ -3142,7 +3185,7 @@ async def get_device_sync_activity(device_id: str, authorization: Optional[str] 
     return {"activity": rows}
 
 
-@app.get("/api/sync-activity")
+@app.get("/api/sync-activity", response_model=SyncActivityResponse)
 async def search_sync_activity(
     q: Optional[str] = None,
     status_filter: Optional[str] = None,
@@ -3152,7 +3195,7 @@ async def search_sync_activity(
     return {"activity": db.search_rom_sync_activity(user["id"], query=q, status=status_filter)}
 
 
-@app.get("/api/devices/{device_id}/systems")
+@app.get("/api/devices/{device_id}/systems", response_model=SystemsResponse)
 async def get_device_systems(
     device_id: str,
     authorization: Optional[str] = Header(default=None),
@@ -3170,7 +3213,7 @@ async def get_device_systems(
 
 # ==================== Game Play Logging ====================
 
-@app.post("/api/devices/{device_id}/gameplay")
+@app.post("/api/devices/{device_id}/gameplay", response_model=GameplayLogResponse)
 async def log_gameplay(
     device_id: str,
     gameplay_data: GamePlayLog,
@@ -3208,7 +3251,7 @@ async def log_gameplay(
     }
 
 
-@app.post("/api/devices/{device_id}/game-logs")
+@app.post("/api/devices/{device_id}/game-logs", response_model=StatusResponse)
 async def upload_device_game_logs(device_id: str, payload: DroneGameLogsUpload, authorization: Optional[str] = Header(default=None)):
     """Accept newly detected game launches from a Drone."""
     device = get_current_drone(device_id, authorization)
@@ -3218,7 +3261,7 @@ async def upload_device_game_logs(device_id: str, payload: DroneGameLogsUpload, 
     return {"status": "accepted"}
 
 
-@app.post("/api/devices/{device_id}/log-sources")
+@app.post("/api/devices/{device_id}/log-sources", response_model=StatusResponse)
 async def upload_device_log_sources(device_id: str, payload: DroneLogSourcesUpload, authorization: Optional[str] = Header(default=None)):
     """Accept Drone log source content and persist it for selected Drone log views."""
     device = get_current_drone(device_id, authorization)
@@ -3230,7 +3273,7 @@ async def upload_device_log_sources(device_id: str, payload: DroneLogSourcesUplo
     return {"status": "accepted"}
 
 
-@app.post("/api/devices/{device_id}/log-stream/view")
+@app.post("/api/devices/{device_id}/log-stream/view", response_model=LogStreamResponse)
 async def request_device_log_stream(device_id: str, authorization: Optional[str] = Header(default=None)):
     """Mark a Drone logs view as active so the next heartbeat requests live log streaming."""
     user = get_current_user(authorization)
@@ -3241,7 +3284,7 @@ async def request_device_log_stream(device_id: str, authorization: Optional[str]
     return {"status": "stream_requested", "ttl_seconds": DRONE_LOG_STREAM_TTL_SECONDS}
 
 
-@app.post("/api/devices/{device_id}/emulator-configs")
+@app.post("/api/devices/{device_id}/emulator-configs", response_model=StatusResponse)
 async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorConfigsUpload, authorization: Optional[str] = Header(default=None)):
     """Accept changed emulator configs from a Drone."""
     device = get_current_drone(device_id, authorization)
@@ -3252,7 +3295,7 @@ async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorC
     return {"status": "accepted"}
 
 
-@app.get("/api/devices/{device_id}/gamelogs")
+@app.get("/api/devices/{device_id}/gamelogs", response_model=GamelogsResponse)
 async def get_device_gamelogs(
     device_id: str,
     system_name: Optional[str] = None,
@@ -3275,7 +3318,7 @@ async def get_device_gamelogs(
     return {"gamelogs": gamelogs}
 
 
-@app.get("/api/systems")
+@app.get("/api/systems", response_model=SystemsResponse)
 async def list_systems(authorization: Optional[str] = Header(default=None)):
     """List systems with ROM counts across all user devices."""
     user = get_current_user(authorization)
@@ -3290,7 +3333,7 @@ async def serve_ui():
     return get_ui_html()
 
 
-@app.get("/favicon.ico")
+@app.get("/favicon.ico", response_class=Response)
 async def favicon() -> Response:
     """Return an empty favicon response to avoid browser 404 noise."""
     return Response(status_code=204)
@@ -3306,7 +3349,7 @@ def get_ui_html() -> str:
 
 # ==================== Health Check ====================
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok", "version": APP_VERSION}
