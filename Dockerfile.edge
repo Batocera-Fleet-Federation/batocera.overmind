@@ -1,0 +1,31 @@
+# Edge service image: the always-on mux/relay coordinator.
+#
+# Separate from the REST/Lambda image because the Edge holds persistent
+# connections and (Phase 2) streams relayed bytes -- workloads Lambda cannot run.
+# It shares the overmind package (CA, token verification, store) so identity and
+# device records have one source of truth.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    EDGE_HOST=0.0.0.0 \
+    EDGE_PORT=9443
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt pyproject.toml ./
+COPY src ./src
+COPY VERSION ./VERSION
+RUN pip install --no-cache-dir -r requirements.txt
+
+EXPOSE 9443
+
+# Raw-TLS server (no HTTP endpoint), so liveness is a plain TCP connect.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import os,socket; socket.create_connection(('127.0.0.1', int(os.environ.get('EDGE_PORT','9443'))), 3).close()" || exit 1
+
+CMD ["python", "-m", "overmind.edge.edge_app"]

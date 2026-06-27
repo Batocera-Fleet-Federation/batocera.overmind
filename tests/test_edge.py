@@ -5,11 +5,19 @@ import io
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from overmind.drone_security import hash_drone_token
 from overmind.edge import protocol
 from overmind.edge.auth import AllowAllAuthenticator, DbAuthenticator
+from overmind.edge.edge_app import (
+    EdgeConfig,
+    build_authenticator,
+    build_server,
+    build_ssl_context,
+)
 from overmind.edge.registry import PresenceEntry, PresenceRegistry
 from overmind.edge.server import MuxServer
 
@@ -251,6 +259,78 @@ class MuxServerTests(unittest.TestCase):
                 finally:
                     writer.close()
             self.assertEqual(registry.online_ids(), [])
+
+        asyncio.run(scenario())
+
+
+class EdgeAppTests(unittest.TestCase):
+    def test_config_from_env(self):
+        env = {
+            "EDGE_HOST": "127.0.0.1",
+            "EDGE_PORT": "9000",
+            "EDGE_ALLOW_INSECURE": "1",
+            "EDGE_PING_INTERVAL": "5",
+            "EDGE_AUTH": "allow-all",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            config = EdgeConfig.from_env()
+        self.assertEqual(config.host, "127.0.0.1")
+        self.assertEqual(config.port, 9000)
+        self.assertTrue(config.allow_insecure)
+        self.assertEqual(config.ping_interval, 5.0)
+        self.assertEqual(config.auth_mode, "allow-all")
+
+    def test_build_ssl_context_insecure_returns_none(self):
+        config = EdgeConfig(allow_insecure=True)
+        self.assertIsNone(build_ssl_context(config))
+
+    def test_build_ssl_context_requires_tls_or_insecure(self):
+        config = EdgeConfig(allow_insecure=False, tls_cert=None, tls_key=None)
+        with self.assertRaises(RuntimeError):
+            build_ssl_context(config)
+
+    def test_build_authenticator_allow_all(self):
+        auth = build_authenticator(EdgeConfig(auth_mode="allow-all"))
+        self.assertIsInstance(auth, AllowAllAuthenticator)
+
+    def test_build_authenticator_db_uses_injected_lookup(self):
+        token = "raw-token-123"
+        devices = {"d1": {"drone_token_hash": hash_drone_token(token)}}
+        auth = build_authenticator(EdgeConfig(auth_mode="db"), lookup_device=devices.get)
+        self.assertIsInstance(auth, DbAuthenticator)
+        self.assertTrue(auth.authenticate("d1", token))
+        self.assertFalse(auth.authenticate("d1", "wrong"))
+
+    def test_build_server_end_to_end(self):
+        async def scenario():
+            config = EdgeConfig(
+                host="127.0.0.1",
+                port=0,
+                allow_insecure=True,
+                auth_mode="allow-all",
+                ping_interval=30.0,
+            )
+            registry = PresenceRegistry()
+            server = build_server(config, registry=registry, ssl_context=None)
+            srv = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+            port = srv.sockets[0].getsockname()[1]
+            async with srv:
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                try:
+                    writer.write(
+                        protocol.encode_control(
+                            {"type": protocol.MSG_HELLO, "device_id": "d9", "token": "x"}
+                        )
+                    )
+                    await writer.drain()
+                    _, payload = await asyncio.wait_for(
+                        protocol.read_frame_async(reader), timeout=5
+                    )
+                    ack = protocol.decode_control(payload)
+                    self.assertEqual(ack["type"], protocol.MSG_HELLO_ACK)
+                    self.assertTrue(registry.is_online("d9"))
+                finally:
+                    writer.close()
 
         asyncio.run(scenario())
 
