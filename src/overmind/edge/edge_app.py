@@ -35,6 +35,9 @@ _UNSET = object()
 #: (device_id, online, reflexive_endpoint) -> None
 PresenceWriter = Callable[[str, bool, Optional[str]], None]
 
+#: (session_id, status) -> Awaitable[None] -- relay lifecycle reporter
+TransferStatusWriter = Callable[[str, str], "asyncio.Future"]
+
 
 def _env_bool(default: bool, *names: str) -> bool:
     for name in names:
@@ -156,6 +159,28 @@ def make_db_presence_writer(
     return write
 
 
+def make_db_transfer_status_writer(
+    *, log: Callable[[str], None] = _log
+) -> TransferStatusWriter:
+    """Return an async reporter that records relay transfer lifecycle
+    transitions (active/completed/aborted) to the transfer_sessions table off
+    the event loop. Best-effort: failures are logged, never raised."""
+
+    def _persist(session_id: str, status: str) -> None:
+        try:
+            from overmind.postgres_store import postgres_store
+
+            postgres_store.update_transfer_session(session_id, status=status)
+        except Exception as error:  # noqa: BLE001 -- best-effort persistence
+            log(f"transfer status persist failed for session={session_id}: {error}")
+
+    async def write(session_id: str, status: str) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _persist, session_id, status)
+
+    return write
+
+
 def build_registry(
     log: Callable[[str], None] = _log, presence_writer: Optional[PresenceWriter] = None
 ) -> PresenceRegistry:
@@ -182,6 +207,7 @@ def build_server(
     registry: Optional[PresenceRegistry] = None,
     relay: Optional[RelayHub] = None,
     presence_writer: Optional[PresenceWriter] = None,
+    transfer_status: Optional[TransferStatusWriter] = None,
     ssl_context: object = _UNSET,
     log: Callable[[str], None] = _log,
 ) -> MuxServer:
@@ -205,6 +231,7 @@ def build_server(
         registry=registry,
         relay=relay,
         transfer_secret=config.transfer_secret,
+        transfer_status=transfer_status,
         host=config.host,
         port=config.port,
         ssl_context=ssl_context,
@@ -231,7 +258,10 @@ async def _serve(config: EdgeConfig, server: MuxServer) -> None:
 def main() -> None:
     config = EdgeConfig.from_env()
     presence_writer = make_db_presence_writer(edge_node=config.node_id)
-    server = build_server(config, presence_writer=presence_writer)
+    transfer_status = make_db_transfer_status_writer()
+    server = build_server(
+        config, presence_writer=presence_writer, transfer_status=transfer_status
+    )
     tls_mode = "upstream" if config.allow_insecure and not config.tls_cert else "local"
     _log(
         f"starting edge mux server on {config.host}:{config.port} "

@@ -4343,6 +4343,20 @@ def test_poll_device_status_job_expires_stale_actions(client):
     assert stored["status"] == "failed"
 
 
+def test_poll_device_status_job_expires_transfer_sessions(client, monkeypatch):
+    from overmind import main
+    from overmind import postgres_store as ps
+
+    calls = []
+    monkeypatch.setattr(
+        ps.postgres_store, "expire_transfer_sessions", lambda: (calls.append(1), 2)[1]
+    )
+
+    main.poll_device_status_notifications_once()
+
+    assert calls, "device-status job should sweep stale transfer sessions"
+
+
 def test_device_action_lifecycle(client):
     seed_test_fleet()
     login_response = client.post(

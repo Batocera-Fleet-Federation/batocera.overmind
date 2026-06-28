@@ -20,6 +20,7 @@ from overmind.edge.edge_app import (
     build_server,
     build_ssl_context,
     make_db_presence_writer,
+    make_db_transfer_status_writer,
 )
 from overmind.edge.registry import PresenceEntry, PresenceRegistry
 from overmind.edge.relay import RateLimiter, RelayHub
@@ -591,6 +592,138 @@ class PresenceWiringTests(unittest.TestCase):
             writer = make_db_presence_writer(executor=_SyncExecutor(), log=logs.append)
             writer("d7", True, None)  # must not raise
         self.assertTrue(any("presence persist failed" in message for message in logs))
+
+
+class _RelayConn:
+    """Minimal stand-in for the server's _Connection in relay-handler tests."""
+
+    def __init__(self, conn_id: int):
+        self.id = conn_id
+        self.sent = []
+        self.errors = []
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def send_error(self, message):
+        self.errors.append(message)
+
+
+class RelayLifecycleTests(unittest.TestCase):
+    """The Edge reports relay transfer-session lifecycle transitions."""
+
+    def _server(self, hook):
+        return MuxServer(
+            authenticator=AllowAllAuthenticator(),
+            registry=PresenceRegistry(),
+            transfer_status=hook,
+        )
+
+    def test_active_on_pair_then_completed_on_graceful_close(self):
+        events = []
+        server = self._server(lambda sid, status: events.append((sid, status)))
+
+        async def scenario():
+            sender, receiver = _RelayConn(1), _RelayConn(2)
+            # First leg alone is not ready -> no status yet.
+            await server._relay_open(sender, "A", {"session_id": "sid1", "role": "sender"})
+            self.assertEqual(events, [])
+            # Second leg pairs the session -> active.
+            await server._relay_open(receiver, "B", {"session_id": "sid1", "role": "receiver"})
+            self.assertIn(("sid1", "active"), events)
+            # A peer-initiated close completes it.
+            await server._relay_close(receiver, {"session_id": "sid1"})
+            self.assertIn(("sid1", "completed"), events)
+
+        asyncio.run(scenario())
+
+    def test_aborted_on_connection_teardown(self):
+        events = []
+        server = self._server(lambda sid, status: events.append((sid, status)))
+
+        async def scenario():
+            sender, receiver = _RelayConn(1), _RelayConn(2)
+            await server._relay_open(sender, "A", {"session_id": "sid2", "role": "sender"})
+            await server._relay_open(receiver, "B", {"session_id": "sid2", "role": "receiver"})
+            events.clear()
+            # Sender's connection drops before a graceful close -> aborted.
+            await server._teardown_relay(sender)
+            self.assertIn(("sid2", "aborted"), events)
+
+        asyncio.run(scenario())
+
+    def test_double_close_does_not_re_report(self):
+        events = []
+        server = self._server(lambda sid, status: events.append((sid, status)))
+
+        async def scenario():
+            sender, receiver = _RelayConn(1), _RelayConn(2)
+            await server._relay_open(sender, "A", {"session_id": "sid3", "role": "sender"})
+            await server._relay_open(receiver, "B", {"session_id": "sid3", "role": "receiver"})
+            await server._relay_close(receiver, {"session_id": "sid3"})
+            events.clear()
+            # The other leg's close (and any later teardown) finds nothing.
+            await server._relay_close(sender, {"session_id": "sid3"})
+            await server._teardown_relay(sender)
+            self.assertEqual(events, [])
+
+        asyncio.run(scenario())
+
+    def test_coroutine_hook_scheduled_and_awaited(self):
+        events = []
+
+        async def hook(sid, status):
+            events.append((sid, status))
+
+        server = self._server(hook)
+
+        async def scenario():
+            sender, receiver = _RelayConn(1), _RelayConn(2)
+            await server._relay_open(sender, "A", {"session_id": "sid4", "role": "sender"})
+            await server._relay_open(receiver, "B", {"session_id": "sid4", "role": "receiver"})
+            # Fire-and-forget task runs on the next loop tick.
+            await asyncio.sleep(0)
+            self.assertIn(("sid4", "active"), events)
+
+        asyncio.run(scenario())
+
+    def test_hook_exception_never_breaks_relay(self):
+        def boom(sid, status):
+            raise RuntimeError("db down")
+
+        server = self._server(boom)
+
+        async def scenario():
+            sender, receiver = _RelayConn(1), _RelayConn(2)
+            await server._relay_open(sender, "A", {"session_id": "sid5", "role": "sender"})
+            # Must not raise even though the hook explodes; relay still readies.
+            await server._relay_open(receiver, "B", {"session_id": "sid5", "role": "receiver"})
+            self.assertTrue(any(b"relay_ready" in d for d in receiver.sent))
+
+        asyncio.run(scenario())
+
+
+class TransferStatusWriterTests(unittest.TestCase):
+    def test_build_server_wires_transfer_status(self):
+        config = EdgeConfig(host="127.0.0.1", port=0, allow_insecure=True, auth_mode="allow-all")
+        sentinel = lambda sid, status: None  # noqa: E731
+        server = build_server(config, transfer_status=sentinel, ssl_context=None)
+        self.assertIs(server._transfer_status, sentinel)
+
+    def test_make_db_transfer_status_writer_persists(self):
+        import overmind.postgres_store as ps
+
+        captured = {}
+
+        def fake(session_id, **kwargs):
+            captured.update({"session_id": session_id, **kwargs})
+            return True
+
+        with mock.patch.object(ps.postgres_store, "update_transfer_session", side_effect=fake):
+            writer = make_db_transfer_status_writer()
+            asyncio.run(writer("sid9", "completed"))
+        self.assertEqual(captured["session_id"], "sid9")
+        self.assertEqual(captured["status"], "completed")
 
 
 class RateLimiterTests(unittest.TestCase):

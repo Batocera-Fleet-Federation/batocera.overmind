@@ -71,6 +71,7 @@ class MuxServer:
         registry: PresenceRegistry,
         relay: Optional[RelayHub] = None,
         transfer_secret: Optional[str] = None,
+        transfer_status: Optional[Callable[[str, str], object]] = None,
         host: str = "0.0.0.0",
         port: int = 9443,
         ssl_context=None,
@@ -85,6 +86,9 @@ class MuxServer:
         # Shared SECRET_KEY for offline transfer-token validation. When None
         # (local dev / allow-all), tokens are not enforced.
         self._transfer_secret = transfer_secret
+        # Best-effort lifecycle reporter (session_id, status) for the
+        # transfer_sessions table; may return a coroutine (run fire-and-forget).
+        self._transfer_status = transfer_status
         # device_id -> live connection, for pushing TRANSFER_OFFER to a sender.
         self._connections: Dict[str, _Connection] = {}
         self._host = host
@@ -282,6 +286,33 @@ class MuxServer:
         except (ConnectionError, OSError):
             pass
 
+    def _emit_transfer_status(self, session_id: str, status: str) -> None:
+        """Report a transfer-session lifecycle transition, best-effort.
+
+        Never blocks the relay path: a coroutine result is scheduled
+        fire-and-forget and its exception swallowed, so a slow/flaky DB write
+        can never stall or break a relay.
+        """
+        hook = self._transfer_status
+        if hook is None or not session_id:
+            return
+        try:
+            result = hook(session_id, status)
+        except Exception as error:  # noqa: BLE001 -- best-effort reporting
+            self._log(f"transfer status hook error: {error}")
+            return
+        if asyncio.iscoroutine(result):
+            task = asyncio.ensure_future(result)
+            task.add_done_callback(self._swallow_task_result)
+
+    def _swallow_task_result(self, task: "asyncio.Future") -> None:
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            self._log(f"transfer status write failed: {exc}")
+
     async def _relay_open(self, conn: _Connection, device_id: str, message: dict) -> None:
         session_id = str(message.get("session_id") or "")
         role = str(message.get("role") or "")
@@ -291,6 +322,8 @@ class MuxServer:
         session = self._relay.open_leg(session_id, role, device_id, conn.id, conn.send)
         self._log(f"relay leg open: session={session_id} role={role} device={device_id}")
         if session.is_ready():
+            # Both legs paired: bytes are about to flow over the relay.
+            self._emit_transfer_status(session_id, "active")
             for leg in list(session.legs.values()):
                 try:
                     await leg.send(
@@ -303,7 +336,11 @@ class MuxServer:
 
     async def _relay_close(self, conn: _Connection, message: dict) -> None:
         session_id = str(message.get("session_id") or "")
-        for leg in self._relay.close_session(session_id):
+        legs = self._relay.close_session(session_id)
+        if legs:
+            # A peer asked to close gracefully -> the relay leg finished cleanly.
+            self._emit_transfer_status(session_id, "completed")
+        for leg in legs:
             if leg.conn_id == conn.id:
                 continue
             try:
@@ -317,6 +354,8 @@ class MuxServer:
 
     async def _teardown_relay(self, conn: _Connection) -> None:
         for session_id, peer in self._relay.drop_connection(conn.id):
+            # The connection dropped before a graceful close -> the relay aborted.
+            self._emit_transfer_status(session_id, "aborted")
             try:
                 await peer.send(
                     protocol.encode_control(

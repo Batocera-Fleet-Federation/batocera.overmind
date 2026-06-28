@@ -470,6 +470,14 @@ def poll_device_status_notifications_once() -> None:
             print(f"Expired {expired} stale device action(s) past {DEVICE_ACTION_TIMEOUT_SECONDS}s timeout")
     except Exception as error:
         logger.warning("Failed to expire stale device actions: %s", error)
+    # Sweep transfer sessions (relay/P2P handoffs) that were authorized but never
+    # ran to completion, so they stop showing as pending past their token expiry.
+    try:
+        expired_transfers = postgres_store.expire_transfer_sessions()
+        if expired_transfers:
+            print(f"Expired {expired_transfers} stale transfer session(s) past their token expiry")
+    except Exception as error:
+        logger.warning("Failed to expire stale transfer sessions: %s", error)
 
 
 def _emit_reachability_notification(device: dict, resolvable: bool, answered_by: Optional[str] = None) -> None:
