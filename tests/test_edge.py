@@ -21,8 +21,40 @@ from overmind.edge.edge_app import (
     make_db_presence_writer,
 )
 from overmind.edge.registry import PresenceEntry, PresenceRegistry
+from overmind.edge.relay import RateLimiter, RelayHub
 from overmind.edge.server import MuxServer
 from overmind.postgres_store import PostgresMetadataStore
+
+
+async def _aread_control(reader):
+    _, payload = await asyncio.wait_for(protocol.read_frame_async(reader), timeout=5)
+    return protocol.decode_control(payload)
+
+
+async def _aread_frame(reader):
+    return await asyncio.wait_for(protocol.read_frame_async(reader), timeout=5)
+
+
+def _async_recorder():
+    sent = []
+
+    async def send(data):
+        sent.append(data)
+
+    return sent, send
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+        self.slept = []
+
+    def now(self):
+        return self.t
+
+    async def sleep(self, delay):
+        self.slept.append(delay)
+        self.t += delay
 
 
 class _FakeCursor:
@@ -484,6 +516,137 @@ class PresenceWiringTests(unittest.TestCase):
             writer = make_db_presence_writer(executor=_SyncExecutor(), log=logs.append)
             writer("d7", True, None)  # must not raise
         self.assertTrue(any("presence persist failed" in message for message in logs))
+
+
+class RateLimiterTests(unittest.TestCase):
+    def test_unlimited_never_sleeps(self):
+        clock = _FakeClock()
+
+        async def scenario():
+            limiter = RateLimiter(0, now=clock.now, sleep=clock.sleep)
+            await limiter.acquire(10_000_000)
+
+        asyncio.run(scenario())
+        self.assertEqual(clock.slept, [])
+
+    def test_rate_limit_paces_with_sleep(self):
+        clock = _FakeClock()
+
+        async def scenario():
+            # 1000 bytes/s, burst 1000: first 1000 free, next 1000 waits ~1s.
+            limiter = RateLimiter(1000.0, capacity=1000.0, now=clock.now, sleep=clock.sleep)
+            await limiter.acquire(1000)
+            await limiter.acquire(1000)
+
+        asyncio.run(scenario())
+        self.assertAlmostEqual(clock.t, 1.0, places=3)
+        self.assertEqual(len(clock.slept), 1)
+
+
+class RelayHubTests(unittest.TestCase):
+    def test_pair_forward_and_close(self):
+        async def scenario():
+            hub = RelayHub()
+            sent_sender, send_sender = _async_recorder()
+            sent_receiver, send_receiver = _async_recorder()
+            session = hub.open_leg("s1", "sender", "B", 1, send_sender)
+            self.assertFalse(session.is_ready())
+            session = hub.open_leg("s1", "receiver", "A", 2, send_receiver)
+            self.assertTrue(session.is_ready())
+
+            payload = ("s1".ljust(32, "0")).encode() + b"hello"
+            self.assertTrue(await hub.forward("s1", 2, payload))  # receiver -> sender
+            self.assertEqual(sent_sender, [protocol.encode_frame(protocol.FRAME_DATA, payload)])
+            self.assertEqual(sent_receiver, [])
+            self.assertTrue(await hub.forward("s1", 1, payload))  # sender -> receiver
+            self.assertEqual(len(sent_receiver), 1)
+
+            self.assertEqual(len(hub.close_session("s1")), 2)
+            self.assertEqual(hub.session_count(), 0)
+
+        asyncio.run(scenario())
+
+    def test_forward_without_peer_returns_false(self):
+        async def scenario():
+            hub = RelayHub()
+            _, send = _async_recorder()
+            hub.open_leg("x", "sender", "B", 1, send)
+            return await hub.forward("x", 1, b"0" * 32 + b"data")
+
+        self.assertFalse(asyncio.run(scenario()))
+
+    def test_drop_connection_notifies_peer(self):
+        hub = RelayHub()
+        _, send_s = _async_recorder()
+        _, send_r = _async_recorder()
+        hub.open_leg("s", "sender", "B", 1, send_s)
+        hub.open_leg("s", "receiver", "A", 2, send_r)
+        notify = hub.drop_connection(1)  # sender's connection drops
+        self.assertEqual(len(notify), 1)
+        session_id, peer = notify[0]
+        self.assertEqual(session_id, "s")
+        self.assertEqual(peer.conn_id, 2)
+        # Lone receiver leg lingers until it too drops.
+        self.assertEqual(hub.drop_connection(2), [])
+        self.assertEqual(hub.session_count(), 0)
+
+
+class RelayEndToEndTests(unittest.TestCase):
+    def test_relay_forwards_data_between_two_legs(self):
+        async def scenario():
+            server = MuxServer(
+                authenticator=AllowAllAuthenticator(),
+                registry=PresenceRegistry(),
+                ping_interval=30.0,
+            )
+            srv = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+            port = srv.sockets[0].getsockname()[1]
+            session = "a" * 32
+            async with srv:
+                ra, wa = await asyncio.open_connection("127.0.0.1", port)
+                rb, wb = await asyncio.open_connection("127.0.0.1", port)
+                try:
+                    for writer, device in ((wa, "A"), (wb, "B")):
+                        writer.write(
+                            protocol.encode_control(
+                                {"type": protocol.MSG_HELLO, "device_id": device, "token": "t"}
+                            )
+                        )
+                        await writer.drain()
+                    await _aread_control(ra)  # HELLO_ACK
+                    await _aread_control(rb)
+
+                    def relay_open(role):
+                        return protocol.encode_control(
+                            {"type": protocol.MSG_RELAY_OPEN, "session_id": session, "role": role}
+                        )
+
+                    wa.write(relay_open("receiver"))
+                    await wa.drain()
+                    wb.write(relay_open("sender"))
+                    await wb.drain()
+                    self.assertEqual((await _aread_control(ra))["type"], protocol.MSG_RELAY_READY)
+                    self.assertEqual((await _aread_control(rb))["type"], protocol.MSG_RELAY_READY)
+
+                    # receiver -> sender
+                    wa.write(protocol.encode_relay_data(session, b"hello-from-A"))
+                    await wa.drain()
+                    kind, payload = await _aread_frame(rb)
+                    self.assertEqual(kind, protocol.FRAME_DATA)
+                    sid, data = protocol.parse_relay_data(payload)
+                    self.assertEqual((sid, data), (session, b"hello-from-A"))
+
+                    # sender -> receiver
+                    wb.write(protocol.encode_relay_data(session, b"hi-from-B"))
+                    await wb.drain()
+                    _, payload = await _aread_frame(ra)
+                    _, data = protocol.parse_relay_data(payload)
+                    self.assertEqual(data, b"hi-from-B")
+                finally:
+                    for writer in (wa, wb):
+                        writer.close()
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

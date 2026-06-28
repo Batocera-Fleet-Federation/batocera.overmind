@@ -26,6 +26,7 @@ from typing import Callable, Optional
 
 from .auth import AllowAllAuthenticator, Authenticator, DbAuthenticator
 from .registry import PresenceRegistry
+from .relay import RelayHub
 from .server import MuxServer
 
 _UNSET = object()
@@ -53,6 +54,7 @@ class EdgeConfig:
     ping_interval: float = 20.0
     auth_mode: str = "db"  # "db" | "allow-all" (dev only)
     node_id: str = ""  # identifies this Edge node (for cross-node presence, Phase 2)
+    relay_bw_limit_bps: float = 0  # per-session relay rate cap; 0 = unlimited
 
     @classmethod
     def from_env(cls) -> "EdgeConfig":
@@ -66,6 +68,7 @@ class EdgeConfig:
             ping_interval=float(os.environ.get("EDGE_PING_INTERVAL", "20")),
             auth_mode=(os.environ.get("EDGE_AUTH") or "db").strip().lower(),
             node_id=(os.environ.get("EDGE_NODE_ID") or socket.gethostname()),
+            relay_bw_limit_bps=float(os.environ.get("EDGE_RELAY_BW_LIMIT_BPS", "0")),
         )
 
 
@@ -169,6 +172,7 @@ def build_server(
     *,
     authenticator: Optional[Authenticator] = None,
     registry: Optional[PresenceRegistry] = None,
+    relay: Optional[RelayHub] = None,
     presence_writer: Optional[PresenceWriter] = None,
     ssl_context: object = _UNSET,
     log: Callable[[str], None] = _log,
@@ -184,11 +188,14 @@ def build_server(
         authenticator = build_authenticator(config)
     if registry is None:
         registry = build_registry(log, presence_writer=presence_writer)
+    if relay is None:
+        relay = RelayHub(bw_limit_bps=config.relay_bw_limit_bps)
     if ssl_context is _UNSET:
         ssl_context = build_ssl_context(config)
     return MuxServer(
         authenticator=authenticator,
         registry=registry,
+        relay=relay,
         host=config.host,
         port=config.port,
         ssl_context=ssl_context,

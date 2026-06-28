@@ -1,36 +1,64 @@
 """Asyncio TLS mux server: terminates Drone outbound connections.
 
-Each connected Drone gets one coroutine running :meth:`MuxServer.handle_connection`.
-The flow is:
+Each connected Drone gets one coroutine running :meth:`MuxServer.handle_connection`:
 
 1. Read the first frame; it must be a HELLO. Authenticate ``(device_id, token)``.
 2. Register presence and reply HELLO_ACK with a session id and the Drone's
-   reflexive address (the source ip:port the Edge observed -- this is the
-   STUN-like signal later phases use for hole punching).
-3. Serve the connection: answer PINGs with PONGs, keep ``last_seen`` fresh, and
-   probe liveness with our own PINGs when the link goes quiet.
-4. On disconnect, deregister presence.
+   reflexive address (the source ip:port the Edge observed -- the STUN-like
+   signal later phases use for hole punching).
+3. Serve the connection: answer PINGs, keep ``last_seen`` fresh, probe liveness,
+   and -- for relayed transfers -- pair legs and forward DATA frames between two
+   Drones (see :mod:`overmind.edge.relay`).
+4. On disconnect, deregister presence and tear down any relay sessions.
 
-The server uses stdlib ``asyncio`` (no extra deps) and scales to many idle
-persistent connections far better than a thread-per-connection model. Only the
-per-connection coroutine writes to its own ``writer``, so no write lock is needed
-in Phase 1 (the relay adds one in Phase 2 when multiple coroutines share a writer).
+Uses stdlib ``asyncio`` (no extra deps) and scales to many idle persistent
+connections far better than thread-per-connection. Relay forwarding means one
+connection's coroutine writes to *another* connection's writer, so each
+connection wraps its writer in a :class:`_Connection` with a write lock.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 import uuid
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 from . import protocol
 from .auth import Authenticator
 from .registry import PresenceEntry, PresenceRegistry
+from .relay import RelayHub
 
 
 def _noop(_message: str) -> None:
     return None
+
+
+class _Connection:
+    """A mux connection's writer plus a lock, so cross-connection relay writes
+    never interleave frames on the same socket."""
+
+    _ids = itertools.count(1)
+
+    def __init__(self, writer: asyncio.StreamWriter) -> None:
+        self.writer = writer
+        self.id = next(self._ids)
+        self._lock = asyncio.Lock()
+
+    async def send(self, data: bytes) -> None:
+        async with self._lock:
+            self.writer.write(data)
+            await self.writer.drain()
+
+    async def send_control(self, message: dict) -> None:
+        await self.send(protocol.encode_control(message))
+
+    async def send_error(self, reason: str) -> None:
+        try:
+            await self.send_control({"type": protocol.MSG_ERROR, "reason": reason})
+        except (ConnectionError, OSError):
+            pass
 
 
 class MuxServer:
@@ -39,6 +67,7 @@ class MuxServer:
         *,
         authenticator: Authenticator,
         registry: PresenceRegistry,
+        relay: Optional[RelayHub] = None,
         host: str = "0.0.0.0",
         port: int = 9443,
         ssl_context=None,
@@ -49,6 +78,7 @@ class MuxServer:
     ) -> None:
         self._authenticator = authenticator
         self._registry = registry
+        self._relay = relay if relay is not None else RelayHub()
         self._host = host
         self._port = port
         self._ssl_context = ssl_context
@@ -69,14 +99,15 @@ class MuxServer:
     async def handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        conn = _Connection(writer)
         session_id = uuid.uuid4().hex
         reflexive_addr = self._peername(writer)
         device_id: Optional[str] = None
         try:
-            device_id = await self._handshake(reader, writer, session_id, reflexive_addr)
+            device_id = await self._handshake(reader, conn, session_id, reflexive_addr)
             if device_id is None:
                 return
-            await self._serve(reader, writer, device_id)
+            await self._serve(reader, conn, device_id)
         except (EOFError, ConnectionError, asyncio.IncompleteReadError) as error:
             self._log(f"edge mux connection closed ({device_id}): {error}")
         except protocol.MuxProtocolError as error:
@@ -84,6 +115,7 @@ class MuxServer:
         except Exception as error:  # noqa: BLE001 -- never let one connection crash the server
             self._log(f"edge mux handler error ({device_id}): {error}")
         finally:
+            await self._teardown_relay(conn)
             if device_id is not None:
                 self._registry.deregister(device_id, session_id)
             await self._close(writer)
@@ -91,23 +123,23 @@ class MuxServer:
     async def _handshake(
         self,
         reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
+        conn: _Connection,
         session_id: str,
         reflexive_addr: Optional[str],
     ) -> Optional[str]:
         kind, payload = await protocol.read_frame_async(reader)
         if kind != protocol.FRAME_CONTROL:
-            await self._send_error(writer, "handshake must be a control frame")
+            await conn.send_error("handshake must be a control frame")
             return None
         message = protocol.decode_control(payload)
         if message.get("type") != protocol.MSG_HELLO:
-            await self._send_error(writer, "expected hello")
+            await conn.send_error("expected hello")
             return None
         device_id = str(message.get("device_id") or "").strip()
         token = str(message.get("token") or "")
         authorized = await self._authenticate(device_id, token)
         if not authorized:
-            await self._send_error(writer, "unauthorized")
+            await conn.send_error("unauthorized")
             self._log(f"edge mux auth rejected for device {device_id!r}")
             return None
         entry = PresenceEntry(
@@ -118,21 +150,18 @@ class MuxServer:
             lan_addrs=list(message.get("lan_addrs") or []),
         )
         self._registry.register(entry)
-        await self._send_control(
-            writer,
+        await conn.send_control(
             {
                 "type": protocol.MSG_HELLO_ACK,
                 "session_id": session_id,
                 "reflexive_addr": reflexive_addr,
                 "ping_interval": self._ping_interval,
-            },
+            }
         )
         self._log(f"edge mux connected: device={device_id} reflexive={reflexive_addr}")
         return device_id
 
-    async def _serve(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, device_id: str
-    ) -> None:
+    async def _serve(self, reader: asyncio.StreamReader, conn: _Connection, device_id: str) -> None:
         missed = 0
         while True:
             try:
@@ -144,38 +173,87 @@ class MuxServer:
                 if missed >= self._max_missed_pings:
                     self._log(f"edge mux idle timeout: device={device_id}")
                     return
-                await self._send_control(writer, {"type": protocol.MSG_PING, "t": self._now()})
+                await conn.send_control({"type": protocol.MSG_PING, "t": self._now()})
                 continue
             missed = 0
             self._registry.touch(device_id)
-            if kind != protocol.FRAME_CONTROL:
-                continue  # DATA frames are handled by the relay (Phase 2)
+            if kind == protocol.FRAME_DATA:
+                await self._relay_data(conn, payload)
+                continue
             message = protocol.decode_control(payload)
-            message_type = message.get("type")
-            if message_type == protocol.MSG_PING:
-                await self._send_control(writer, {"type": protocol.MSG_PONG, "t": message.get("t")})
-            elif message_type == protocol.MSG_BYE:
-                return
-            # PONG and anything else: liveness already refreshed via touch().
+            if await self._handle_control(conn, device_id, message):
+                return  # BYE
+
+    async def _relay_data(self, conn: _Connection, payload: bytes) -> None:
+        try:
+            session_id, _ = protocol.parse_relay_data(payload)
+        except protocol.MuxProtocolError:
+            return  # malformed relay frame; ignore
+        await self._relay.forward(session_id, conn.id, payload)
+
+    async def _handle_control(self, conn: _Connection, device_id: str, message: dict) -> bool:
+        """Handle one control message. Returns True if the connection should close."""
+        message_type = message.get("type")
+        if message_type == protocol.MSG_PING:
+            await conn.send_control({"type": protocol.MSG_PONG, "t": message.get("t")})
+        elif message_type == protocol.MSG_BYE:
+            return True
+        elif message_type == protocol.MSG_RELAY_OPEN:
+            await self._relay_open(conn, device_id, message)
+        elif message_type == protocol.MSG_RELAY_CLOSE:
+            await self._relay_close(conn, message)
+        # PONG and anything else: liveness already refreshed via touch().
+        return False
+
+    async def _relay_open(self, conn: _Connection, device_id: str, message: dict) -> None:
+        session_id = str(message.get("session_id") or "")
+        role = str(message.get("role") or "")
+        if not session_id or role not in ("sender", "receiver"):
+            await conn.send_error("invalid relay_open")
+            return
+        session = self._relay.open_leg(session_id, role, device_id, conn.id, conn.send)
+        self._log(f"relay leg open: session={session_id} role={role} device={device_id}")
+        if session.is_ready():
+            for leg in list(session.legs.values()):
+                try:
+                    await leg.send(
+                        protocol.encode_control(
+                            {"type": protocol.MSG_RELAY_READY, "session_id": session_id}
+                        )
+                    )
+                except (ConnectionError, OSError):
+                    pass
+
+    async def _relay_close(self, conn: _Connection, message: dict) -> None:
+        session_id = str(message.get("session_id") or "")
+        for leg in self._relay.close_session(session_id):
+            if leg.conn_id == conn.id:
+                continue
+            try:
+                await leg.send(
+                    protocol.encode_control(
+                        {"type": protocol.MSG_RELAY_CLOSE, "session_id": session_id}
+                    )
+                )
+            except (ConnectionError, OSError):
+                pass
+
+    async def _teardown_relay(self, conn: _Connection) -> None:
+        for session_id, peer in self._relay.drop_connection(conn.id):
+            try:
+                await peer.send(
+                    protocol.encode_control(
+                        {"type": protocol.MSG_RELAY_CLOSE, "session_id": session_id}
+                    )
+                )
+            except (ConnectionError, OSError):
+                pass
 
     async def _authenticate(self, device_id: str, token: str) -> bool:
         # Auth may hit the DB; run it off the event loop so one slow lookup does
         # not stall other connections.
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._authenticator.authenticate, device_id, token)
-
-    async def _send(self, writer: asyncio.StreamWriter, data: bytes) -> None:
-        writer.write(data)
-        await writer.drain()
-
-    async def _send_control(self, writer: asyncio.StreamWriter, message: dict) -> None:
-        await self._send(writer, protocol.encode_control(message))
-
-    async def _send_error(self, writer: asyncio.StreamWriter, reason: str) -> None:
-        try:
-            await self._send_control(writer, {"type": protocol.MSG_ERROR, "reason": reason})
-        except (ConnectionError, OSError):
-            pass
 
     @staticmethod
     def _peername(writer: asyncio.StreamWriter) -> Optional[str]:

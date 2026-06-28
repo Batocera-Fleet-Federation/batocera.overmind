@@ -31,14 +31,21 @@ from .protocol import (
     MSG_PING,
     MSG_PONG,
     MSG_PRESENCE,
+    MSG_RELAY_CLOSE,
+    MSG_RELAY_OPEN,
+    MSG_RELAY_READY,
+    RELAY_SESSION_ID_LEN,
     MuxProtocolError,
     decode_control,
     encode_control,
     encode_frame,
+    encode_relay_data,
+    parse_relay_data,
     read_frame,
 )
 from .auth import Authenticator, DbAuthenticator
 from .registry import PresenceEntry, PresenceRegistry
+from .relay import RateLimiter, RelayHub, RelayLeg, RelaySession
 
 __all__ = [
     "FRAME_CONTROL",
@@ -51,13 +58,23 @@ __all__ = [
     "MSG_PING",
     "MSG_PONG",
     "MSG_PRESENCE",
+    "MSG_RELAY_CLOSE",
+    "MSG_RELAY_OPEN",
+    "MSG_RELAY_READY",
+    "RELAY_SESSION_ID_LEN",
     "MuxProtocolError",
     "decode_control",
     "encode_control",
     "encode_frame",
+    "encode_relay_data",
+    "parse_relay_data",
     "read_frame",
     "Authenticator",
     "DbAuthenticator",
     "PresenceEntry",
     "PresenceRegistry",
+    "RateLimiter",
+    "RelayHub",
+    "RelayLeg",
+    "RelaySession",
 ]

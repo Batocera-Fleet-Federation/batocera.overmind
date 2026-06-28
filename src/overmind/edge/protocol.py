@@ -38,6 +38,13 @@ MSG_PONG = "pong"
 MSG_PRESENCE = "presence"
 MSG_BYE = "bye"
 MSG_ERROR = "error"
+MSG_RELAY_OPEN = "relay_open"
+MSG_RELAY_READY = "relay_ready"
+MSG_RELAY_CLOSE = "relay_close"
+
+#: A relay DATA frame's payload is a fixed-width transfer session id (uuid4 hex)
+#: followed by the chunk bytes, so the Edge can route it to the paired leg.
+RELAY_SESSION_ID_LEN = 32
 
 
 class MuxProtocolError(Exception):
@@ -92,6 +99,21 @@ def read_frame(read_exactly: Callable[[int], bytes]) -> Tuple[int, bytes]:
     if len(payload) != length:
         raise MuxProtocolError("truncated frame payload")
     return kind, payload
+
+
+def encode_relay_data(session_id: str, data: bytes) -> bytes:
+    """Encode a relay DATA frame: ``[FRAME_DATA][len][session_id(32) + data]``."""
+    sid = str(session_id).encode("ascii")
+    if len(sid) != RELAY_SESSION_ID_LEN:
+        raise MuxProtocolError(f"relay session id must be {RELAY_SESSION_ID_LEN} chars")
+    return encode_frame(FRAME_DATA, sid + data)
+
+
+def parse_relay_data(payload: bytes) -> Tuple[str, bytes]:
+    """Split a relay DATA frame payload into ``(session_id, data)``."""
+    if len(payload) < RELAY_SESSION_ID_LEN:
+        raise MuxProtocolError("relay data frame shorter than session id")
+    return payload[:RELAY_SESSION_ID_LEN].decode("ascii", "replace"), payload[RELAY_SESSION_ID_LEN:]
 
 
 async def read_frame_async(reader: Any) -> Tuple[int, bytes]:
