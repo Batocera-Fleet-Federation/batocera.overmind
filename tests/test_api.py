@@ -1092,9 +1092,26 @@ def test_drone_reachability_notification_type_registered():
     assert 'data-notify-type="drone_reachability"' in html
 
 
+def test_public_reachability_disabled_by_default(monkeypatch):
+    from overmind import main as overmind_main
+
+    assert overmind_main.PUBLIC_REACHABILITY_ENABLED is False  # outbound-only default
+    called = {"n": 0}
+
+    def count(**kwargs):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr(overmind_main.postgres_store, "list_all_approved_devices", count)
+    result = overmind_main.poll_public_reachability_once()
+    assert result["status"] == "disabled"
+    assert called["n"] == 0  # short-circuits before any probing / DB read
+
+
 def test_reachability_poll_emits_notification_on_status_flip(monkeypatch):
     from overmind import main as overmind_main
 
+    monkeypatch.setattr(overmind_main, "PUBLIC_REACHABILITY_ENABLED", True)  # probe is off by default now
     device = {
         "id": "dev-1", "device_id": "drone-x", "device_name": "Drone X",
         "swarm_id": "swarm-1", "api_port": 443,
@@ -1139,6 +1156,7 @@ def test_reachability_identity_check_handles_shared_public_ip(monkeypatch):
     only the forwarded Drone is Resolvable and the other is correctly Not Resolvable."""
     from overmind import main as overmind_main
 
+    monkeypatch.setattr(overmind_main, "PUBLIC_REACHABILITY_ENABLED", True)  # probe is off by default now
     drone_a = {
         "id": "a", "device_id": "drone-a", "device_name": "A", "swarm_id": "s", "api_port": 443,
         "network": {"public_ip": "9.9.9.9"}, "public_reachability": {"resolvable": False},

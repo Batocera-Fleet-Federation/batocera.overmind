@@ -146,6 +146,13 @@ PUBLIC_REACHABILITY_RUN_BUDGET_SECONDS = max(1.0, float(os.getenv("PUBLIC_REACHA
 # 0 = probe every approved Drone each run; a positive value caps work per run and
 # relies on oldest-checked-first ordering to round-robin a very large fleet.
 PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN = max(0, int(os.getenv("PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN", "0")))
+# Outbound-only by default: Drones reach each other via LAN / hole-punch / relay,
+# so Overmind no longer probes inbound public reachability unless explicitly
+# enabled (for deployments where Drones are port-forwarded and want direct WAN).
+PUBLIC_REACHABILITY_ENABLED = (
+    os.getenv("OVERMIND_PUBLIC_REACHABILITY_ENABLED", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 # Lifetime of a relayed-transfer authorization token (and its session offer).
 TRANSFER_TOKEN_TTL_SECONDS = max(30, int(os.getenv("TRANSFER_TOKEN_TTL_SECONDS", "300")))
@@ -506,7 +513,12 @@ def poll_public_reachability_once() -> dict:
     stops issuing work once a hard wall-clock budget is hit so a single run can never
     exceed the 60s EventBridge cadence and back up. Only Drones whose Resolvable /
     Not Resolvable status actually changed are written back, keeping RDS writes minimal.
+
+    Disabled by default (outbound-only model): set OVERMIND_PUBLIC_REACHABILITY_ENABLED
+    to re-enable inbound probing for port-forwarded fleets.
     """
+    if not PUBLIC_REACHABILITY_ENABLED:
+        return {"job": "public-reachability", "status": "disabled", "checked": 0, "changed": 0}
     limit = PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN
     devices = postgres_store.list_all_approved_devices(limit=limit, oldest_checked_first=True) or []
     if not devices:
@@ -618,6 +630,8 @@ def start_public_reachability_poller() -> None:
     Not Resolvable locally. Lambda does not call this (start_pollers is False there).
     """
     global _PUBLIC_REACHABILITY_THREAD
+    if not PUBLIC_REACHABILITY_ENABLED:
+        return  # outbound-only default; no inbound probing
     interval_seconds = max(0, int(os.getenv("PUBLIC_REACHABILITY_POLL_INTERVAL_SECONDS", str(PUBLIC_REACHABILITY_POLL_INTERVAL_SECONDS))))
     if interval_seconds == 0 or (_PUBLIC_REACHABILITY_THREAD and _PUBLIC_REACHABILITY_THREAD.is_alive()):
         return
