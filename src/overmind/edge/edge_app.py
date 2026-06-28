@@ -28,6 +28,7 @@ from .auth import AllowAllAuthenticator, Authenticator, DbAuthenticator
 from .registry import PresenceRegistry
 from .relay import RelayHub
 from .server import MuxServer
+from .stun import start_stun_reflector
 
 _UNSET = object()
 
@@ -56,6 +57,7 @@ class EdgeConfig:
     node_id: str = ""  # identifies this Edge node (for cross-node presence, Phase 2)
     relay_bw_limit_bps: float = 0  # per-session relay rate cap; 0 = unlimited
     transfer_secret: Optional[str] = None  # shared SECRET_KEY for token validation
+    stun_port: int = 9444  # UDP STUN reflector port for hole punching; 0 disables
 
     @classmethod
     def from_env(cls) -> "EdgeConfig":
@@ -74,6 +76,7 @@ class EdgeConfig:
                 os.environ.get("EDGE_TRANSFER_SECRET") or os.environ.get("SECRET_KEY") or ""
             ).strip()
             or None,
+            stun_port=int(os.environ.get("EDGE_STUN_PORT", "9444")),
         )
 
 
@@ -210,6 +213,21 @@ def build_server(
     )
 
 
+async def _serve(config: EdgeConfig, server: MuxServer) -> None:
+    """Run the mux server plus the UDP STUN reflector (for hole punching)."""
+    stun_transport = None
+    if config.stun_port:
+        try:
+            stun_transport = await start_stun_reflector(config.host, config.stun_port, log=_log)
+        except OSError as error:
+            _log(f"STUN reflector failed to bind on :{config.stun_port}: {error}")
+    try:
+        await server.serve_forever()
+    finally:
+        if stun_transport is not None:
+            stun_transport.close()
+
+
 def main() -> None:
     config = EdgeConfig.from_env()
     presence_writer = make_db_presence_writer(edge_node=config.node_id)
@@ -217,9 +235,9 @@ def main() -> None:
     tls_mode = "upstream" if config.allow_insecure and not config.tls_cert else "local"
     _log(
         f"starting edge mux server on {config.host}:{config.port} "
-        f"(auth={config.auth_mode}, tls={tls_mode})"
+        f"(auth={config.auth_mode}, tls={tls_mode}, stun={config.stun_port or 'off'})"
     )
-    asyncio.run(server.serve_forever())
+    asyncio.run(_serve(config, server))
 
 
 if __name__ == "__main__":

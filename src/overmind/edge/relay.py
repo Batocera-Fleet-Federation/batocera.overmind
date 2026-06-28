@@ -142,6 +142,12 @@ class RelayHub:
             return False
         return True
 
+    def peer_leg(self, session_id: str, conn_id: int) -> Optional[RelayLeg]:
+        """Return the other leg of a session relative to ``conn_id`` (for routing
+        signaling control frames), or None."""
+        session = self._sessions.get(session_id)
+        return session.peer_of_conn(conn_id) if session else None
+
     def close_session(self, session_id: str) -> List[RelayLeg]:
         session = self._sessions.pop(session_id, None)
         return list(session.legs.values()) if session else []

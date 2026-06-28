@@ -34,6 +34,7 @@ from .protocol import (
     MSG_RELAY_CLOSE,
     MSG_RELAY_OPEN,
     MSG_RELAY_READY,
+    MSG_SIGNAL,
     MSG_TRANSFER_ERROR,
     MSG_TRANSFER_OFFER,
     MSG_TRANSFER_REQUEST,
@@ -49,6 +50,7 @@ from .protocol import (
 from .auth import Authenticator, DbAuthenticator
 from .registry import PresenceEntry, PresenceRegistry
 from .relay import RateLimiter, RelayHub, RelayLeg, RelaySession
+from .stun import StunReflectorProtocol, start_stun_reflector
 
 __all__ = [
     "FRAME_CONTROL",
@@ -64,6 +66,7 @@ __all__ = [
     "MSG_RELAY_CLOSE",
     "MSG_RELAY_OPEN",
     "MSG_RELAY_READY",
+    "MSG_SIGNAL",
     "MSG_TRANSFER_ERROR",
     "MSG_TRANSFER_OFFER",
     "MSG_TRANSFER_REQUEST",
@@ -83,4 +86,6 @@ __all__ = [
     "RelayHub",
     "RelayLeg",
     "RelaySession",
+    "StunReflectorProtocol",
+    "start_stun_reflector",
 ]

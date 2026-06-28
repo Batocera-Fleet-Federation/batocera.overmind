@@ -215,8 +215,21 @@ class MuxServer:
             await self._relay_close(conn, message)
         elif message_type == protocol.MSG_TRANSFER_REQUEST:
             await self._transfer_request(conn, device_id, message)
+        elif message_type == protocol.MSG_SIGNAL:
+            await self._signal(conn, message)
         # PONG and anything else: liveness already refreshed via touch().
         return False
+
+    async def _signal(self, conn: _Connection, message: dict) -> None:
+        """Forward a hole-punch signaling message to the session's other leg."""
+        session_id = str(message.get("session_id") or "")
+        peer = self._relay.peer_leg(session_id, conn.id)
+        if peer is None:
+            return
+        try:
+            await peer.send(protocol.encode_control(message))
+        except (ConnectionError, OSError):
+            pass
 
     async def _transfer_request(self, conn: _Connection, device_id: str, message: dict) -> None:
         """Receiver asks to pull an asset: validate the token (offline, with the

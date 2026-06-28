@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from overmind.edge.edge_app import (
 from overmind.edge.registry import PresenceEntry, PresenceRegistry
 from overmind.edge.relay import RateLimiter, RelayHub
 from overmind.edge.server import MuxServer
+from overmind.edge.stun import start_stun_reflector
 from overmind.postgres_store import PostgresMetadataStore
 from overmind.transfer_tokens import mint_transfer_token
 
@@ -846,6 +848,95 @@ class TransferSignalingTests(unittest.TestCase):
                     self.assertIn("offline", error["reason"])
                 finally:
                     r_writer.close()
+
+        asyncio.run(scenario())
+
+
+class StunReflectorTests(unittest.TestCase):
+    def test_reflects_observed_source_address(self):
+        async def scenario():
+            reflector = await start_stun_reflector("127.0.0.1", 0)
+            port = reflector.get_extra_info("sockname")[1]
+            loop = asyncio.get_running_loop()
+            received = loop.create_future()
+
+            class _Client(asyncio.DatagramProtocol):
+                def datagram_received(self, data, addr):
+                    if not received.done():
+                        received.set_result(data)
+
+            client, _ = await loop.create_datagram_endpoint(
+                _Client, remote_addr=("127.0.0.1", port)
+            )
+            try:
+                client.sendto(b"bind")
+                data = await asyncio.wait_for(received, timeout=5)
+                payload = json.loads(data.decode())
+                self.assertEqual(payload["ip"], "127.0.0.1")
+                self.assertIsInstance(payload["port"], int)
+                self.assertGreater(payload["port"], 0)
+            finally:
+                client.close()
+                reflector.close()
+
+        asyncio.run(scenario())
+
+
+class SignalForwardingTests(unittest.TestCase):
+    @staticmethod
+    async def _connect(port, device_id):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            protocol.encode_control(
+                {"type": protocol.MSG_HELLO, "device_id": device_id, "token": "t"}
+            )
+        )
+        await writer.drain()
+        await _aread_control(reader)  # HELLO_ACK
+        return reader, writer
+
+    def test_signal_forwarded_to_session_peer(self):
+        session = "d" * 32
+
+        async def scenario():
+            server = MuxServer(
+                authenticator=AllowAllAuthenticator(),
+                registry=PresenceRegistry(),
+                ping_interval=30.0,
+            )
+            srv = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+            port = srv.sockets[0].getsockname()[1]
+            async with srv:
+                ra, wa = await self._connect(port, "A")
+                rb, wb = await self._connect(port, "B")
+                try:
+                    for writer, role in ((wa, "receiver"), (wb, "sender")):
+                        open_msg = {
+                            "type": protocol.MSG_RELAY_OPEN,
+                            "session_id": session,
+                            "role": role,
+                        }
+                        writer.write(protocol.encode_control(open_msg))
+                        await writer.drain()
+                    await _aread_control(ra)  # RELAY_READY
+                    await _aread_control(rb)
+
+                    wa.write(
+                        protocol.encode_control(
+                            {
+                                "type": protocol.MSG_SIGNAL,
+                                "session_id": session,
+                                "candidate": {"udp": "203.0.113.7:5000"},
+                            }
+                        )
+                    )
+                    await wa.drain()
+                    signal = await _aread_control(rb)
+                    self.assertEqual(signal["type"], protocol.MSG_SIGNAL)
+                    self.assertEqual(signal["candidate"], {"udp": "203.0.113.7:5000"})
+                finally:
+                    for writer in (wa, wb):
+                        writer.close()
 
         asyncio.run(scenario())
 
