@@ -1919,6 +1919,21 @@ def test_create_transfer_drone_token_rejects_cross_swarm_source(client):
     assert resp.status_code == 404
 
 
+def test_swarm_payload_exposes_edge_online_for_relay_selection(client):
+    client.post("/api/auth/register", json={"email": "eo@example.com", "username": "eo-at-example.com", "password": "eopass12345"})
+    owner_token = client.post(
+        "/api/auth/login", json={"email": "eo@example.com", "username": "eo-at-example.com", "password": "eopass12345"}
+    ).json()["access_token"]
+    swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {owner_token}"}).json()["swarms"][0]["id"]
+    owner = db.get_user_by_email("eo@example.com")
+    db.create_device(owner["id"], "eo-a", "A", {"ip_address": "10.0.0.2"}, raw_token="eo-a-token", swarm_id=swarm_id)
+    db.create_device(owner["id"], "eo-b", "B", {"ip_address": "10.0.0.3"}, raw_token="eo-b-token", swarm_id=swarm_id)
+
+    swarm = db.get_swarm_for_device("eo-a")
+    assert len(swarm) >= 2
+    assert all("edge_online" in peer for peer in swarm)  # the field a Drone selects relay sources by
+
+
 def test_hive_lists_public_swarms_without_private_owner_data(client):
     client.post("/api/auth/register", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123", "full_name": "Hive Owner"})
     owner_token = client.post("/api/auth/login", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123"}).json()["access_token"]

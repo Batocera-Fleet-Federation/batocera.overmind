@@ -2304,6 +2304,9 @@ class OvermindDatabase:
                 "scheme": scheme,
                 "reachable_url": peer.get("reachable_url"),
                 "online": online,
+                # Reachable via the Edge relay even without a public/port-forwarded
+                # endpoint -- lets a Drone pick it as a relay source.
+                "edge_online": bool(peer.get("edge_online")),
                 "rom_systems": peer.get("rom_systems") or [],
                 "last_speed_sample": peer.get("last_speed_sample"),
             })
