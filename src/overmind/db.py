@@ -452,6 +452,24 @@ class OvermindDatabase:
             ]
         return {"events": rows[offset:offset + limit], "total": len(rows)}
 
+    def list_transfer_sessions(
+        self, status: Optional[str] = None, limit: int = 50, offset: int = 0
+    ) -> dict:
+        """Return a page of transfer sessions newest-first for admin monitoring.
+
+        Transfer sessions are Postgres-only (lean path); without a DB this is
+        empty rather than synthesised from the in-memory store.
+        """
+        limit = max(1, min(int(limit or 50), 200))
+        offset = max(0, int(offset or 0))
+        if postgres_store.available():
+            page = postgres_store.list_recent_transfer_sessions(
+                status=status, limit=limit, offset=offset
+            )
+            if page is not None:
+                return page
+        return {"transfers": [], "total": 0}
+
     def record_landing_visit(self, ip: str, user_agent: Optional[str] = None) -> None:
         """Log an anonymous landing-page visit by client IP (best-effort)."""
         if not ip:

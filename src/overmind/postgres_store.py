@@ -2471,6 +2471,66 @@ class PostgresMetadataStore:
             "expires_at_epoch": int(row[10]) if row[10] is not None else None,
         }
 
+    def list_recent_transfer_sessions(
+        self, *, status: Optional[str] = None, limit: int = 50, offset: int = 0
+    ) -> Optional[dict]:
+        """Recent transfer sessions newest-first for admin monitoring.
+
+        Returns ``{"transfers": [...], "total": N}`` or None when no DB.
+        """
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        row_limit = max(1, min(int(limit or 50), 200))
+        row_offset = max(0, int(offset or 0))
+        where = ""
+        params: list = []
+        norm_status = str(status or "").strip().lower()
+        if norm_status:
+            where = "WHERE status = %s"
+            params = [norm_status]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT count(*) FROM transfer_sessions {where}", params)
+                total = cur.fetchone()[0]
+                cur.execute(
+                    f"""
+                    SELECT id, swarm_id, from_device, to_device, asset, transport_used,
+                           status, bytes_total, bytes_done, error,
+                           extract(epoch FROM expires_at), extract(epoch FROM created_at),
+                           extract(epoch FROM updated_at)
+                    FROM transfer_sessions
+                    {where}
+                    ORDER BY updated_at DESC, created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    params + [row_limit, row_offset],
+                )
+                transfers = []
+                for row in cur.fetchall():
+                    try:
+                        asset = json.loads(row[4]) if row[4] else {}
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        asset = {}
+                    transfers.append(
+                        {
+                            "session_id": row[0],
+                            "swarm_id": row[1],
+                            "from_device": row[2],
+                            "to_device": row[3],
+                            "asset": asset,
+                            "transport_used": row[5],
+                            "status": row[6],
+                            "bytes_total": row[7],
+                            "bytes_done": row[8],
+                            "error": row[9],
+                            "expires_at_epoch": int(row[10]) if row[10] is not None else None,
+                            "created_at_epoch": int(row[11]) if row[11] is not None else None,
+                            "updated_at_epoch": int(row[12]) if row[12] is not None else None,
+                        }
+                    )
+        return {"transfers": transfers, "total": total}
+
     def update_transfer_session(
         self,
         session_id: str,

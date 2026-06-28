@@ -62,16 +62,20 @@ class _FakeClock:
 
 
 class _FakeCursor:
-    def __init__(self, rowcount=1, fetchone_result=None):
+    def __init__(self, rowcount=1, fetchone_result=None, fetchall_result=None):
         self.executed = []
         self.rowcount = rowcount
         self.fetchone_result = fetchone_result
+        self.fetchall_result = fetchall_result or []
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
 
     def fetchone(self):
         return self.fetchone_result
+
+    def fetchall(self):
+        return self.fetchall_result
 
     def __enter__(self):
         return self
@@ -539,6 +543,27 @@ class TransferStoreTests(unittest.TestCase):
         store = self._store(cursor)
         self.assertEqual(store.expire_transfer_sessions(), 3)
         self.assertIn("expired", cursor.executed[0][0])
+
+    def test_list_recent_transfer_sessions_decodes_and_filters(self):
+        row = (
+            "s" * 32, "sw", "B", "A", '{"kind":"rom","relative_path":"g"}',
+            "relay", "completed", 100, 100, None,
+            1_700_000_100.0, 1_700_000_000.0, 1_700_000_050.0,
+        )
+        cursor = _FakeCursor(fetchone_result=(1,), fetchall_result=[row])
+        store = self._store(cursor)
+        page = store.list_recent_transfer_sessions(status="completed", limit=10)
+        self.assertEqual(page["total"], 1)
+        transfer = page["transfers"][0]
+        self.assertEqual(transfer["session_id"], "s" * 32)
+        self.assertEqual(transfer["asset"], {"kind": "rom", "relative_path": "g"})
+        self.assertEqual(transfer["transport_used"], "relay")
+        self.assertEqual(transfer["status"], "completed")
+        self.assertEqual(transfer["created_at_epoch"], 1_700_000_000)
+        # status filter is applied in SQL
+        count_sql = cursor.executed[0][0]
+        self.assertIn("WHERE status = %s", count_sql)
+        self.assertEqual(cursor.executed[0][1], ["completed"])
 
     def test_no_connection_is_safe(self):
         store = PostgresMetadataStore()

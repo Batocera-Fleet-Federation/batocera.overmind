@@ -1530,6 +1530,30 @@ async def admin_audit_log(
     return {"audit_events": page["events"], "total": page["total"], "limit": limit, "offset": offset}
 
 
+@app.get("/api/admin/transfers", response_model=GenericObjectResponse)
+async def admin_transfers(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Recent peer transfer sessions (relay/P2P), newest first (super admin only).
+
+    Surfaces which transport served each transfer and its lifecycle status so the
+    outbound-only data plane is observable without router/log access.
+    """
+    require_super_admin(authorization)
+    limit = max(1, min(int(limit or 50), 200))
+    offset = max(0, int(offset or 0))
+    page = db.list_transfer_sessions(status=status, limit=limit, offset=offset)
+    return {
+        "transfers": page["transfers"],
+        "total": page["total"],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 @app.get("/api/admin/landing-visits", response_model=AdminLandingVisitsResponse)
 async def admin_landing_visits(
     limit: int = 20,

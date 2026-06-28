@@ -1051,6 +1051,24 @@ def test_admin_audit_log_and_sync_summary_are_super_admin_only(client):
     assert "total" in body and "by_status" in body
 
 
+def test_admin_transfers_listing_is_super_admin_only(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
+    admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "reg@example.com", "username": "reg", "password": "testpass123"})
+    reg_token = client.post("/api/auth/login", json={"email": "reg@example.com", "password": "testpass123"}).json()["access_token"]
+
+    assert client.get("/api/admin/transfers", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
+
+    resp = client.get("/api/admin/transfers", headers={"Authorization": f"Bearer {admin_token}"})
+    assert resp.status_code == 200
+    payload = resp.json()
+    # Transfer sessions are Postgres-only, so the in-memory test store is empty.
+    assert payload["transfers"] == []
+    assert payload["total"] == 0
+    assert payload["limit"] == 50
+    assert payload["offset"] == 0
+
+
 def test_landing_visits_counted_by_unique_ip(client):
     client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
     admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
