@@ -1775,6 +1775,102 @@ def test_drone_ownership_claim_invalid_credentials_and_cross_swarm_admin(client,
     assert action.status_code == 200
 
 
+def _claim_drone(client, headers, email, username, password, device_id, name):
+    return client.post(
+        "/api/drones/claim-ownership",
+        json={
+            "device_id": device_id,
+            "device_name": name,
+            "email": email,
+            "username": username,
+            "password": password,
+            "batocera_info": {"ip_address": "10.0.0.9"},
+        },
+    )
+
+
+def test_create_transfer_mints_session_and_token(client):
+    email, username, password = "xfer@example.com", "xfer-at-example.com", "xferpass123"
+    client.post("/api/auth/register", json={"email": email, "username": username, "password": password})
+    token = client.post(
+        "/api/auth/login", json={"email": email, "username": username, "password": password}
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    for device_id, name in (("xfer-recv", "Receiver"), ("xfer-src", "Source")):
+        claimed = _claim_drone(client, headers, email, username, password, device_id, name)
+        assert claimed.status_code == 200, claimed.text
+
+    resp = client.post(
+        "/api/devices/xfer-recv/transfers",
+        headers=headers,
+        json={
+            "source_device_id": "xfer-src",
+            "asset": {
+                "kind": "rom",
+                "system": "snes",
+                "relative_path": "game.sfc",
+                "expected_size": 1024,
+                "expected_hash": "fp",
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["session_id"]) == 32
+    assert body["source_device_id"] == "xfer-src"
+    assert body["target_device_id"] == "xfer-recv"
+    assert body["asset"]["relative_path"] == "game.sfc"
+    assert body["expires_at"] > 0
+
+    from overmind import auth as auth_utils
+    from overmind.transfer_tokens import verify_transfer_token
+
+    payload = verify_transfer_token(auth_utils.SECRET_KEY, body["token"])
+    assert payload is not None
+    assert payload["sid"] == body["session_id"]
+    assert payload["from"] == "xfer-src"
+    assert payload["to"] == "xfer-recv"
+    assert payload["asset"]["relative_path"] == "game.sfc"
+
+
+def test_create_transfer_rejects_same_source_and_target(client):
+    email, username, password = "xfer-solo@example.com", "xfer-solo-at-example.com", "solopass123"
+    client.post("/api/auth/register", json={"email": email, "username": username, "password": password})
+    token = client.post(
+        "/api/auth/login", json={"email": email, "username": username, "password": password}
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert _claim_drone(client, headers, email, username, password, "solo-drone", "Solo").status_code == 200
+
+    resp = client.post(
+        "/api/devices/solo-drone/transfers",
+        headers=headers,
+        json={"source_device_id": "solo-drone", "asset": {"kind": "rom", "relative_path": "g.sfc"}},
+    )
+    assert resp.status_code == 400
+
+
+def test_create_transfer_rejects_inaccessible_source(client):
+    a = ("xfer-a@example.com", "xfer-a-at-example.com", "apass12345")
+    b = ("xfer-b@example.com", "xfer-b-at-example.com", "bpass12345")
+    for email, username, password in (a, b):
+        client.post("/api/auth/register", json={"email": email, "username": username, "password": password})
+    a_token = client.post(
+        "/api/auth/login", json={"email": a[0], "username": a[1], "password": a[2]}
+    ).json()["access_token"]
+    a_headers = {"Authorization": f"Bearer {a_token}"}
+    assert _claim_drone(client, a_headers, *a, "a-recv", "A Recv").status_code == 200
+    b_headers = {"Authorization": "Bearer ignored"}
+    assert _claim_drone(client, b_headers, *b, "b-src", "B Src").status_code == 200
+
+    resp = client.post(
+        "/api/devices/a-recv/transfers",
+        headers=a_headers,
+        json={"source_device_id": "b-src", "asset": {"kind": "rom", "relative_path": "g.sfc"}},
+    )
+    assert resp.status_code == 404
+
+
 def test_hive_lists_public_swarms_without_private_owner_data(client):
     client.post("/api/auth/register", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123", "full_name": "Hive Owner"})
     owner_token = client.post("/api/auth/login", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123"}).json()["access_token"]

@@ -2400,6 +2400,122 @@ class PostgresMetadataStore:
                 )
                 return cur.rowcount > 0
 
+    def create_transfer_session(
+        self,
+        *,
+        session_id: str,
+        from_device: str,
+        to_device: str,
+        asset: dict,
+        token_hash: str,
+        expires_at_epoch: int,
+        swarm_id: Optional[str] = None,
+        status: str = "offered",
+    ) -> bool:
+        """Record a coordinated transfer (lean insert). Returns True if inserted."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO transfer_sessions
+                        (id, swarm_id, from_device, to_device, asset, token_hash,
+                         status, expires_at, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), now(), now())
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        session_id,
+                        swarm_id,
+                        from_device,
+                        to_device,
+                        json.dumps(asset, separators=(",", ":")),
+                        token_hash,
+                        status,
+                        int(expires_at_epoch),
+                    ),
+                )
+                return cur.rowcount > 0
+
+    def get_transfer_session(self, session_id: str) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, swarm_id, from_device, to_device, asset, transport_used,
+                           status, bytes_total, bytes_done, error,
+                           extract(epoch FROM expires_at)
+                    FROM transfer_sessions WHERE id = %s
+                    """,
+                    (session_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "swarm_id": row[1],
+            "from_device": row[2],
+            "to_device": row[3],
+            "asset": json.loads(row[4]) if row[4] else {},
+            "transport_used": row[5],
+            "status": row[6],
+            "bytes_total": row[7],
+            "bytes_done": row[8],
+            "error": row[9],
+            "expires_at_epoch": int(row[10]) if row[10] is not None else None,
+        }
+
+    def update_transfer_session(
+        self,
+        session_id: str,
+        *,
+        status: Optional[str] = None,
+        transport_used: Optional[str] = None,
+        bytes_total: Optional[int] = None,
+        bytes_done: Optional[int] = None,
+        error: Optional[str] = None,
+    ) -> bool:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE transfer_sessions SET
+                        status         = COALESCE(%s, status),
+                        transport_used = COALESCE(%s, transport_used),
+                        bytes_total    = COALESCE(%s, bytes_total),
+                        bytes_done     = COALESCE(%s, bytes_done),
+                        error          = COALESCE(%s, error),
+                        updated_at     = now()
+                    WHERE id = %s
+                    """,
+                    (status, transport_used, bytes_total, bytes_done, error, session_id),
+                )
+                return cur.rowcount > 0
+
+    def expire_transfer_sessions(self) -> int:
+        """Mark still-pending transfers past their expiry as expired. Returns count."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return 0
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE transfer_sessions SET status = 'expired', updated_at = now()
+                    WHERE expires_at < now() AND status IN ('offered', 'active')
+                    """
+                )
+                return cur.rowcount
+
     def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
         where = """
             d.device_id = %s

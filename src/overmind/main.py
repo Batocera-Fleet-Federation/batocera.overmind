@@ -62,6 +62,7 @@ from overmind.models import (
     DeviceRomsResponse, MasterRomsResponse, BiosListResponse, MasterBiosResponse,
     MasterArtworkResponse, DeviceSavesResponse, RomUpdateResponse, SyncActivityResponse,
     SystemsResponse, GameplayLogResponse, GamelogsResponse,
+    TransferCreateRequest, TransferResponse,
 )
 from overmind.db import db, ADMIN_ALERT_SWARM_ID
 from overmind import auth
@@ -85,6 +86,7 @@ from overmind.runtime_secrets import load_runtime_secret_once
 from overmind.runtime_metrics import collect_runtime_metrics
 from overmind.drone_ca import sign_drone_csr
 from overmind.drone_security import generate_drone_token, hash_drone_token
+from overmind.transfer_tokens import mint_transfer_token
 from overmind.postgres_store import database_url, postgres_store
 from overmind.tls_server import (
     ensure_self_signed_cert as _ensure_self_signed_cert,
@@ -145,6 +147,8 @@ PUBLIC_REACHABILITY_RUN_BUDGET_SECONDS = max(1.0, float(os.getenv("PUBLIC_REACHA
 # relies on oldest-checked-first ordering to round-robin a very large fleet.
 PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN = max(0, int(os.getenv("PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN", "0")))
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
+# Lifetime of a relayed-transfer authorization token (and its session offer).
+TRANSFER_TOKEN_TTL_SECONDS = max(30, int(os.getenv("TRANSFER_TOKEN_TTL_SECONDS", "300")))
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
 OAUTH_STATE_TTL_SECONDS = int(os.getenv("OAUTH_STATE_TTL_SECONDS", "600"))
@@ -2242,6 +2246,75 @@ async def claim_device_action(device_id: str, payload: Optional[dict] = None, au
     get_current_drone(device_id, authorization)
     actions = db.claim_pending_device_actions(device_id)
     return {"actions": actions, "action": actions[0] if actions else None}
+
+
+@app.post("/api/devices/{device_id}/transfers", response_model=TransferResponse)
+async def create_transfer(
+    device_id: str,
+    body: TransferCreateRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Authorize a relayed peer transfer: pull ``asset`` from ``source_device_id``
+    into ``device_id`` (the receiver).
+
+    Mints a short-lived, signed transfer token plus a shared relay ``session_id``
+    that both Drones use to rendezvous, and records the session for monitoring /
+    resume. The control plane never carries ROM bytes -- the transfer happens
+    Drone-to-Drone (relay or direct).
+    """
+    user = get_current_user(authorization)
+    receiver = db.user_can_access_device(user["id"], device_id)
+    if not receiver:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_device_admin(user, receiver)
+
+    source_device_id = str(body.source_device_id or "").strip()
+    if not source_device_id or source_device_id == device_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="source_device_id must differ from the target device",
+        )
+    source = db.user_can_access_device(user["id"], source_device_id)
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source device not found")
+
+    asset = body.asset.model_dump(exclude_none=True)
+    if not str(asset.get("relative_path") or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="asset.relative_path is required"
+        )
+
+    session_id = uuid.uuid4().hex
+    expires_at = int(time.time()) + TRANSFER_TOKEN_TTL_SECONDS
+    token = mint_transfer_token(
+        auth.SECRET_KEY,
+        session_id=session_id,
+        from_device=source_device_id,
+        to_device=device_id,
+        asset=asset,
+        ttl_seconds=TRANSFER_TOKEN_TTL_SECONDS,
+    )
+    try:
+        postgres_store.create_transfer_session(
+            session_id=session_id,
+            from_device=source_device_id,
+            to_device=device_id,
+            asset=asset,
+            token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            expires_at_epoch=expires_at,
+            swarm_id=receiver.get("swarm_id"),
+        )
+    except Exception as error:  # noqa: BLE001 -- recording is best-effort
+        logger.warning("Failed to record transfer session %s: %s", session_id, error)
+
+    return {
+        "session_id": session_id,
+        "token": token,
+        "source_device_id": source_device_id,
+        "target_device_id": device_id,
+        "asset": asset,
+        "expires_at": expires_at,
+    }
 
 
 @app.post("/api/devices/{device_id}/heartbeat", response_model=HeartbeatResponse)

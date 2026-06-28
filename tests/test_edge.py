@@ -58,12 +58,16 @@ class _FakeClock:
 
 
 class _FakeCursor:
-    def __init__(self, rowcount=1):
+    def __init__(self, rowcount=1, fetchone_result=None):
         self.executed = []
         self.rowcount = rowcount
+        self.fetchone_result = fetchone_result
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
+
+    def fetchone(self):
+        return self.fetchone_result
 
     def __enter__(self):
         return self
@@ -475,6 +479,74 @@ class DeviceRowMappingTests(unittest.TestCase):
         row[25] = None  # no presence row joined
         device = PostgresMetadataStore()._device_from_row(tuple(row))
         self.assertFalse(device["edge_online"])
+
+
+class TransferStoreTests(unittest.TestCase):
+    def _store(self, cursor):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: _FakeConn(cursor)
+        return store
+
+    def test_create_transfer_session(self):
+        cursor = _FakeCursor(rowcount=1)
+        store = self._store(cursor)
+        ok = store.create_transfer_session(
+            session_id="s" * 32,
+            from_device="B",
+            to_device="A",
+            asset={"kind": "rom", "relative_path": "g"},
+            token_hash="h",
+            expires_at_epoch=1_700_000_000,
+            swarm_id="sw",
+        )
+        self.assertTrue(ok)
+        sql, params = cursor.executed[0]
+        self.assertIn("INSERT INTO transfer_sessions", sql)
+        self.assertEqual(params[0], "s" * 32)
+        self.assertEqual(params[4], '{"kind":"rom","relative_path":"g"}')
+        self.assertEqual(params[7], 1_700_000_000)
+
+    def test_get_transfer_session_decodes_asset(self):
+        row = (
+            "s" * 32, "sw", "B", "A", '{"kind":"rom","relative_path":"g"}',
+            "relay", "active", 100, 40, None, 1_700_000_000.0,
+        )
+        store = self._store(_FakeCursor(fetchone_result=row))
+        result = store.get_transfer_session("s" * 32)
+        self.assertEqual(result["from_device"], "B")
+        self.assertEqual(result["asset"], {"kind": "rom", "relative_path": "g"})
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(result["bytes_done"], 40)
+        self.assertEqual(result["expires_at_epoch"], 1_700_000_000)
+
+    def test_update_transfer_session(self):
+        cursor = _FakeCursor(rowcount=1)
+        store = self._store(cursor)
+        ok = store.update_transfer_session(
+            "s" * 32, status="completed", transport_used="relay", bytes_total=100, bytes_done=100
+        )
+        self.assertTrue(ok)
+        sql, params = cursor.executed[0]
+        self.assertIn("UPDATE transfer_sessions", sql)
+        self.assertEqual(params, ("completed", "relay", 100, 100, None, "s" * 32))
+
+    def test_expire_transfer_sessions(self):
+        cursor = _FakeCursor(rowcount=3)
+        store = self._store(cursor)
+        self.assertEqual(store.expire_transfer_sessions(), 3)
+        self.assertIn("expired", cursor.executed[0][0])
+
+    def test_no_connection_is_safe(self):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: None
+        self.assertFalse(
+            store.create_transfer_session(
+                session_id="s", from_device="B", to_device="A", asset={}, token_hash="h",
+                expires_at_epoch=1,
+            )
+        )
+        self.assertIsNone(store.get_transfer_session("s"))
+        self.assertEqual(store.expire_transfer_sessions(), 0)
 
 
 class PresenceWiringTests(unittest.TestCase):
