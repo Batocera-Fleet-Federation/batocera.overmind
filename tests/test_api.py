@@ -1871,6 +1871,54 @@ def test_create_transfer_rejects_inaccessible_source(client):
     assert resp.status_code == 404
 
 
+def test_create_transfer_accepts_receiver_drone_token(client):
+    client.post("/api/auth/register", json={"email": "dt@example.com", "username": "dt-at-example.com", "password": "dtpass12345"})
+    owner_token = client.post(
+        "/api/auth/login", json={"email": "dt@example.com", "username": "dt-at-example.com", "password": "dtpass12345"}
+    ).json()["access_token"]
+    swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {owner_token}"}).json()["swarms"][0]["id"]
+    owner = db.get_user_by_email("dt@example.com")
+    db.create_device(owner["id"], "rx-drone", "RX", {"ip_address": "10.0.0.2"}, raw_token="rx-token", swarm_id=swarm_id)
+    db.create_device(owner["id"], "tx-drone", "TX", {"ip_address": "10.0.0.3"}, raw_token="tx-token", swarm_id=swarm_id)
+
+    resp = client.post(
+        "/api/devices/rx-drone/transfers",
+        headers={"Authorization": "Bearer rx-token"},  # the receiver drone authenticates as itself
+        json={"source_device_id": "tx-drone", "asset": {"kind": "rom", "relative_path": "snes/g.sfc"}},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source_device_id"] == "tx-drone"
+    assert body["target_device_id"] == "rx-drone"
+
+    from overmind import auth as auth_utils
+    from overmind.transfer_tokens import verify_transfer_token
+
+    payload = verify_transfer_token(auth_utils.SECRET_KEY, body["token"])
+    assert payload["from"] == "tx-drone"
+    assert payload["to"] == "rx-drone"
+
+
+def test_create_transfer_drone_token_rejects_cross_swarm_source(client):
+    client.post("/api/auth/register", json={"email": "dt2@example.com", "username": "dt2-at-example.com", "password": "dt2pass1234"})
+    owner_token = client.post(
+        "/api/auth/login", json={"email": "dt2@example.com", "username": "dt2-at-example.com", "password": "dt2pass1234"}
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {owner_token}"}
+    swarm_a = client.get("/api/swarms", headers=headers).json()["swarms"][0]["id"]
+    swarm_b = client.post("/api/swarms", headers=headers, json={"name": "Swarm B"}).json()["swarm"]["id"]
+    owner = db.get_user_by_email("dt2@example.com")
+    db.create_device(owner["id"], "rx2-drone", "RX2", {"ip_address": "10.0.0.2"}, raw_token="rx2-token", swarm_id=swarm_a)
+    db.create_device(owner["id"], "tx2-drone", "TX2", {"ip_address": "10.0.0.3"}, raw_token="tx2-token", swarm_id=swarm_b)
+
+    resp = client.post(
+        "/api/devices/rx2-drone/transfers",
+        headers={"Authorization": "Bearer rx2-token"},
+        json={"source_device_id": "tx2-drone", "asset": {"kind": "rom", "relative_path": "snes/g.sfc"}},
+    )
+    assert resp.status_code == 404
+
+
 def test_hive_lists_public_swarms_without_private_owner_data(client):
     client.post("/api/auth/register", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123", "full_name": "Hive Owner"})
     owner_token = client.post("/api/auth/login", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123"}).json()["access_token"]

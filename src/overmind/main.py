@@ -2262,21 +2262,35 @@ async def create_transfer(
     resume. The control plane never carries ROM bytes -- the transfer happens
     Drone-to-Drone (relay or direct).
     """
-    user = get_current_user(authorization)
-    receiver = db.user_can_access_device(user["id"], device_id)
-    if not receiver:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    require_device_admin(user, receiver)
-
     source_device_id = str(body.source_device_id or "").strip()
     if not source_device_id or source_device_id == device_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="source_device_id must differ from the target device",
         )
-    source = db.user_can_access_device(user["id"], source_device_id)
-    if not source:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source device not found")
+
+    # Either the receiver Drone authenticates as itself (drone-initiated pull,
+    # restricted to a same-swarm source) or a user with admin on the receiver
+    # (UI-initiated). Drone auth is tried first since the token shape differs.
+    receiver = db.verify_device_token(device_id, get_bearer_token(authorization))
+    if receiver:
+        swarm_id = receiver.get("swarm_id")
+        source = db.get_device_by_device_id(source_device_id)
+        if not swarm_id or not source or source.get("swarm_id") != swarm_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Source device not found"
+            )
+    else:
+        user = get_current_user(authorization)
+        receiver = db.user_can_access_device(user["id"], device_id)
+        if not receiver:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+        require_device_admin(user, receiver)
+        source = db.user_can_access_device(user["id"], source_device_id)
+        if not source:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Source device not found"
+            )
 
     asset = body.asset.model_dump(exclude_none=True)
     if not str(asset.get("relative_path") or "").strip():
