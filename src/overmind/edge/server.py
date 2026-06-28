@@ -23,7 +23,9 @@ import asyncio
 import itertools
 import time
 import uuid
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
+
+from overmind.transfer_tokens import verify_transfer_token
 
 from . import protocol
 from .auth import Authenticator
@@ -68,6 +70,7 @@ class MuxServer:
         authenticator: Authenticator,
         registry: PresenceRegistry,
         relay: Optional[RelayHub] = None,
+        transfer_secret: Optional[str] = None,
         host: str = "0.0.0.0",
         port: int = 9443,
         ssl_context=None,
@@ -79,6 +82,11 @@ class MuxServer:
         self._authenticator = authenticator
         self._registry = registry
         self._relay = relay if relay is not None else RelayHub()
+        # Shared SECRET_KEY for offline transfer-token validation. When None
+        # (local dev / allow-all), tokens are not enforced.
+        self._transfer_secret = transfer_secret
+        # device_id -> live connection, for pushing TRANSFER_OFFER to a sender.
+        self._connections: Dict[str, _Connection] = {}
         self._host = host
         self._port = port
         self._ssl_context = ssl_context
@@ -118,6 +126,8 @@ class MuxServer:
             await self._teardown_relay(conn)
             if device_id is not None:
                 self._registry.deregister(device_id, session_id)
+                if self._connections.get(device_id) is conn:
+                    del self._connections[device_id]
             await self._close(writer)
 
     async def _handshake(
@@ -150,6 +160,7 @@ class MuxServer:
             lan_addrs=list(message.get("lan_addrs") or []),
         )
         self._registry.register(entry)
+        self._connections[device_id] = conn  # newest connection wins (reconnect)
         await conn.send_control(
             {
                 "type": protocol.MSG_HELLO_ACK,
@@ -202,8 +213,61 @@ class MuxServer:
             await self._relay_open(conn, device_id, message)
         elif message_type == protocol.MSG_RELAY_CLOSE:
             await self._relay_close(conn, message)
+        elif message_type == protocol.MSG_TRANSFER_REQUEST:
+            await self._transfer_request(conn, device_id, message)
         # PONG and anything else: liveness already refreshed via touch().
         return False
+
+    async def _transfer_request(self, conn: _Connection, device_id: str, message: dict) -> None:
+        """Receiver asks to pull an asset: validate the token (offline, with the
+        shared secret) and push a TRANSFER_OFFER to the sender's mux."""
+        session_id = str(message.get("session_id") or "")
+        token = str(message.get("token") or "")
+        from_device = str(message.get("from_device") or "")
+        asset = message.get("asset") if isinstance(message.get("asset"), dict) else {}
+
+        if self._transfer_secret:
+            payload = verify_transfer_token(self._transfer_secret, token)
+            if payload is None:
+                await self._transfer_error(conn, session_id, "invalid or expired token")
+                return
+            # The token binds the session, both peers, and the asset.
+            if (
+                payload.get("sid") != session_id
+                or payload.get("to") != device_id
+                or payload.get("from") != from_device
+            ):
+                await self._transfer_error(conn, session_id, "token does not match request")
+                return
+            asset = payload.get("asset") if isinstance(payload.get("asset"), dict) else asset
+
+        sender = self._connections.get(from_device)
+        if sender is None:
+            await self._transfer_error(conn, session_id, "sender is offline")
+            return
+        try:
+            await sender.send_control(
+                {
+                    "type": protocol.MSG_TRANSFER_OFFER,
+                    "session_id": session_id,
+                    "token": token,
+                    "from_device": from_device,
+                    "to_device": device_id,
+                    "asset": asset,
+                }
+            )
+        except (ConnectionError, OSError):
+            await self._transfer_error(conn, session_id, "could not reach sender")
+            return
+        self._log(f"transfer offered: session={session_id} from={from_device} to={device_id}")
+
+    async def _transfer_error(self, conn: _Connection, session_id: str, reason: str) -> None:
+        try:
+            await conn.send_control(
+                {"type": protocol.MSG_TRANSFER_ERROR, "session_id": session_id, "reason": reason}
+            )
+        except (ConnectionError, OSError):
+            pass
 
     async def _relay_open(self, conn: _Connection, device_id: str, message: dict) -> None:
         session_id = str(message.get("session_id") or "")

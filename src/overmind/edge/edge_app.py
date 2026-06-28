@@ -55,6 +55,7 @@ class EdgeConfig:
     auth_mode: str = "db"  # "db" | "allow-all" (dev only)
     node_id: str = ""  # identifies this Edge node (for cross-node presence, Phase 2)
     relay_bw_limit_bps: float = 0  # per-session relay rate cap; 0 = unlimited
+    transfer_secret: Optional[str] = None  # shared SECRET_KEY for token validation
 
     @classmethod
     def from_env(cls) -> "EdgeConfig":
@@ -69,6 +70,10 @@ class EdgeConfig:
             auth_mode=(os.environ.get("EDGE_AUTH") or "db").strip().lower(),
             node_id=(os.environ.get("EDGE_NODE_ID") or socket.gethostname()),
             relay_bw_limit_bps=float(os.environ.get("EDGE_RELAY_BW_LIMIT_BPS", "0")),
+            transfer_secret=(
+                os.environ.get("EDGE_TRANSFER_SECRET") or os.environ.get("SECRET_KEY") or ""
+            ).strip()
+            or None,
         )
 
 
@@ -196,6 +201,7 @@ def build_server(
         authenticator=authenticator,
         registry=registry,
         relay=relay,
+        transfer_secret=config.transfer_secret,
         host=config.host,
         port=config.port,
         ssl_context=ssl_context,

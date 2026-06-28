@@ -24,6 +24,7 @@ from overmind.edge.registry import PresenceEntry, PresenceRegistry
 from overmind.edge.relay import RateLimiter, RelayHub
 from overmind.edge.server import MuxServer
 from overmind.postgres_store import PostgresMetadataStore
+from overmind.transfer_tokens import mint_transfer_token
 
 
 async def _aread_control(reader):
@@ -717,6 +718,134 @@ class RelayEndToEndTests(unittest.TestCase):
                 finally:
                     for writer in (wa, wb):
                         writer.close()
+
+        asyncio.run(scenario())
+
+
+class TransferSignalingTests(unittest.TestCase):
+    SECRET = "edge-shared-secret"
+    ASSET = {"kind": "rom", "system": "snes", "relative_path": "game.sfc"}
+
+    async def _server(self):
+        server = MuxServer(
+            authenticator=AllowAllAuthenticator(),
+            registry=PresenceRegistry(),
+            transfer_secret=self.SECRET,
+            ping_interval=30.0,
+        )
+        srv = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+        return srv, srv.sockets[0].getsockname()[1]
+
+    @staticmethod
+    async def _connect(port, device_id):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            protocol.encode_control(
+                {"type": protocol.MSG_HELLO, "device_id": device_id, "token": "t"}
+            )
+        )
+        await writer.drain()
+        await _aread_control(reader)  # HELLO_ACK
+        return reader, writer
+
+    def test_valid_request_offers_to_sender(self):
+        session = "c" * 32
+
+        async def scenario():
+            srv, port = await self._server()
+            async with srv:
+                r_reader, r_writer = await self._connect(port, "RX")
+                s_reader, s_writer = await self._connect(port, "TX")
+                try:
+                    token = mint_transfer_token(
+                        self.SECRET,
+                        session_id=session,
+                        from_device="TX",
+                        to_device="RX",
+                        asset=self.ASSET,
+                    )
+                    r_writer.write(
+                        protocol.encode_control(
+                            {
+                                "type": protocol.MSG_TRANSFER_REQUEST,
+                                "session_id": session,
+                                "token": token,
+                                "from_device": "TX",
+                                "asset": self.ASSET,
+                            }
+                        )
+                    )
+                    await r_writer.drain()
+                    offer = await _aread_control(s_reader)
+                    self.assertEqual(offer["type"], protocol.MSG_TRANSFER_OFFER)
+                    self.assertEqual(offer["session_id"], session)
+                    self.assertEqual(offer["from_device"], "TX")
+                    self.assertEqual(offer["to_device"], "RX")
+                    self.assertEqual(offer["asset"], self.ASSET)
+                finally:
+                    for writer in (r_writer, s_writer):
+                        writer.close()
+
+        asyncio.run(scenario())
+
+    def test_invalid_token_returns_error_to_receiver(self):
+        async def scenario():
+            srv, port = await self._server()
+            async with srv:
+                r_reader, r_writer = await self._connect(port, "RX")
+                await self._connect(port, "TX")
+                try:
+                    r_writer.write(
+                        protocol.encode_control(
+                            {
+                                "type": protocol.MSG_TRANSFER_REQUEST,
+                                "session_id": "c" * 32,
+                                "token": "not-a-valid-token",
+                                "from_device": "TX",
+                                "asset": self.ASSET,
+                            }
+                        )
+                    )
+                    await r_writer.drain()
+                    error = await _aread_control(r_reader)
+                    self.assertEqual(error["type"], protocol.MSG_TRANSFER_ERROR)
+                finally:
+                    r_writer.close()
+
+        asyncio.run(scenario())
+
+    def test_offline_sender_returns_error_to_receiver(self):
+        session = "c" * 32
+
+        async def scenario():
+            srv, port = await self._server()
+            async with srv:
+                r_reader, r_writer = await self._connect(port, "RX")
+                try:
+                    token = mint_transfer_token(
+                        self.SECRET,
+                        session_id=session,
+                        from_device="GHOST",
+                        to_device="RX",
+                        asset=self.ASSET,
+                    )
+                    r_writer.write(
+                        protocol.encode_control(
+                            {
+                                "type": protocol.MSG_TRANSFER_REQUEST,
+                                "session_id": session,
+                                "token": token,
+                                "from_device": "GHOST",
+                                "asset": self.ASSET,
+                            }
+                        )
+                    )
+                    await r_writer.drain()
+                    error = await _aread_control(r_reader)
+                    self.assertEqual(error["type"], protocol.MSG_TRANSFER_ERROR)
+                    self.assertIn("offline", error["reason"])
+                finally:
+                    r_writer.close()
 
         asyncio.run(scenario())
 
