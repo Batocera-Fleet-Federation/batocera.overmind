@@ -1110,10 +1110,13 @@ def test_drone_reachability_notification_type_registered():
     assert 'data-notify-type="drone_reachability"' in html
 
 
-def test_public_reachability_disabled_by_default(monkeypatch):
+def test_public_reachability_short_circuits_when_disabled(monkeypatch):
     from overmind import main as overmind_main
 
-    assert overmind_main.PUBLIC_REACHABILITY_ENABLED is False  # outbound-only default
+    # Disabled = the default when an Edge is deployed, or an explicit opt-out. The
+    # job must short-circuit before any DB read / probing. (The conditional default
+    # itself is covered by test_public_reachability_default_is_conditional_on_edge.)
+    monkeypatch.setattr(overmind_main, "PUBLIC_REACHABILITY_ENABLED", False)
     called = {"n": 0}
 
     def count(**kwargs):
@@ -4373,6 +4376,21 @@ def test_poll_device_status_job_expires_transfer_sessions(client, monkeypatch):
     main.poll_device_status_notifications_once()
 
     assert calls, "device-status job should sweep stale transfer sessions"
+
+
+def test_public_reachability_default_is_conditional_on_edge():
+    from overmind.main import _resolve_public_reachability_enabled as resolve
+
+    # No Edge -> probe defaults ON, so cross-network direct WAN sync still works.
+    assert resolve(edge_enabled=None, override=None) is True
+    assert resolve(edge_enabled="false", override=None) is True
+    # Edge deployed -> probe defaults OFF (outbound-only via LAN/hole-punch/relay).
+    assert resolve(edge_enabled="true", override=None) is False
+    assert resolve(edge_enabled="1", override=None) is False
+    # An explicit override always wins, regardless of the Edge.
+    assert resolve(edge_enabled="true", override="1") is True
+    assert resolve(edge_enabled="false", override="off") is False
+    assert resolve(edge_enabled="true", override="no") is False
 
 
 def test_device_action_lifecycle(client):

@@ -121,6 +121,12 @@ overmind/transfer_tokens.py  # mint/verify HMAC-SHA256 transfer tokens
   `var.enable_edge` (default false → no-op). `terraform fmt`/`validate` must pass;
   the user runs `plan`/`apply`. Follow-ups: publish the edge image to ECR; add a
   STUN/UDP NLB listener for prod hole-punch.
+- **Probe interaction:** Terraform sets `OVERMIND_EDGE_ENABLED` on the Lambdas from
+  `enable_edge`. The control plane's `public-reachability` probe defaults OFF when
+  the Edge is enabled and ON without it (`_resolve_public_reachability_enabled`), so
+  toggling the Edge can't silently strand cross-network drones. Don't hardcode the
+  probe off — keep the conditional, and let `OVERMIND_PUBLIC_REACHABILITY_ENABLED`
+  be the explicit override.
 
 ## Testing rules
 

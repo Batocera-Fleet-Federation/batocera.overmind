@@ -51,9 +51,11 @@ is the relational source of truth. Two access patterns coexist:
 Gateway → `handler`; EventBridge → `scheduled_handler({"job": ...})` →
 `run_scheduled_job` → `poll_*_once`. Scheduled jobs (`notification-delivery`,
 `device-status`, `public-reachability`) + cadences live in
-`.github/terraform/aws/us-east-1/locals.tf`. **`public-reachability` is off by
-default** (outbound-only); set `OVERMIND_PUBLIC_REACHABILITY_ENABLED=1` to
-re-enable the inbound probe for port-forwarded fleets.
+`.github/terraform/aws/us-east-1/locals.tf`. **`public-reachability` defaults
+conditional on the Edge** (`_resolve_public_reachability_enabled`): OFF when
+`OVERMIND_EDGE_ENABLED` (set by Terraform when `enable_edge=true`, outbound-only),
+ON without an Edge so cross-network Drones keep a direct WAN path.
+`OVERMIND_PUBLIC_REACHABILITY_ENABLED` overrides either way.
 
 **Edge service (`src/overmind/edge/`).** Lambda/API-Gateway-HTTP can't hold
 persistent sockets or stream relayed bytes, so the Edge is a **separate always-on

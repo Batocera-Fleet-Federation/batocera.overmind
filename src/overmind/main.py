@@ -146,12 +146,30 @@ PUBLIC_REACHABILITY_RUN_BUDGET_SECONDS = max(1.0, float(os.getenv("PUBLIC_REACHA
 # 0 = probe every approved Drone each run; a positive value caps work per run and
 # relies on oldest-checked-first ordering to round-robin a very large fleet.
 PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN = max(0, int(os.getenv("PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN", "0")))
-# Outbound-only by default: Drones reach each other via LAN / hole-punch / relay,
-# so Overmind no longer probes inbound public reachability unless explicitly
-# enabled (for deployments where Drones are port-forwarded and want direct WAN).
-PUBLIC_REACHABILITY_ENABLED = (
-    os.getenv("OVERMIND_PUBLIC_REACHABILITY_ENABLED", "false").strip().lower()
-    in {"1", "true", "yes", "on"}
+def _resolve_public_reachability_enabled(
+    *, edge_enabled: Optional[str], override: Optional[str]
+) -> bool:
+    """Whether to run the inbound public-reachability probe.
+
+    The probe is the cross-network fallback for *direct* WAN transfers when there
+    is no Edge. Default it conditional on the Edge so a deployment can't silently
+    lose cross-network sync: ON without an Edge, OFF with one. An explicit
+    OVERMIND_PUBLIC_REACHABILITY_ENABLED always wins.
+    """
+    truthy = {"1", "true", "yes", "on"}
+    override_value = (override or "").strip().lower()
+    if override_value in truthy:
+        return True
+    if override_value in {"0", "false", "no", "off"}:
+        return False
+    return (edge_enabled or "").strip().lower() not in truthy
+
+
+# OVERMIND_EDGE_ENABLED is the control plane's awareness that an Edge is deployed
+# (set by Terraform when enable_edge=true); it flips the probe's default.
+PUBLIC_REACHABILITY_ENABLED = _resolve_public_reachability_enabled(
+    edge_enabled=os.getenv("OVERMIND_EDGE_ENABLED"),
+    override=os.getenv("OVERMIND_PUBLIC_REACHABILITY_ENABLED"),
 )
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
 # Lifetime of a relayed-transfer authorization token (and its session offer).
@@ -522,8 +540,10 @@ def poll_public_reachability_once() -> dict:
     exceed the 60s EventBridge cadence and back up. Only Drones whose Resolvable /
     Not Resolvable status actually changed are written back, keeping RDS writes minimal.
 
-    Disabled by default (outbound-only model): set OVERMIND_PUBLIC_REACHABILITY_ENABLED
-    to re-enable inbound probing for port-forwarded fleets.
+    Default is conditional on the Edge: OFF when the Edge is deployed
+    (OVERMIND_EDGE_ENABLED, outbound-only model), ON when it is not (so
+    cross-network Drones keep a direct WAN path). OVERMIND_PUBLIC_REACHABILITY_ENABLED
+    overrides either way.
     """
     if not PUBLIC_REACHABILITY_ENABLED:
         return {"job": "public-reachability", "status": "disabled", "checked": 0, "changed": 0}
