@@ -978,3 +978,28 @@ class GameplayLogResponse(ExtensibleContractModel):
 
 class GamelogsResponse(ExtensibleContractModel):
     gamelogs: list[Any] = Field(default_factory=list)
+
+
+class TransferAssetRef(ExtensibleContractModel):
+    """The asset a relayed transfer should move (mirrors the Drone AssetRef)."""
+    kind: str  # "rom" | "bios" | "save" | "artwork"
+    relative_path: str
+    system: Optional[str] = None
+    expected_size: Optional[int] = None
+    expected_hash: Optional[str] = None
+
+
+class TransferCreateRequest(StrictContractModel):
+    """POST /api/devices/{id}/transfers -- pull ``asset`` from ``source_device_id``
+    to the path device (the receiver)."""
+    source_device_id: str
+    asset: TransferAssetRef
+
+
+class TransferResponse(ExtensibleContractModel):
+    session_id: str
+    token: str
+    source_device_id: str
+    target_device_id: str
+    asset: dict = Field(default_factory=dict)
+    expires_at: Optional[int] = None

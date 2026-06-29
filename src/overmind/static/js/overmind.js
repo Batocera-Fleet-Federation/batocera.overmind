@@ -160,6 +160,9 @@
             let auditLogPageSize = 20;
             let visitorsOffset = 0;
             let visitorsPageSize = 20;
+            let transfersOffset = 0;
+            let transfersPageSize = 50;
+            let transfersStatusFilter = '';
             let notificationsRefreshTimer = null;
             let notificationsPageOffset = 0;
             const notificationsPageSize = 25;
@@ -1813,6 +1816,7 @@
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}" data-device-field="online">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="connected">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
                                         <span class="badge ${(device.public_reachability && device.public_reachability.resolvable) ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="resolvable" title="Overmind public reachability probe (TCP connect to the registered public IP)">${(device.public_reachability && device.public_reachability.resolvable) ? 'Resolvable' : 'Not Resolvable'}</span>
+                                        <span class="badge ${device.edge_online ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="edge" title="Connected to Overmind via the outbound Edge link (no router port-forward required)">${device.edge_online ? 'Online via Edge' : 'Not on Edge'}</span>
                                     </div>
                                     <div class="small text-muted mt-3" data-device-field="last-seen">${device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable'}</div>
                                 </div>
@@ -1857,6 +1861,7 @@
                     updateDeviceTileBadge(tile, 'online', Boolean(device.online), 'Online', 'Offline', 'text-bg-danger');
                     updateDeviceTileBadge(tile, 'connected', Boolean(device.swarm_connected), 'Connected to Swarm', 'Not Connected to Swarm', 'text-bg-secondary');
                     updateDeviceTileBadge(tile, 'resolvable', Boolean(device.public_reachability && device.public_reachability.resolvable), 'Resolvable', 'Not Resolvable', 'text-bg-secondary');
+                    updateDeviceTileBadge(tile, 'edge', Boolean(device.edge_online), 'Online via Edge', 'Not on Edge', 'text-bg-secondary');
                 });
             }
 
@@ -5059,6 +5064,29 @@
                         </div>
                         <div class="device-card mt-3">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                                <h4 class="h5 mb-0">Peer Transfers</h4>
+                                <div class="d-flex flex-wrap align-items-center gap-2">
+                                    <select id="transfers-status-filter" class="form-select form-select-sm" style="width: auto;" onchange="changeTransfersStatusFilter(this.value)" title="Filter by status" aria-label="Filter transfers by status">
+                                        <option value="">All statuses</option>
+                                        <option value="active">Active</option>
+                                        <option value="completed">Completed</option>
+                                        <option value="aborted">Aborted</option>
+                                        <option value="offered">Offered</option>
+                                        <option value="expired">Expired</option>
+                                    </select>
+                                    <select id="transfers-page-size" class="form-select form-select-sm" style="width: auto;" onchange="changeTransfersPageSize(this.value)" title="Rows per page" aria-label="Transfers per page">
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                        <option value="200">200</option>
+                                    </select>
+                                    <button class="btn btn-outline-secondary btn-sm" type="button" onclick="loadSuperAdminTransfers()" title="Refresh" aria-label="Refresh transfers"><i class="bi bi-arrow-clockwise"></i></button>
+                                </div>
+                            </div>
+                            <div class="small text-muted mb-2">Drone-to-drone asset handoffs (LAN / direct / hole-punch / relay) coordinated by the control plane.</div>
+                            <div id="transfers-results"><div class="empty-state">Loading transfers…</div></div>
+                        </div>
+                        <div class="device-card mt-3">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                                 <h4 class="h5 mb-0">Site Visitors</h4>
                                 <span id="visitors-summary" class="d-flex flex-wrap gap-2"></span>
                             </div>
@@ -5069,13 +5097,19 @@
                     syncActionsOffset = 0;
                     auditLogOffset = 0;
                     visitorsOffset = 0;
+                    transfersOffset = 0;
                     const pageSizeSelect = document.getElementById('sync-actions-page-size');
                     if (pageSizeSelect) pageSizeSelect.value = String(syncActionsPageSize);
                     const auditPageSizeSelect = document.getElementById('audit-log-page-size');
                     if (auditPageSizeSelect) auditPageSizeSelect.value = String(auditLogPageSize);
+                    const transfersPageSizeSelect = document.getElementById('transfers-page-size');
+                    if (transfersPageSizeSelect) transfersPageSizeSelect.value = String(transfersPageSize);
+                    const transfersStatusSelect = document.getElementById('transfers-status-filter');
+                    if (transfersStatusSelect) transfersStatusSelect.value = transfersStatusFilter;
                     loadSuperAdminSyncActions();
                     loadSuperAdminSyncSummary();
                     loadSuperAdminAuditLog();
+                    loadSuperAdminTransfers();
                     loadSuperAdminVisitors();
                 } catch (error) {
                     console.error('Error loading super admin data:', error);
@@ -5255,6 +5289,95 @@
                 } catch (error) {
                     console.error('Error loading audit log:', error);
                     results.innerHTML = '<div class="empty-state">Unable to load audit log.</div>';
+                }
+            }
+
+            function transferStatusBadge(status) {
+                const map = {
+                    completed: 'text-bg-success',
+                    active: 'text-bg-info',
+                    offered: 'text-bg-secondary',
+                    aborted: 'text-bg-danger',
+                    expired: 'text-bg-warning',
+                };
+                return map[String(status || '').toLowerCase()] || 'text-bg-secondary';
+            }
+
+            function transferTransportBadge(transport) {
+                const map = {
+                    lan: 'text-bg-success',
+                    'direct-public': 'text-bg-primary',
+                    holepunch: 'text-bg-info',
+                    relay: 'text-bg-warning',
+                };
+                return map[String(transport || '').toLowerCase()] || 'text-bg-secondary';
+            }
+
+            function changeTransfersStatusFilter(value) {
+                transfersStatusFilter = String(value || '');
+                transfersOffset = 0;
+                loadSuperAdminTransfers();
+            }
+
+            function changeTransfersPageSize(value) {
+                const size = Number(value) || 50;
+                transfersPageSize = [50, 100, 200].includes(size) ? size : 50;
+                transfersOffset = 0;
+                loadSuperAdminTransfers();
+            }
+
+            function gotoTransfersPage(offset) {
+                transfersOffset = Math.max(0, Number(offset) || 0);
+                loadSuperAdminTransfers();
+            }
+
+            async function loadSuperAdminTransfers() {
+                const results = document.getElementById('transfers-results');
+                if (!results || !isSuperAdmin()) return;
+                const limit = transfersPageSize;
+                const offset = transfersOffset;
+                results.innerHTML = '<div class="empty-state">Loading transfers…</div>';
+                try {
+                    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+                    if (transfersStatusFilter) params.set('status', transfersStatusFilter);
+                    const response = await apiGet(`/api/admin/transfers?${params.toString()}`, { showLoader: false });
+                    if (!response.ok) throw new Error('Failed to load transfers');
+                    const data = await response.json();
+                    const transfers = data.transfers || [];
+                    const total = Number(data.total || 0);
+                    const start = total ? offset + 1 : 0;
+                    const end = offset + transfers.length;
+                    const hasPrev = offset > 0;
+                    const hasNext = end < total;
+                    results.innerHTML = `
+                        <div class="table-responsive"><table class="table table-sm align-middle bff-stack">
+                            <thead><tr><th>When</th><th>From → To</th><th>Asset</th><th>Transport</th><th class="d-none d-lg-table-cell">Bytes</th><th>Status</th></tr></thead>
+                            <tbody>${transfers.map(t => {
+                                const asset = t.asset || {};
+                                const assetLabel = [asset.kind, asset.system, asset.relative_path].filter(Boolean).join(' / ');
+                                const when = t.updated_at_epoch || t.created_at_epoch;
+                                const bytesLabel = t.bytes_total ? `${formatBytes(t.bytes_done || 0)} / ${formatBytes(t.bytes_total)}` : (t.bytes_done ? formatBytes(t.bytes_done) : '');
+                                return `
+                                <tr>
+                                    <td class="small text-muted">${escapeHtml(when ? formatAdminDate(when * 1000) : '')}</td>
+                                    <td class="small mono">${escapeHtml(t.from_device || '')} &rarr; ${escapeHtml(t.to_device || '')}</td>
+                                    <td class="small">${escapeHtml(assetLabel)}</td>
+                                    <td>${t.transport_used ? `<span class="badge ${transferTransportBadge(t.transport_used)}">${escapeHtml(t.transport_used)}</span>` : '<span class="text-muted small">—</span>'}</td>
+                                    <td class="small d-none d-lg-table-cell">${escapeHtml(bytesLabel)}</td>
+                                    <td><span class="badge ${transferStatusBadge(t.status)}">${escapeHtml(t.status || '')}</span>${t.error ? `<div class="small text-danger">${escapeHtml(t.error)}</div>` : ''}</td>
+                                </tr>`;
+                            }).join('') || `<tr><td colspan="6" class="text-muted">${transfersStatusFilter ? 'No transfers match this filter.' : 'No transfers yet.'}</td></tr>`}</tbody>
+                        </table></div>
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
+                            <span class="small text-muted">${total ? `Showing ${start}–${end} of ${total}` : 'No results'}</span>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary" type="button" ${hasPrev ? '' : 'disabled'} onclick="gotoTransfersPage(${Math.max(0, offset - limit)})">Previous</button>
+                                <button class="btn btn-outline-secondary" type="button" ${hasNext ? '' : 'disabled'} onclick="gotoTransfersPage(${offset + limit})">Next</button>
+                            </div>
+                        </div>`;
+                } catch (error) {
+                    console.error('Error loading transfers:', error);
+                    results.innerHTML = '<div class="empty-state">Unable to load transfers.</div>';
                 }
             }
 

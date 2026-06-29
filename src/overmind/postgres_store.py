@@ -1905,6 +1905,7 @@ class PostgresMetadataStore:
             drone_rom_inventory_fingerprint_at,
             romset_files_thumbprint, bios_files_thumbprint,
             api_port, scheme, reachable_url, public_resolvable, public_ip, checked_at,
+            edge_online, reflexive_endpoint,
             hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
             cpu_max_frequency, memory_available, memory_total, batocera_version,
             screen_mode, audio_volume, container,
@@ -1960,6 +1961,8 @@ class PostgresMetadataStore:
             "api_port": api_port,
             "scheme": scheme or "https",
             "reachable_url": reachable_url,
+            "edge_online": bool(edge_online),
+            "reflexive_endpoint": reflexive_endpoint,
             "network": network,
             "resolved_network": {"ipv4": list(ipv4 or []), "ipv6": list(ipv6 or [])},
             "public_reachability": {
@@ -2035,6 +2038,7 @@ class PostgresMetadataStore:
                    d.drone_rom_inventory_fingerprint_at,
                    d.romset_files_thumbprint, d.bios_files_thumbprint,
                    ns.api_port, ns.scheme, ns.reachable_url, ns.public_resolvable, ns.public_ip, ns.checked_at,
+                   ns.edge_online, ns.reflexive_endpoint,
                    si.hostname, si.model, si.system_name, si.architecture, si.cpu_model, si.cpu_cores,
                    si.cpu_threads, si.cpu_max_frequency, si.memory_available, si.memory_total,
                    si.batocera_version, si.screen_mode, si.audio_volume, si.container,
@@ -2353,6 +2357,224 @@ class PostgresMetadataStore:
                     (drone_id, resolvable, probed_ip, api_port, "https" if reachable_url else None, reachable_url, checked_at),
                 )
         return True
+
+    def update_device_edge_presence(
+        self,
+        device_id: str,
+        *,
+        online: bool,
+        edge_node: Optional[str] = None,
+        reflexive_endpoint: Optional[str] = None,
+    ) -> bool:
+        """Record Edge mux presence for a Drone, keyed by its device_id.
+
+        Lean writer (mirrors update_device_reachability): a single targeted UPSERT
+        into drone_network_state that resolves device_id -> internal id in SQL and
+        only touches edge_* columns, so it never clobbers reachability or any
+        column owned by another writer. Returns True if a matching device existed.
+        """
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        online = bool(online)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO drone_network_state
+                        (drone_id, edge_online, edge_node, reflexive_endpoint,
+                         edge_connected_at, updated_at)
+                    SELECT d.id, %s, %s, %s,
+                           CASE WHEN %s THEN now() ELSE NULL END, now()
+                    FROM devices d
+                    WHERE d.device_id = %s
+                    ON CONFLICT (drone_id) DO UPDATE SET
+                        edge_online        = EXCLUDED.edge_online,
+                        edge_node          = EXCLUDED.edge_node,
+                        reflexive_endpoint = COALESCE(EXCLUDED.reflexive_endpoint,
+                                                      drone_network_state.reflexive_endpoint),
+                        edge_connected_at  = EXCLUDED.edge_connected_at,
+                        updated_at         = now()
+                    """,
+                    (online, edge_node, reflexive_endpoint, online, device_id),
+                )
+                return cur.rowcount > 0
+
+    def create_transfer_session(
+        self,
+        *,
+        session_id: str,
+        from_device: str,
+        to_device: str,
+        asset: dict,
+        token_hash: str,
+        expires_at_epoch: int,
+        swarm_id: Optional[str] = None,
+        status: str = "offered",
+    ) -> bool:
+        """Record a coordinated transfer (lean insert). Returns True if inserted."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO transfer_sessions
+                        (id, swarm_id, from_device, to_device, asset, token_hash,
+                         status, expires_at, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), now(), now())
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        session_id,
+                        swarm_id,
+                        from_device,
+                        to_device,
+                        json.dumps(asset, separators=(",", ":")),
+                        token_hash,
+                        status,
+                        int(expires_at_epoch),
+                    ),
+                )
+                return cur.rowcount > 0
+
+    def get_transfer_session(self, session_id: str) -> Optional[dict]:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, swarm_id, from_device, to_device, asset, transport_used,
+                           status, bytes_total, bytes_done, error,
+                           extract(epoch FROM expires_at)
+                    FROM transfer_sessions WHERE id = %s
+                    """,
+                    (session_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "swarm_id": row[1],
+            "from_device": row[2],
+            "to_device": row[3],
+            "asset": json.loads(row[4]) if row[4] else {},
+            "transport_used": row[5],
+            "status": row[6],
+            "bytes_total": row[7],
+            "bytes_done": row[8],
+            "error": row[9],
+            "expires_at_epoch": int(row[10]) if row[10] is not None else None,
+        }
+
+    def list_recent_transfer_sessions(
+        self, *, status: Optional[str] = None, limit: int = 50, offset: int = 0
+    ) -> Optional[dict]:
+        """Recent transfer sessions newest-first for admin monitoring.
+
+        Returns ``{"transfers": [...], "total": N}`` or None when no DB.
+        """
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        row_limit = max(1, min(int(limit or 50), 200))
+        row_offset = max(0, int(offset or 0))
+        where = ""
+        params: list = []
+        norm_status = str(status or "").strip().lower()
+        if norm_status:
+            where = "WHERE status = %s"
+            params = [norm_status]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT count(*) FROM transfer_sessions {where}", params)
+                total = cur.fetchone()[0]
+                cur.execute(
+                    f"""
+                    SELECT id, swarm_id, from_device, to_device, asset, transport_used,
+                           status, bytes_total, bytes_done, error,
+                           extract(epoch FROM expires_at), extract(epoch FROM created_at),
+                           extract(epoch FROM updated_at)
+                    FROM transfer_sessions
+                    {where}
+                    ORDER BY updated_at DESC, created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    params + [row_limit, row_offset],
+                )
+                transfers = []
+                for row in cur.fetchall():
+                    try:
+                        asset = json.loads(row[4]) if row[4] else {}
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        asset = {}
+                    transfers.append(
+                        {
+                            "session_id": row[0],
+                            "swarm_id": row[1],
+                            "from_device": row[2],
+                            "to_device": row[3],
+                            "asset": asset,
+                            "transport_used": row[5],
+                            "status": row[6],
+                            "bytes_total": row[7],
+                            "bytes_done": row[8],
+                            "error": row[9],
+                            "expires_at_epoch": int(row[10]) if row[10] is not None else None,
+                            "created_at_epoch": int(row[11]) if row[11] is not None else None,
+                            "updated_at_epoch": int(row[12]) if row[12] is not None else None,
+                        }
+                    )
+        return {"transfers": transfers, "total": total}
+
+    def update_transfer_session(
+        self,
+        session_id: str,
+        *,
+        status: Optional[str] = None,
+        transport_used: Optional[str] = None,
+        bytes_total: Optional[int] = None,
+        bytes_done: Optional[int] = None,
+        error: Optional[str] = None,
+    ) -> bool:
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE transfer_sessions SET
+                        status         = COALESCE(%s, status),
+                        transport_used = COALESCE(%s, transport_used),
+                        bytes_total    = COALESCE(%s, bytes_total),
+                        bytes_done     = COALESCE(%s, bytes_done),
+                        error          = COALESCE(%s, error),
+                        updated_at     = now()
+                    WHERE id = %s
+                    """,
+                    (status, transport_used, bytes_total, bytes_done, error, session_id),
+                )
+                return cur.rowcount > 0
+
+    def expire_transfer_sessions(self) -> int:
+        """Mark still-pending transfers past their expiry as expired. Returns count."""
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return 0
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE transfer_sessions SET status = 'expired', updated_at = now()
+                    WHERE expires_at < now() AND status IN ('offered', 'active')
+                    """
+                )
+                return cur.rowcount
 
     def user_can_access_device(self, user_id: str, device_id: str, swarm_id: Optional[str] = None) -> Optional[dict]:
         where = """

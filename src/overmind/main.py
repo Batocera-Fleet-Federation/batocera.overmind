@@ -62,6 +62,7 @@ from overmind.models import (
     DeviceRomsResponse, MasterRomsResponse, BiosListResponse, MasterBiosResponse,
     MasterArtworkResponse, DeviceSavesResponse, RomUpdateResponse, SyncActivityResponse,
     SystemsResponse, GameplayLogResponse, GamelogsResponse,
+    TransferCreateRequest, TransferResponse,
 )
 from overmind.db import db, ADMIN_ALERT_SWARM_ID
 from overmind import auth
@@ -85,6 +86,7 @@ from overmind.runtime_secrets import load_runtime_secret_once
 from overmind.runtime_metrics import collect_runtime_metrics
 from overmind.drone_ca import sign_drone_csr
 from overmind.drone_security import generate_drone_token, hash_drone_token
+from overmind.transfer_tokens import mint_transfer_token
 from overmind.postgres_store import database_url, postgres_store
 from overmind.tls_server import (
     ensure_self_signed_cert as _ensure_self_signed_cert,
@@ -144,7 +146,34 @@ PUBLIC_REACHABILITY_RUN_BUDGET_SECONDS = max(1.0, float(os.getenv("PUBLIC_REACHA
 # 0 = probe every approved Drone each run; a positive value caps work per run and
 # relies on oldest-checked-first ordering to round-robin a very large fleet.
 PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN = max(0, int(os.getenv("PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN", "0")))
+def _resolve_public_reachability_enabled(
+    *, edge_enabled: Optional[str], override: Optional[str]
+) -> bool:
+    """Whether to run the inbound public-reachability probe.
+
+    The probe is the cross-network fallback for *direct* WAN transfers when there
+    is no Edge. Default it conditional on the Edge so a deployment can't silently
+    lose cross-network sync: ON without an Edge, OFF with one. An explicit
+    OVERMIND_PUBLIC_REACHABILITY_ENABLED always wins.
+    """
+    truthy = {"1", "true", "yes", "on"}
+    override_value = (override or "").strip().lower()
+    if override_value in truthy:
+        return True
+    if override_value in {"0", "false", "no", "off"}:
+        return False
+    return (edge_enabled or "").strip().lower() not in truthy
+
+
+# OVERMIND_EDGE_ENABLED is the control plane's awareness that an Edge is deployed
+# (set by Terraform when enable_edge=true); it flips the probe's default.
+PUBLIC_REACHABILITY_ENABLED = _resolve_public_reachability_enabled(
+    edge_enabled=os.getenv("OVERMIND_EDGE_ENABLED"),
+    override=os.getenv("OVERMIND_PUBLIC_REACHABILITY_ENABLED"),
+)
 TOKEN_HASH_SECRET = os.getenv("TOKEN_HASH_SECRET", auth.SECRET_KEY)
+# Lifetime of a relayed-transfer authorization token (and its session offer).
+TRANSFER_TOKEN_TTL_SECONDS = max(30, int(os.getenv("TRANSFER_TOKEN_TTL_SECONDS", "300")))
 VERIFICATION_TTL_MINUTES = int(os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", "30"))
 PASSWORD_RESET_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
 OAUTH_STATE_TTL_SECONDS = int(os.getenv("OAUTH_STATE_TTL_SECONDS", "600"))
@@ -459,6 +488,14 @@ def poll_device_status_notifications_once() -> None:
             print(f"Expired {expired} stale device action(s) past {DEVICE_ACTION_TIMEOUT_SECONDS}s timeout")
     except Exception as error:
         logger.warning("Failed to expire stale device actions: %s", error)
+    # Sweep transfer sessions (relay/P2P handoffs) that were authorized but never
+    # ran to completion, so they stop showing as pending past their token expiry.
+    try:
+        expired_transfers = postgres_store.expire_transfer_sessions()
+        if expired_transfers:
+            print(f"Expired {expired_transfers} stale transfer session(s) past their token expiry")
+    except Exception as error:
+        logger.warning("Failed to expire stale transfer sessions: %s", error)
 
 
 def _emit_reachability_notification(device: dict, resolvable: bool, answered_by: Optional[str] = None) -> None:
@@ -502,7 +539,14 @@ def poll_public_reachability_once() -> dict:
     stops issuing work once a hard wall-clock budget is hit so a single run can never
     exceed the 60s EventBridge cadence and back up. Only Drones whose Resolvable /
     Not Resolvable status actually changed are written back, keeping RDS writes minimal.
+
+    Default is conditional on the Edge: OFF when the Edge is deployed
+    (OVERMIND_EDGE_ENABLED, outbound-only model), ON when it is not (so
+    cross-network Drones keep a direct WAN path). OVERMIND_PUBLIC_REACHABILITY_ENABLED
+    overrides either way.
     """
+    if not PUBLIC_REACHABILITY_ENABLED:
+        return {"job": "public-reachability", "status": "disabled", "checked": 0, "changed": 0}
     limit = PUBLIC_REACHABILITY_MAX_DEVICES_PER_RUN
     devices = postgres_store.list_all_approved_devices(limit=limit, oldest_checked_first=True) or []
     if not devices:
@@ -614,6 +658,8 @@ def start_public_reachability_poller() -> None:
     Not Resolvable locally. Lambda does not call this (start_pollers is False there).
     """
     global _PUBLIC_REACHABILITY_THREAD
+    if not PUBLIC_REACHABILITY_ENABLED:
+        return  # outbound-only default; no inbound probing
     interval_seconds = max(0, int(os.getenv("PUBLIC_REACHABILITY_POLL_INTERVAL_SECONDS", str(PUBLIC_REACHABILITY_POLL_INTERVAL_SECONDS))))
     if interval_seconds == 0 or (_PUBLIC_REACHABILITY_THREAD and _PUBLIC_REACHABILITY_THREAD.is_alive()):
         return
@@ -1504,6 +1550,30 @@ async def admin_audit_log(
     return {"audit_events": page["events"], "total": page["total"], "limit": limit, "offset": offset}
 
 
+@app.get("/api/admin/transfers", response_model=GenericObjectResponse)
+async def admin_transfers(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Recent peer transfer sessions (relay/P2P), newest first (super admin only).
+
+    Surfaces which transport served each transfer and its lifecycle status so the
+    outbound-only data plane is observable without router/log access.
+    """
+    require_super_admin(authorization)
+    limit = max(1, min(int(limit or 50), 200))
+    offset = max(0, int(offset or 0))
+    page = db.list_transfer_sessions(status=status, limit=limit, offset=offset)
+    return {
+        "transfers": page["transfers"],
+        "total": page["total"],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 @app.get("/api/admin/landing-visits", response_model=AdminLandingVisitsResponse)
 async def admin_landing_visits(
     limit: int = 20,
@@ -2242,6 +2312,89 @@ async def claim_device_action(device_id: str, payload: Optional[dict] = None, au
     get_current_drone(device_id, authorization)
     actions = db.claim_pending_device_actions(device_id)
     return {"actions": actions, "action": actions[0] if actions else None}
+
+
+@app.post("/api/devices/{device_id}/transfers", response_model=TransferResponse)
+async def create_transfer(
+    device_id: str,
+    body: TransferCreateRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Authorize a relayed peer transfer: pull ``asset`` from ``source_device_id``
+    into ``device_id`` (the receiver).
+
+    Mints a short-lived, signed transfer token plus a shared relay ``session_id``
+    that both Drones use to rendezvous, and records the session for monitoring /
+    resume. The control plane never carries ROM bytes -- the transfer happens
+    Drone-to-Drone (relay or direct).
+    """
+    source_device_id = str(body.source_device_id or "").strip()
+    if not source_device_id or source_device_id == device_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="source_device_id must differ from the target device",
+        )
+
+    # Either the receiver Drone authenticates as itself (drone-initiated pull,
+    # restricted to a same-swarm source) or a user with admin on the receiver
+    # (UI-initiated). Drone auth is tried first since the token shape differs.
+    receiver = db.verify_device_token(device_id, get_bearer_token(authorization))
+    if receiver:
+        swarm_id = receiver.get("swarm_id")
+        source = db.get_device_by_device_id(source_device_id)
+        if not swarm_id or not source or source.get("swarm_id") != swarm_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Source device not found"
+            )
+    else:
+        user = get_current_user(authorization)
+        receiver = db.user_can_access_device(user["id"], device_id)
+        if not receiver:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+        require_device_admin(user, receiver)
+        source = db.user_can_access_device(user["id"], source_device_id)
+        if not source:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Source device not found"
+            )
+
+    asset = body.asset.model_dump(exclude_none=True)
+    if not str(asset.get("relative_path") or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="asset.relative_path is required"
+        )
+
+    session_id = uuid.uuid4().hex
+    expires_at = int(time.time()) + TRANSFER_TOKEN_TTL_SECONDS
+    token = mint_transfer_token(
+        auth.SECRET_KEY,
+        session_id=session_id,
+        from_device=source_device_id,
+        to_device=device_id,
+        asset=asset,
+        ttl_seconds=TRANSFER_TOKEN_TTL_SECONDS,
+    )
+    try:
+        postgres_store.create_transfer_session(
+            session_id=session_id,
+            from_device=source_device_id,
+            to_device=device_id,
+            asset=asset,
+            token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            expires_at_epoch=expires_at,
+            swarm_id=receiver.get("swarm_id"),
+        )
+    except Exception as error:  # noqa: BLE001 -- recording is best-effort
+        logger.warning("Failed to record transfer session %s: %s", session_id, error)
+
+    return {
+        "session_id": session_id,
+        "token": token,
+        "source_device_id": source_device_id,
+        "target_device_id": device_id,
+        "asset": asset,
+        "expires_at": expires_at,
+    }
 
 
 @app.post("/api/devices/{device_id}/heartbeat", response_model=HeartbeatResponse)

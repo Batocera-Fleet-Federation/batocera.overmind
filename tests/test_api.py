@@ -1051,6 +1051,24 @@ def test_admin_audit_log_and_sync_summary_are_super_admin_only(client):
     assert "total" in body and "by_status" in body
 
 
+def test_admin_transfers_listing_is_super_admin_only(client):
+    client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
+    admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
+    client.post("/api/auth/register", json={"email": "reg@example.com", "username": "reg", "password": "testpass123"})
+    reg_token = client.post("/api/auth/login", json={"email": "reg@example.com", "password": "testpass123"}).json()["access_token"]
+
+    assert client.get("/api/admin/transfers", headers={"Authorization": f"Bearer {reg_token}"}).status_code == 403
+
+    resp = client.get("/api/admin/transfers", headers={"Authorization": f"Bearer {admin_token}"})
+    assert resp.status_code == 200
+    payload = resp.json()
+    # Transfer sessions are Postgres-only, so the in-memory test store is empty.
+    assert payload["transfers"] == []
+    assert payload["total"] == 0
+    assert payload["limit"] == 50
+    assert payload["offset"] == 0
+
+
 def test_landing_visits_counted_by_unique_ip(client):
     client.post("/api/auth/register", json={"email": "mr_jerrodh@hotmail.com", "username": "mr-jerrodh-admin", "password": "testpass123"})
     admin_token = client.post("/api/auth/login", json={"email": "mr_jerrodh@hotmail.com", "password": "testpass123"}).json()["access_token"]
@@ -1092,9 +1110,29 @@ def test_drone_reachability_notification_type_registered():
     assert 'data-notify-type="drone_reachability"' in html
 
 
+def test_public_reachability_short_circuits_when_disabled(monkeypatch):
+    from overmind import main as overmind_main
+
+    # Disabled = the default when an Edge is deployed, or an explicit opt-out. The
+    # job must short-circuit before any DB read / probing. (The conditional default
+    # itself is covered by test_public_reachability_default_is_conditional_on_edge.)
+    monkeypatch.setattr(overmind_main, "PUBLIC_REACHABILITY_ENABLED", False)
+    called = {"n": 0}
+
+    def count(**kwargs):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr(overmind_main.postgres_store, "list_all_approved_devices", count)
+    result = overmind_main.poll_public_reachability_once()
+    assert result["status"] == "disabled"
+    assert called["n"] == 0  # short-circuits before any probing / DB read
+
+
 def test_reachability_poll_emits_notification_on_status_flip(monkeypatch):
     from overmind import main as overmind_main
 
+    monkeypatch.setattr(overmind_main, "PUBLIC_REACHABILITY_ENABLED", True)  # probe is off by default now
     device = {
         "id": "dev-1", "device_id": "drone-x", "device_name": "Drone X",
         "swarm_id": "swarm-1", "api_port": 443,
@@ -1139,6 +1177,7 @@ def test_reachability_identity_check_handles_shared_public_ip(monkeypatch):
     only the forwarded Drone is Resolvable and the other is correctly Not Resolvable."""
     from overmind import main as overmind_main
 
+    monkeypatch.setattr(overmind_main, "PUBLIC_REACHABILITY_ENABLED", True)  # probe is off by default now
     drone_a = {
         "id": "a", "device_id": "drone-a", "device_name": "A", "swarm_id": "s", "api_port": 443,
         "network": {"public_ip": "9.9.9.9"}, "public_reachability": {"resolvable": False},
@@ -1773,6 +1812,165 @@ def test_drone_ownership_claim_invalid_credentials_and_cross_swarm_admin(client,
         json={"action": "restart"},
     )
     assert action.status_code == 200
+
+
+def _claim_drone(client, headers, email, username, password, device_id, name):
+    return client.post(
+        "/api/drones/claim-ownership",
+        json={
+            "device_id": device_id,
+            "device_name": name,
+            "email": email,
+            "username": username,
+            "password": password,
+            "batocera_info": {"ip_address": "10.0.0.9"},
+        },
+    )
+
+
+def test_create_transfer_mints_session_and_token(client):
+    email, username, password = "xfer@example.com", "xfer-at-example.com", "xferpass123"
+    client.post("/api/auth/register", json={"email": email, "username": username, "password": password})
+    token = client.post(
+        "/api/auth/login", json={"email": email, "username": username, "password": password}
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    for device_id, name in (("xfer-recv", "Receiver"), ("xfer-src", "Source")):
+        claimed = _claim_drone(client, headers, email, username, password, device_id, name)
+        assert claimed.status_code == 200, claimed.text
+
+    resp = client.post(
+        "/api/devices/xfer-recv/transfers",
+        headers=headers,
+        json={
+            "source_device_id": "xfer-src",
+            "asset": {
+                "kind": "rom",
+                "system": "snes",
+                "relative_path": "game.sfc",
+                "expected_size": 1024,
+                "expected_hash": "fp",
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["session_id"]) == 32
+    assert body["source_device_id"] == "xfer-src"
+    assert body["target_device_id"] == "xfer-recv"
+    assert body["asset"]["relative_path"] == "game.sfc"
+    assert body["expires_at"] > 0
+
+    from overmind import auth as auth_utils
+    from overmind.transfer_tokens import verify_transfer_token
+
+    payload = verify_transfer_token(auth_utils.SECRET_KEY, body["token"])
+    assert payload is not None
+    assert payload["sid"] == body["session_id"]
+    assert payload["from"] == "xfer-src"
+    assert payload["to"] == "xfer-recv"
+    assert payload["asset"]["relative_path"] == "game.sfc"
+
+
+def test_create_transfer_rejects_same_source_and_target(client):
+    email, username, password = "xfer-solo@example.com", "xfer-solo-at-example.com", "solopass123"
+    client.post("/api/auth/register", json={"email": email, "username": username, "password": password})
+    token = client.post(
+        "/api/auth/login", json={"email": email, "username": username, "password": password}
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert _claim_drone(client, headers, email, username, password, "solo-drone", "Solo").status_code == 200
+
+    resp = client.post(
+        "/api/devices/solo-drone/transfers",
+        headers=headers,
+        json={"source_device_id": "solo-drone", "asset": {"kind": "rom", "relative_path": "g.sfc"}},
+    )
+    assert resp.status_code == 400
+
+
+def test_create_transfer_rejects_inaccessible_source(client):
+    a = ("xfer-a@example.com", "xfer-a-at-example.com", "apass12345")
+    b = ("xfer-b@example.com", "xfer-b-at-example.com", "bpass12345")
+    for email, username, password in (a, b):
+        client.post("/api/auth/register", json={"email": email, "username": username, "password": password})
+    a_token = client.post(
+        "/api/auth/login", json={"email": a[0], "username": a[1], "password": a[2]}
+    ).json()["access_token"]
+    a_headers = {"Authorization": f"Bearer {a_token}"}
+    assert _claim_drone(client, a_headers, *a, "a-recv", "A Recv").status_code == 200
+    b_headers = {"Authorization": "Bearer ignored"}
+    assert _claim_drone(client, b_headers, *b, "b-src", "B Src").status_code == 200
+
+    resp = client.post(
+        "/api/devices/a-recv/transfers",
+        headers=a_headers,
+        json={"source_device_id": "b-src", "asset": {"kind": "rom", "relative_path": "g.sfc"}},
+    )
+    assert resp.status_code == 404
+
+
+def test_create_transfer_accepts_receiver_drone_token(client):
+    client.post("/api/auth/register", json={"email": "dt@example.com", "username": "dt-at-example.com", "password": "dtpass12345"})
+    owner_token = client.post(
+        "/api/auth/login", json={"email": "dt@example.com", "username": "dt-at-example.com", "password": "dtpass12345"}
+    ).json()["access_token"]
+    swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {owner_token}"}).json()["swarms"][0]["id"]
+    owner = db.get_user_by_email("dt@example.com")
+    db.create_device(owner["id"], "rx-drone", "RX", {"ip_address": "10.0.0.2"}, raw_token="rx-token", swarm_id=swarm_id)
+    db.create_device(owner["id"], "tx-drone", "TX", {"ip_address": "10.0.0.3"}, raw_token="tx-token", swarm_id=swarm_id)
+
+    resp = client.post(
+        "/api/devices/rx-drone/transfers",
+        headers={"Authorization": "Bearer rx-token"},  # the receiver drone authenticates as itself
+        json={"source_device_id": "tx-drone", "asset": {"kind": "rom", "relative_path": "snes/g.sfc"}},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source_device_id"] == "tx-drone"
+    assert body["target_device_id"] == "rx-drone"
+
+    from overmind import auth as auth_utils
+    from overmind.transfer_tokens import verify_transfer_token
+
+    payload = verify_transfer_token(auth_utils.SECRET_KEY, body["token"])
+    assert payload["from"] == "tx-drone"
+    assert payload["to"] == "rx-drone"
+
+
+def test_create_transfer_drone_token_rejects_cross_swarm_source(client):
+    client.post("/api/auth/register", json={"email": "dt2@example.com", "username": "dt2-at-example.com", "password": "dt2pass1234"})
+    owner_token = client.post(
+        "/api/auth/login", json={"email": "dt2@example.com", "username": "dt2-at-example.com", "password": "dt2pass1234"}
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {owner_token}"}
+    swarm_a = client.get("/api/swarms", headers=headers).json()["swarms"][0]["id"]
+    swarm_b = client.post("/api/swarms", headers=headers, json={"name": "Swarm B"}).json()["swarm"]["id"]
+    owner = db.get_user_by_email("dt2@example.com")
+    db.create_device(owner["id"], "rx2-drone", "RX2", {"ip_address": "10.0.0.2"}, raw_token="rx2-token", swarm_id=swarm_a)
+    db.create_device(owner["id"], "tx2-drone", "TX2", {"ip_address": "10.0.0.3"}, raw_token="tx2-token", swarm_id=swarm_b)
+
+    resp = client.post(
+        "/api/devices/rx2-drone/transfers",
+        headers={"Authorization": "Bearer rx2-token"},
+        json={"source_device_id": "tx2-drone", "asset": {"kind": "rom", "relative_path": "snes/g.sfc"}},
+    )
+    assert resp.status_code == 404
+
+
+def test_swarm_payload_exposes_edge_online_for_relay_selection(client):
+    client.post("/api/auth/register", json={"email": "eo@example.com", "username": "eo-at-example.com", "password": "eopass12345"})
+    owner_token = client.post(
+        "/api/auth/login", json={"email": "eo@example.com", "username": "eo-at-example.com", "password": "eopass12345"}
+    ).json()["access_token"]
+    swarm_id = client.get("/api/swarms", headers={"Authorization": f"Bearer {owner_token}"}).json()["swarms"][0]["id"]
+    owner = db.get_user_by_email("eo@example.com")
+    db.create_device(owner["id"], "eo-a", "A", {"ip_address": "10.0.0.2"}, raw_token="eo-a-token", swarm_id=swarm_id)
+    db.create_device(owner["id"], "eo-b", "B", {"ip_address": "10.0.0.3"}, raw_token="eo-b-token", swarm_id=swarm_id)
+
+    swarm = db.get_swarm_for_device("eo-a")
+    assert len(swarm) >= 2
+    assert all("edge_online" in peer for peer in swarm)  # the field a Drone selects relay sources by
 
 
 def test_hive_lists_public_swarms_without_private_owner_data(client):
@@ -4164,6 +4362,35 @@ def test_poll_device_status_job_expires_stale_actions(client):
     main.poll_device_status_notifications_once()
 
     assert stored["status"] == "failed"
+
+
+def test_poll_device_status_job_expires_transfer_sessions(client, monkeypatch):
+    from overmind import main
+    from overmind import postgres_store as ps
+
+    calls = []
+    monkeypatch.setattr(
+        ps.postgres_store, "expire_transfer_sessions", lambda: (calls.append(1), 2)[1]
+    )
+
+    main.poll_device_status_notifications_once()
+
+    assert calls, "device-status job should sweep stale transfer sessions"
+
+
+def test_public_reachability_default_is_conditional_on_edge():
+    from overmind.main import _resolve_public_reachability_enabled as resolve
+
+    # No Edge -> probe defaults ON, so cross-network direct WAN sync still works.
+    assert resolve(edge_enabled=None, override=None) is True
+    assert resolve(edge_enabled="false", override=None) is True
+    # Edge deployed -> probe defaults OFF (outbound-only via LAN/hole-punch/relay).
+    assert resolve(edge_enabled="true", override=None) is False
+    assert resolve(edge_enabled="1", override=None) is False
+    # An explicit override always wins, regardless of the Edge.
+    assert resolve(edge_enabled="true", override="1") is True
+    assert resolve(edge_enabled="false", override="off") is False
+    assert resolve(edge_enabled="true", override="no") is False
 
 
 def test_device_action_lifecycle(client):
