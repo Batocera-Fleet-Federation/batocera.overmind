@@ -2874,10 +2874,94 @@ def test_device_roms_support_server_side_pagination(client):
     assert len(payload["roms"]) == 2
 
 
+def test_device_systems_support_server_side_pagination(client):
+    client.post(
+        "/api/auth/register",
+        json={
+            "email": "systems-page@example.com",
+            "username": "systems-page",
+            "password": "testpass123",
+        },
+    )
+    user = db.get_user_by_email("systems-page@example.com")
+    db.create_device(
+        user["id"],
+        "systems-page-drone",
+        "Systems Page Drone",
+        {"ip_address": "10.0.0.2"},
+        raw_token="systems-page-token",
+    )
+    for system_name in ["gba", "nes", "snes"]:
+        db.add_roms(
+            "systems-page-drone",
+            system_name,
+            [{"rom_name": f"{system_name}.zip", "file_path": f"{system_name}.zip"}],
+        )
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "systems-page@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+
+    response = client.get(
+        "/api/devices/systems-page-drone/systems?page=2&per_page=1",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert payload["page"] == 2
+    assert payload["per_page"] == 1
+    assert [row["system_name"] for row in payload["systems"]] == ["nes"]
+
+
+def test_devices_list_does_not_load_inventory_counts(client, monkeypatch):
+    client.post(
+        "/api/auth/register",
+        json={
+            "email": "device-list-lite@example.com",
+            "username": "device-list-lite",
+            "password": "testpass123",
+        },
+    )
+    user = db.get_user_by_email("device-list-lite@example.com")
+    db.create_device(
+        user["id"],
+        "device-list-lite-drone",
+        "Device List Lite Drone",
+        {"ip_address": "10.0.0.2"},
+        raw_token="device-list-lite-token",
+    )
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "device-list-lite@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+
+    def fail_inventory_count(device_id):
+        raise AssertionError(f"unexpected inventory count load for {device_id}")
+
+    monkeypatch.setattr(db, "count_device_roms", fail_inventory_count)
+    monkeypatch.setattr(db, "count_device_games", fail_inventory_count)
+
+    response = client.get("/api/devices", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    device = response.json()["devices"][0]
+    assert device["device_id"] == "device-list-lite-drone"
+    assert device["rom_count"] is None
+    assert device["game_count"] is None
+
+
 def test_device_systems_ui_loads_roms_by_page():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
-    assert "apiGet(`/api/devices/${selectedDeviceId}/systems`)" in js
-    assert "if (currentDeviceView === 'systems') {\n                    loadDeviceSystems();\n                    loadSwarmRomAvailabilityPanel();\n                }" in js
+    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+    assert "data-device-view=\"overview\"" in html
+    assert "currentDeviceView = 'overview';" in js
+    assert "apiGet(`/api/devices/${selectedDeviceId}/systems?${params.toString()}`)" in js
+    assert "params.set('page', String(deviceSystemsPage));" in js
+    assert "params.set('per_page', String(SYSTEMS_PAGE_SIZE));" in js
+    assert "if (currentDeviceView === 'systems') {\n                    loadDeviceSystems();\n                }" in js
+    assert "renderDroneNetworkPanel();\n                    renderDroneTokenPanel();\n                    renderDroneSpeedPanel();" in js
     assert "romParams.set('page', String(page));" in js
     assert "romParams.set('per_page', String(ROMS_PER_PAGE));" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`)" in js
@@ -3605,6 +3689,63 @@ def test_device_saves_endpoint_pages_and_searches(client):
     assert search["saves"][0]["file_path"] == "gba/Metroid.sav"
 
 
+def test_device_saves_endpoint_uses_paged_repository_method(client, monkeypatch):
+    client.post(
+        "/api/auth/register",
+        json={
+            "email": "saves-repo@example.com",
+            "username": "saves-repo-at-example.com",
+            "password": "testpass123",
+        },
+    )
+    user = db.get_user_by_email("saves-repo@example.com")
+    db.create_device(
+        user["id"],
+        "drone-saves-repo",
+        "Drone Saves Repo",
+        {"ip_address": "10.0.0.2"},
+        raw_token="drone-token-saves-repo",
+    )
+    token = client.post(
+        "/api/auth/login",
+        json={
+            "email": "saves-repo@example.com",
+            "username": "saves-repo-at-example.com",
+            "password": "testpass123",
+        },
+    ).json()["access_token"]
+
+    def fail_unpaged_load(device_id):
+        raise AssertionError(f"unexpected unpaged saves load for {device_id}")
+
+    calls = []
+
+    def fake_page(device_id, *, query=None, page=1, per_page=100):
+        calls.append(
+            {"device_id": device_id, "query": query, "page": page, "per_page": per_page}
+        )
+        return {
+            "rows": [{"system_name": "snes", "file_path": "snes/A.srm"}],
+            "total": 1,
+            "page": page,
+            "per_page": per_page,
+        }
+
+    monkeypatch.setattr(db, "get_device_saves", fail_unpaged_load)
+    monkeypatch.setattr(db, "get_device_saves_page", fake_page)
+
+    response = client.get(
+        "/api/devices/drone-saves-repo/saves?q=a&page=2&per_page=25",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert calls == [
+        {"device_id": "drone-saves-repo", "query": "a", "page": 2, "per_page": 25}
+    ]
+
+
 def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_last_chunk(client):
     client.post("/api/auth/register", json={"email": "refresh@example.com", "username": "refresh-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("refresh@example.com")
@@ -3720,6 +3861,64 @@ def test_asset_metadata_final_chunk_stores_drone_rom_inventory_fingerprint(clien
     )
 
     assert second.status_code == 200
+    device = db.get_device_by_device_id("drone-a")
+    assert device["drone_rom_inventory_fingerprint"] == expected
+    assert device["rom_inventory_fingerprint"] == expected
+
+
+def test_asset_metadata_with_drone_fingerprint_does_not_reload_full_rom_list(client, monkeypatch):
+    client.post(
+        "/api/auth/register",
+        json={
+            "email": "fingerprint-no-reload@example.com",
+            "username": "fingerprint-no-reload-at-example.com",
+            "password": "testpass123",
+        },
+    )
+    user = db.get_user_by_email("fingerprint-no-reload@example.com")
+    db.create_device(
+        user["id"],
+        "drone-a",
+        "Drone A",
+        {"ip_address": "10.0.0.2"},
+        raw_token="drone-token-a",
+    )
+    expected = db_module.compute_rom_inventory_fingerprint(
+        [
+            {
+                "system": "snes",
+                "file_path": "A.zip",
+                "rom_fingerprint": "aaa",
+                "file_size": 8,
+            },
+        ]
+    )
+
+    def fail_full_rom_load(device_id):
+        raise AssertionError(f"unexpected full ROM load for {device_id}")
+
+    monkeypatch.setattr(db, "get_device_roms", fail_full_rom_load)
+
+    response = client.post(
+        "/api/devices/drone-a/rom-metadata",
+        headers={"Authorization": "Bearer drone-token-a"},
+        json={
+            "device_id": "drone-a",
+            "type": "asset_metadata",
+            "update_mode": "inventory",
+            "rom_inventory_fingerprint": expected,
+            "roms": [
+                {
+                    "system": "snes",
+                    "file_path": "A.zip",
+                    "rom_fingerprint": "aaa",
+                    "file_size": 8,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
     device = db.get_device_by_device_id("drone-a")
     assert device["drone_rom_inventory_fingerprint"] == expected
     assert device["rom_inventory_fingerprint"] == expected
@@ -5183,7 +5382,7 @@ def test_navigation_renders_once_through_hash_route():
 
     select_start = js.index("function selectDevice(deviceId)")
     select_source = js[select_start:js.index("async function loadGameLogs", select_start)]
-    assert "setRoute('devices', deviceId, 'systems');" in select_source
+    assert "setRoute('devices', deviceId, 'overview');" in select_source
     assert "updateSelectedDeviceWorkspace();" not in select_source
     assert "switchDeviceView('systems'" not in select_source
 
@@ -5251,8 +5450,8 @@ def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
 
     assert "Drone ID" not in tile_renderer
     assert "Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}" in tile_renderer
-    assert "ROM Files: ${Number(device.rom_count || 0).toLocaleString()}" in tile_renderer
-    assert "Games: ${Number(device.game_count" in tile_renderer
+    assert "formatDeviceInventorySummary(device)" in tile_renderer
+    assert "Inventory: open Systems" in js
     assert "'Resolvable'" in tile_renderer
     assert "'Not Resolvable'" in tile_renderer
     # Swarm tile Resolvable/Not Resolvable badge is driven by Overmind's own public
@@ -5348,7 +5547,7 @@ def test_shared_swarm_navigation_state_is_reflected_in_ui_routes():
     assert "shared-swarm-nav-btn" in html
     assert "openSelectedSharedSwarm()" in html
     assert "`#/devices${swarmPath}/swarm/${swarmView}`" in js
-    assert "`#/devices${swarmPath}/device/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`" in js
+    assert "`#/devices${swarmPath}/device/${encodeURIComponent(deviceId)}/${deviceView || 'overview'}`" in js
     assert "parts[3] === 'swarm'" in js
     assert "parts[3] === 'device'" in js
     assert "row.can_view && !row.current" in js
@@ -6106,6 +6305,10 @@ def test_relational_schema_declares_domain_tables():
     assert "CREATE INDEX IF NOT EXISTS idx_actions_drone_status" in migration_sql
     assert "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery" in migration_sql
     assert "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received" in migration_sql
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_oda_rom_device_system_source" in migration_sql
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_oda_rom_internal_system" in migration_sql
+    assert "DROP INDEX CONCURRENTLY IF EXISTS idx_oda_rom_internal_system" in migration_sql
+    assert "DROP INDEX CONCURRENTLY IF EXISTS idx_oda_rom_device_system_source" in migration_sql
     assert "OVERMIND_RESET_RELATIONAL_SCHEMA" in store_source
     assert "yoyo" in store_source
     assert "CREATE INDEX IF NOT EXISTS idx_events_drone_received" in migration_sql

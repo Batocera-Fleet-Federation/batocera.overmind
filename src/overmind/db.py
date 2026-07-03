@@ -2736,7 +2736,17 @@ class OvermindDatabase:
             self._apply_rom_metadata_hash_patch(device, metadata)
             progress = metadata.get("hash_progress") if isinstance(metadata.get("hash_progress"), dict) else {}
             if progress.get("complete"):
-                self.update_device_rom_inventory_fingerprint(device_id, compute_overmind=True)
+                fingerprint = str(
+                    metadata.get("rom_inventory_fingerprint") or metadata.get("romset_files_thumbprint") or ""
+                ).strip()
+                if fingerprint:
+                    self.update_device_rom_inventory_fingerprint(
+                        device_id,
+                        drone_fingerprint=fingerprint,
+                        overmind_fingerprint=fingerprint,
+                    )
+                elif not self._asset_store_enabled():
+                    self.update_device_rom_inventory_fingerprint(device_id, compute_overmind=True)
             self.update_device_last_seen(device["id"])
             return
         before = {
@@ -2815,10 +2825,14 @@ class OvermindDatabase:
             or update_mode is None
         )
         if drone_fingerprint or should_compute_fingerprint:
+            compute_overmind = should_compute_fingerprint and not drone_fingerprint
             self.update_device_rom_inventory_fingerprint(
                 device_id,
                 drone_fingerprint=drone_fingerprint,
-                compute_overmind=should_compute_fingerprint,
+                overmind_fingerprint=(
+                    drone_fingerprint if should_compute_fingerprint and drone_fingerprint else None
+                ),
+                compute_overmind=compute_overmind,
             )
             if drone_fingerprint:
                 metadata["rom_inventory_fingerprint"] = drone_fingerprint
@@ -3293,6 +3307,61 @@ class OvermindDatabase:
         if not internal_device:
             return []
         return self._asset_rows_for_device_internal(internal_device["id"], "saves")
+
+    def get_device_saves_page(
+        self,
+        device_id: str,
+        *,
+        query: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> dict:
+        internal_device = self.get_device_by_device_id(device_id)
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 500))
+        if not internal_device:
+            return {"rows": [], "total": 0, "page": page, "per_page": per_page}
+        if self._asset_store_enabled():
+            rows, total = postgres_store.page_device_assets(
+                internal_device["id"],
+                "saves",
+                query=query,
+                page=page,
+                per_page=per_page,
+            )
+            return {"rows": rows, "total": total, "page": page, "per_page": per_page}
+        rows = list(self.saves.get(internal_device["id"], []))
+        term = str(query or "").strip().lower()
+        if term:
+            def _haystack(row: dict) -> str:
+                return " ".join(
+                    str(row.get(key) or "")
+                    for key in (
+                        "system_name",
+                        "system",
+                        "save_name",
+                        "name",
+                        "file_path",
+                        "relative_path",
+                    )
+                ).lower()
+
+            rows = [row for row in rows if term in _haystack(row)]
+        rows.sort(
+            key=lambda row: (
+                str(row.get("system_name") or row.get("system") or "").lower(),
+                str(
+                    row.get("file_path") or row.get("relative_path") or row.get("save_name") or ""
+                ).lower(),
+            )
+        )
+        start = (page - 1) * per_page
+        return {
+            "rows": rows[start:start + per_page],
+            "total": len(rows),
+            "page": page,
+            "per_page": per_page,
+        }
 
     def get_master_bios_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)
@@ -4027,6 +4096,43 @@ class OvermindDatabase:
         output = list(systems.values())
         output.sort(key=lambda row: row["system_name"])
         return output
+
+    def get_device_systems_page(
+        self,
+        device_id: str,
+        *,
+        query: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 25,
+    ) -> dict:
+        internal_device = self.get_device_by_device_id(device_id)
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 100))
+        if not internal_device:
+            return {"rows": [], "total": 0, "page": page, "per_page": per_page}
+        if self._asset_store_enabled():
+            rows, total = postgres_store.page_device_rom_systems(
+                internal_device["id"],
+                query=query,
+                page=page,
+                per_page=per_page,
+            )
+            return {"rows": rows, "total": total, "page": page, "per_page": per_page}
+        rows = self.get_device_systems_summary(device_id)
+        term = str(query or "").strip().lower()
+        if term:
+            rows = [
+                row for row in rows
+                if term in str(row.get("system_name") or row.get("name") or "").lower()
+            ]
+        rows.sort(key=lambda row: str(row.get("system_name") or row.get("name") or "").lower())
+        start = (page - 1) * per_page
+        return {
+            "rows": rows[start:start + per_page],
+            "total": len(rows),
+            "page": page,
+            "per_page": per_page,
+        }
     
     # Game play logging
     def log_gameplay(

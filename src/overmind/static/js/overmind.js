@@ -115,12 +115,14 @@
             let pendingConnections = [];
             let selectedDeviceId = null;
             let currentTab = 'devices';
-            let currentDeviceView = 'systems';
+            let currentDeviceView = 'overview';
             let routeSwarmId = null;
             let currentDeviceSystems = {};
+            let currentDeviceSystemsPage = { total: 0, page: 1, per_page: 25 };
             let currentSystemRomPages = {};
             let currentSystemArtworkPages = {};
             let deviceRomSearchQuery = '';
+            let deviceSystemsPage = 1;
             let masterRomPage = 1;
             let swarmMasterPage = 1;
             let selectedMasterRomKey = null;
@@ -175,6 +177,7 @@
             const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
             const SUPER_ADMIN_EMAIL = 'mr_jerrodh@hotmail.com';
             const MASTER_ROM_PAGE_SIZE = 100;
+            const SYSTEMS_PAGE_SIZE = 25;
             const ROMS_PER_PAGE = 20;
             const pageMeta = {
                 auth: ['Overlord Login', 'Access the Overmind'],
@@ -1029,7 +1032,7 @@
                 currentProfile = null;
                 pendingConnections = [];
                 selectedDeviceId = null;
-                currentDeviceView = 'systems';
+                currentDeviceView = 'overview';
                 lastAuthRefreshAt = 0;
                 if (pendingConnectionTimer) clearInterval(pendingConnectionTimer);
                 if (actionRefreshTimer) clearInterval(actionRefreshTimer);
@@ -1131,7 +1134,7 @@
 	                selectedSwarmId = swarmId;
 	                localStorage.setItem('selected_swarm_id', selectedSwarmId);
 	                selectedDeviceId = null;
-                    currentDeviceView = 'systems';
+                    currentDeviceView = 'overview';
                     if (options.updateRoute !== false) setRoute('devices', null, 'systems', 'drones');
 	                renderProfileUI();
                     updateSharedSwarmNavButton();
@@ -1171,7 +1174,7 @@
                     await selectSwarm(homeId);
                 } else {
                     selectedDeviceId = null;
-                    currentDeviceView = 'systems';
+                    currentDeviceView = 'overview';
                     setRoute('devices', null, 'systems', 'drones');
                 }
                 routeSwarmId = null;
@@ -1811,7 +1814,7 @@
                                         <i class="bi bi-hdd-network text-muted"></i>
                                     </div>
                                     <div class="small text-muted mb-1" data-device-field="batocera">Batocera: ${escapeHtml((device.system_info || {}).batocera_version || 'n/a')}</div>
-                                    <div class="small text-muted mb-3" data-device-field="counts">Games: ${Number(device.game_count ?? device.rom_count ?? 0).toLocaleString()} &middot; ROM Files: ${Number(device.rom_count || 0).toLocaleString()}</div>
+                                    <div class="small text-muted mb-3" data-device-field="counts">${escapeHtml(formatDeviceInventorySummary(device))}</div>
                                     <div class="mt-3 d-flex flex-wrap gap-1">
                                         <span class="badge ${device.online ? 'text-bg-success' : 'text-bg-danger'}" data-device-field="online">${device.online ? 'Online' : 'Offline'}</span>
                                         <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}" data-device-field="connected">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
@@ -1824,6 +1827,15 @@
                         `).join('')}
                     </div>
                 `;
+            }
+
+            function formatDeviceInventorySummary(device) {
+                const hasRomCount = device && device.rom_count !== undefined && device.rom_count !== null;
+                const hasGameCount = device && device.game_count !== undefined && device.game_count !== null;
+                if (!hasRomCount && !hasGameCount) return 'Inventory: open Systems';
+                const romCount = Number(device.rom_count || 0);
+                const gameCount = Number(device.game_count ?? romCount);
+                return `Games: ${gameCount.toLocaleString()} · ROM Files: ${romCount.toLocaleString()}`;
             }
 
             function updateDeviceTileBadge(tile, field, enabled, enabledText, disabledText, disabledClass) {
@@ -1856,7 +1868,7 @@
                     const lastSeen = tile.querySelector('[data-device-field="last-seen"]');
                     if (name) name.textContent = device.device_name;
                     if (batocera) batocera.textContent = `Batocera: ${(device.system_info || {}).batocera_version || 'n/a'}`;
-                    if (counts) counts.textContent = `Games: ${Number(device.game_count ?? device.rom_count ?? 0).toLocaleString()} \u00b7 ROM Files: ${Number(device.rom_count || 0).toLocaleString()}`;
+                    if (counts) counts.textContent = formatDeviceInventorySummary(device);
                     if (lastSeen) lastSeen.textContent = device.last_seen ? `Last seen: ${new Date(device.last_seen).toLocaleString()}` : 'Last seen unavailable';
                     updateDeviceTileBadge(tile, 'online', Boolean(device.online), 'Online', 'Offline', 'text-bg-danger');
                     updateDeviceTileBadge(tile, 'connected', Boolean(device.swarm_connected), 'Connected to Swarm', 'Not Connected to Swarm', 'text-bg-secondary');
@@ -1903,7 +1915,7 @@
 
             function setSwarmView(viewName) {
                 selectedDeviceId = null;
-                currentDeviceView = 'systems';
+                currentDeviceView = 'overview';
                 setRoute('devices', null, 'systems', viewName);
             }
 
@@ -2342,16 +2354,18 @@
 
             function selectDevice(deviceId) {
                 selectedDeviceId = deviceId;
-                currentDeviceView = 'systems';
+                currentDeviceView = 'overview';
                 currentDeviceSystems = {};
+                currentDeviceSystemsPage = { total: 0, page: 1, per_page: SYSTEMS_PAGE_SIZE };
                 currentSystemRomPages = {};
                 systemPageState = {};
                 deviceRomSearchQuery = '';
+                deviceSystemsPage = 1;
                 selectedMasterRomKey = null;
                 savesSearchQuery = '';
                 savesPage = 1;
                 selectedSaveKey = null;
-                setRoute('devices', deviceId, 'systems');
+                setRoute('devices', deviceId, 'overview');
             }
 
             async function loadGameLogs(options = {}) {
@@ -2369,7 +2383,7 @@
                     const logLimit = getOvermindLogLineLimit();
                     const [logsResp, deviceResp] = await Promise.all([
                         apiGet(`/api/devices/${deviceId}/gamelogs`, { showLoader: options.showLoader !== false }),
-                        apiGet(`/api/devices/${deviceId}?log_limit=${encodeURIComponent(logLimit)}`, { showLoader: options.showLoader !== false })
+                        apiGet(`/api/devices/${deviceId}?log_limit=${encodeURIComponent(logLimit)}&include_inventory=false&include_configs=true&include_logs=true`, { showLoader: options.showLoader !== false })
                     ]);
                     if (!logsResp.ok) throw new Error('Failed to load game logs');
                     if (!deviceResp.ok) throw new Error('Failed to load device details');
@@ -2601,7 +2615,7 @@
                 if (!selectedDeviceId || !container) return;
                 const deviceId = selectedDeviceId;
                 try {
-                    const response = await apiGet(`/api/devices/${deviceId}`, { showLoader: options.showLoader !== false });
+                    const response = await apiGet(`/api/devices/${deviceId}?include_inventory=false&include_configs=true&include_logs=false`, { showLoader: options.showLoader !== false });
                     if (!response.ok) throw new Error('Failed to load config data');
                     const device = await response.json();
                     if (selectedDeviceId !== deviceId) return;
@@ -2785,27 +2799,42 @@
                     return;
                 }
                 try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/systems`);
+                    const params = new URLSearchParams();
+                    const q = (deviceRomSearchQuery || '').trim();
+                    if (q) params.set('q', q);
+                    params.set('page', String(deviceSystemsPage));
+                    params.set('per_page', String(SYSTEMS_PAGE_SIZE));
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/systems?${params.toString()}`);
                     if (!response.ok) throw new Error('Failed to load device systems');
                     const data = await response.json();
                     currentSystemRomPages = {};
                     currentSystemArtworkPages = {};
+                    deviceSystemsPage = Number(data.page || deviceSystemsPage || 1);
+                    currentDeviceSystemsPage = {
+                        total: Number(data.total || 0),
+                        page: deviceSystemsPage,
+                        per_page: Number(data.per_page || SYSTEMS_PAGE_SIZE),
+                    };
                     currentDeviceSystems = (data.systems || []).reduce((systems, row) => {
                         const name = row.system_name || row.name || '';
                         if (name) systems[name] = row;
                         return systems;
                     }, {});
+                    displaySystemsTree();
                 } catch (error) {
                     console.error('Error loading systems:', error);
+                    const container = document.getElementById('systems-list');
+                    if (container) container.innerHTML = '<div class="empty-state">Unable to load systems.</div>';
                 }
             }
 
             function submitDeviceRomSearch() {
                 const input = document.getElementById('device-rom-search');
                 deviceRomSearchQuery = (input ? input.value : '').trim();
+                deviceSystemsPage = 1;
                 masterRomPage = 1;
-                updateRouteQuery({ rq: deviceRomSearchQuery, rp: 1, rs: null });
-                loadSwarmRomAvailabilityPanel();
+                updateRouteQuery({ rq: deviceRomSearchQuery, dsp: 1, rp: 1, rs: null });
+                loadDeviceSystems();
                 scrollAppToTop();
             }
 
@@ -2819,6 +2848,13 @@
                 masterRomPage = Math.max(1, page);
                 updateRouteQuery({ rp: masterRomPage });
                 loadSwarmRomAvailabilityPanel();
+                scrollAppToTop();
+            }
+
+            function setDeviceSystemsPage(page) {
+                deviceSystemsPage = Math.max(1, page);
+                updateRouteQuery({ dsp: deviceSystemsPage });
+                loadDeviceSystems();
                 scrollAppToTop();
             }
 
@@ -2872,18 +2908,14 @@
             }
 
             async function refreshSystemsAndRoms(triggerEl) {
-                // The old "Refresh systems" button only repopulated the filter dropdown
-                // (which already happens on panel load), so it looked like a no-op. Reload
-                // both the systems filter and the master ROM table, with visible feedback.
+                // Reload only the visible systems page; individual ROM pages are fetched
+                // when a system row is expanded.
                 if (!selectedDeviceId) return;
                 const btn = triggerEl || (typeof event !== 'undefined' ? event.target : null);
                 const original = btn ? btn.innerHTML : null;
                 if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Refreshing'; }
                 try {
-                    await Promise.all([
-                        populateSystemFilterOptions(),
-                        loadSwarmRomAvailabilityPanel(),
-                    ]);
+                    await loadDeviceSystems();
                     showMessage('Systems & ROMs refreshed from Overmind.', 'success');
                 } catch (err) {
                     console.error('Error refreshing systems:', err);
@@ -2920,10 +2952,8 @@
             }
 
             function filteredSystemEntries() {
-                const query = deviceRomSearchQuery;
                 return Object.entries(currentDeviceSystems).reduce((entries, [systemName, summary]) => {
-                    const systemMatches = systemName.toLowerCase().includes(query);
-                    if (!query || systemMatches) entries.push([systemName, summary]);
+                    entries.push([systemName, summary]);
                     return entries;
                 }, []);
             }
@@ -3212,12 +3242,24 @@
                 const entries = filteredSystemEntries();
                 if (!entries.length) {
                     container.innerHTML = deviceRomSearchQuery
-                        ? '<div class="empty-state">No systems or ROMs matched your search.</div>'
+                        ? '<div class="empty-state">No systems matched your search.</div>'
                         : renderDroneMetadataWaitingState('System & Roms metadata');
                     return;
                 }
                 entries.sort((a, b) => a[0].localeCompare(b[0]));
+                const total = Number(currentDeviceSystemsPage.total || entries.length);
+                const page = Number(currentDeviceSystemsPage.page || deviceSystemsPage || 1);
+                const perPage = Number(currentDeviceSystemsPage.per_page || SYSTEMS_PAGE_SIZE);
+                const pageCount = Math.max(1, Math.ceil(total / perPage));
                 container.innerHTML = `
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 small text-muted">
+                        <span>Systems ${total ? ((page - 1) * perPage) + 1 : 0}-${Math.min(page * perPage, total)} of ${total}</span>
+                        <div class="btn-group btn-group-sm bff-segmented" role="group" aria-label="System pages">
+                            <button class="btn btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setDeviceSystemsPage(${page - 1})">Previous</button>
+                            <button class="btn btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
+                            <button class="btn btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setDeviceSystemsPage(${page + 1})">Next</button>
+                        </div>
+                    </div>
                     <div class="tree-view">
                         ${entries.map(([systemName, summary]) => {
                             const count = Number(summary.rom_count || 0);
@@ -3254,7 +3296,7 @@
 
             async function refreshSelectedDroneDetails() {
                 if (!selectedDeviceId) return null;
-                const response = await apiGet(`/api/devices/${selectedDeviceId}`, { showLoader: false });
+                const response = await apiGet(`/api/devices/${selectedDeviceId}?include_inventory=false&include_configs=false&include_logs=false`, { showLoader: false });
                 if (!response.ok) throw new Error('Failed to load device details');
                 const device = await response.json();
                 const index = currentDevices.findIndex(item => item.device_id === device.device_id);
@@ -4342,12 +4384,11 @@
                 renderDroneNetworkPanel();
                 renderDroneTokenPanel();
                 renderDroneSpeedPanel();
-                loadSwarmRomAvailabilityPanel();
             }
 
             function backToDevices() {
                 selectedDeviceId = null;
-                currentDeviceView = 'systems';
+                currentDeviceView = 'overview';
                 stopSelectedDeviceDataAutoRefresh();
                 setRoute('devices', null, 'systems');
             }
@@ -4387,7 +4428,7 @@
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'systems';
+                currentDeviceView = ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'overview';
                 if (updateUrl) {
                     setRoute('devices', selectedDeviceId, currentDeviceView);
                     return;
@@ -4397,6 +4438,7 @@
                 const activeBtn = buttonEl || document.querySelector(`.device-view-btn[data-device-view="${currentDeviceView}"]`);
                 if (activeBtn) activeBtn.classList.add('active');
 
+                const overviewPanel = document.getElementById('device-overview-panel');
                 const systemsPanel = document.getElementById('device-systems-panel');
                 const biosPanel = document.getElementById('device-bios-panel');
                 const savesPanel = document.getElementById('device-saves-panel');
@@ -4405,6 +4447,7 @@
                 const configsPanel = document.getElementById('device-configs-panel');
                 const metadataPanel = document.getElementById('device-metadata-panel');
                 const adminPanel = document.getElementById('device-admin-panel');
+                if (overviewPanel) overviewPanel.style.display = currentDeviceView === 'overview' ? 'block' : 'none';
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
                 if (savesPanel) savesPanel.style.display = currentDeviceView === 'saves' ? 'block' : 'none';
@@ -4414,9 +4457,13 @@
                 if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
                 if (adminPanel) adminPanel.style.display = currentDeviceView === 'admin' ? 'block' : 'none';
 
+                if (currentDeviceView === 'overview') {
+                    renderDroneNetworkPanel();
+                    renderDroneTokenPanel();
+                    renderDroneSpeedPanel();
+                }
                 if (currentDeviceView === 'systems') {
                     loadDeviceSystems();
-                    loadSwarmRomAvailabilityPanel();
                 }
                 if (currentDeviceView === 'bios') loadDeviceBiosPanel();
                 if (currentDeviceView === 'saves') loadDeviceSavesPanel();
@@ -4455,7 +4502,7 @@
             // Page-number params are omitted from the URL when they equal 1 so a
             // first page produces a clean hash; non-page params (searches, filters,
             // selections) are only dropped when blank.
-            const ROUTE_PAGE_KEYS = new Set(['sp', 'rp', 'syp', 'bp', 'ap', 'mp']);
+            const ROUTE_PAGE_KEYS = new Set(['sp', 'dsp', 'rp', 'syp', 'bp', 'ap', 'mp']);
             function updateRouteQuery(updates, options = {}) {
                 const raw = window.location.hash || '#/devices';
                 const qIndex = raw.indexOf('?');
@@ -4502,6 +4549,7 @@
                 savesPage = intParam('sp');
                 savesSearchQuery = q.get('sq') || '';
                 selectedSaveKey = q.get('ss') || null;
+                deviceSystemsPage = intParam('dsp');
                 masterRomPage = intParam('rp');
                 deviceRomSearchQuery = q.get('rq') || '';
                 selectedMasterRomKey = q.get('rs') || null;
@@ -4523,14 +4571,14 @@
                 if (tabName === 'devices') {
                     const swarmPath = isSharedSwarmSelected() ? `/swarm/${encodeURIComponent(selectedSwarmId)}` : '';
                     if (!deviceId && swarmView) hash = `#/devices${swarmPath}/swarm/${swarmView}`;
-                    if (deviceId) hash = `#/devices${swarmPath}/device/${encodeURIComponent(deviceId)}/${deviceView || 'systems'}`;
+                    if (deviceId) hash = `#/devices${swarmPath}/device/${encodeURIComponent(deviceId)}/${deviceView || 'overview'}`;
                 }
                 if (window.location.hash !== hash) window.location.hash = hash; else applyRouteFromHash();
             }
 
             function normalizeDeviceView(viewName) {
                 if (viewName === 'actions') return 'metadata';
-                return ['bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'systems';
+                return ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'overview';
             }
 
             function saveRowKey(row) {
@@ -4682,7 +4730,7 @@
                 const clean = raw.replace(/^#\/?/, '');
                 const parts = clean.split('/').filter(Boolean);
                 const allowed = ['devices', 'hive', 'profile', 'notifications', 'super-admin', 'help'];
-                if ((parts[0] === 'systems' || parts[0] === 'bios' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata' || parts[0] === 'admin') && parts[1]) {
+                if ((parts[0] === 'overview' || parts[0] === 'systems' || parts[0] === 'bios' || parts[0] === 'gamelogs' || parts[0] === 'configs' || parts[0] === 'actions' || parts[0] === 'metadata' || parts[0] === 'admin') && parts[1]) {
                     return { tab: 'devices', deviceId: decodeURIComponent(parts[1]), deviceView: normalizeDeviceView(parts[0]) };
                 }
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
@@ -4717,7 +4765,7 @@
                     selectedDeviceId = null;
                 } else if (route.deviceId && currentDevices.some(d => d.device_id === route.deviceId)) {
                     selectedDeviceId = route.deviceId;
-                    currentDeviceView = route.deviceView || 'systems';
+                    currentDeviceView = route.deviceView || 'overview';
                 }
                 switchTab(route.tab, null, false);
                 if (selectedDeviceId && route.tab === 'devices') switchDeviceView(currentDeviceView, null, false);
@@ -5597,7 +5645,7 @@
                     const response = await apiDelete(`/api/devices/${selectedDeviceId}`);
                     if (!response.ok) throw new Error('Failed to delete device');
                     selectedDeviceId = null;
-                    currentDeviceView = 'systems';
+                    currentDeviceView = 'overview';
                     await loadDevices();
                     setRoute('devices', null, 'systems');
                     showMessage('Drone disconnected.', 'success');

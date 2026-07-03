@@ -122,6 +122,10 @@ def count_assets_key(device_id: str, asset_type: str) -> str:
     return _key("ca", device_id, asset_type)
 
 
+def count_games_key(device_id: str) -> str:
+    return count_assets_key(device_id, "games")
+
+
 def rom_systems_key(device_ids: list[str]) -> str:
     return _key("rs", _hash(sorted(device_ids)))
 

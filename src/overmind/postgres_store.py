@@ -467,8 +467,8 @@ class PostgresMetadataStore:
                 return True
 
     # Migration IDs that must never block a Lambda cold start:
-    # 0003 (40k-row backfill) and 0004 (indexes) both exceed the 30 s timeout.
-    _BACKGROUND_MIGRATION_IDS = frozenset({"0003", "0004"})
+    # large backfills/indexes exceed the 30 s timeout on production-sized tables.
+    _BACKGROUND_MIGRATION_IDS = frozenset({"0003", "0004", "0017"})
 
     def _run_migrations(self, conn, migration_files: list[Path]) -> None:
         """Apply a list of SQL migration files that have not yet been recorded."""
@@ -496,6 +496,10 @@ class PostgresMetadataStore:
                         if row:
                             continue
                 sql = path.read_text(encoding="utf-8")
+                no_transaction = any(
+                    line.strip().lower().startswith("-- no-transaction")
+                    for line in sql.splitlines()
+                )
                 # Strip yoyo directives and rollback sections (not used here)
                 lines = []
                 in_rollback = False
@@ -513,9 +517,21 @@ class PostgresMetadataStore:
                 conn3 = self._connect()
                 if conn3 is None:
                     break
-                with conn3:
-                    with conn3.cursor() as cur:
-                        cur.execute(clean_sql)
+                if no_transaction:
+                    try:
+                        target_conn = getattr(conn3, "_conn", conn3)
+                        target_conn.autocommit = True
+                        with conn3.cursor() as cur:
+                            cur.execute(clean_sql)
+                    finally:
+                        try:
+                            conn3.close()
+                        except Exception:
+                            pass
+                else:
+                    with conn3:
+                        with conn3.cursor() as cur:
+                            cur.execute(clean_sql)
                 conn4 = self._connect()
                 if conn4 is None:
                     break
@@ -540,9 +556,9 @@ class PostgresMetadataStore:
         Each migration file is idempotent (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS
         guards), so concurrent execution is safe without locks.
 
-        Fast migrations (0001, 0002, 0005) run synchronously on cold start.
-        Slow migrations (0003 backfill, 0004 indexes) run in a background thread
-        so Lambda cold starts complete in < 1 s.
+        Fast migrations run synchronously on cold start. Slow migrations
+        (large backfills/indexes) run in a background thread so Lambda cold
+        starts complete in < 1 s.
         """
         if self._ready or not self.url:
             return
@@ -5644,6 +5660,7 @@ class PostgresMetadataStore:
         asset_type: str,
         *,
         system_name: Optional[str] = None,
+        query: Optional[str] = None,
         page: int = 1,
         per_page: int = 100,
     ) -> tuple[list[dict], int]:
@@ -5661,6 +5678,24 @@ class PostgresMetadataStore:
         if system_name:
             where.append("lower(coalesce(system_name, '')) = lower(%s)")
             params.append(system_name)
+        clean_query = str(query or "").strip().lower()
+        if clean_query:
+            like = f"%{clean_query}%"
+            if asset_type == "saves":
+                where.append(
+                    """
+                    (
+                        lower(coalesce(system_name, '')) LIKE %s
+                        OR lower(coalesce(payload->>'system', '')) LIKE %s
+                        OR lower(coalesce(payload->>'save_name', payload->>'name', '')) LIKE %s
+                        OR lower(coalesce(payload->>'file_path', payload->>'relative_path', '')) LIKE %s
+                    )
+                    """
+                )
+                params.extend([like, like, like, like])
+            else:
+                where.append("lower(payload::text) LIKE %s")
+                params.append(like)
         where_sql = " AND ".join(where)
         with conn:
             with conn.cursor() as cur:
@@ -5938,6 +5973,99 @@ class PostgresMetadataStore:
             _cache.set(cache_key, result, ttl=60)
         return result
 
+    def page_device_rom_systems(
+        self,
+        device_internal_id: str,
+        *,
+        query: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 25,
+    ) -> tuple[list[dict], int]:
+        if not device_internal_id or not self.assets_enabled():
+            return [], 0
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return [], 0
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 100))
+        offset = (page - 1) * per_page
+        where = [
+            "device_internal_id = %s",
+            "asset_type = 'rom'",
+            "system_name IS NOT NULL",
+        ]
+        params: list[object] = [device_internal_id]
+        clean_query = str(query or "").strip().lower()
+        if clean_query:
+            where.append("lower(system_name) LIKE %s")
+            params.append(f"%{clean_query}%")
+        where_sql = " AND ".join(where)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT count(*) FROM (
+                        SELECT 1
+                        FROM overmind_device_assets
+                        WHERE {where_sql}
+                        GROUP BY system_name
+                    ) systems
+                    """,
+                    params,
+                )
+                total = int((cur.fetchone() or [0])[0] or 0)
+                if not total:
+                    return [], 0
+                cur.execute(
+                    f"""
+                    WITH selected_systems AS (
+                        SELECT system_name
+                        FROM overmind_device_assets
+                        WHERE {where_sql}
+                        GROUP BY system_name
+                        ORDER BY system_name
+                        LIMIT %s OFFSET %s
+                    ),
+                    played AS (
+                        SELECT system_name, max(played_at) AS last_played_at
+                        FROM gameplay_sessions
+                        WHERE drone_id = %s
+                        GROUP BY system_name
+                    )
+                    SELECT s.system_name,
+                           count(*) AS rom_count,
+                           CASE
+                               WHEN count(*) FILTER (
+                                   WHERE lower(coalesce(a.payload->>'metadata_source', a.payload->>'source', '')) = 'gamelist.xml'
+                               ) = 0
+                               THEN count(*)
+                               ELSE count(*) FILTER (
+                                   WHERE lower(coalesce(a.payload->>'metadata_source', a.payload->>'source', '')) = 'gamelist.xml'
+                               )
+                           END AS game_count,
+                           p.last_played_at
+                    FROM selected_systems s
+                    JOIN overmind_device_assets a
+                      ON a.device_internal_id = %s
+                     AND a.asset_type = 'rom'
+                     AND a.system_name = s.system_name
+                    LEFT JOIN played p ON p.system_name = s.system_name
+                    GROUP BY s.system_name, p.last_played_at
+                    ORDER BY s.system_name
+                    """,
+                    [*params, per_page, offset, device_internal_id, device_internal_id],
+                )
+                rows = cur.fetchall()
+        return [
+            {
+                "system_name": row[0],
+                "rom_count": int(row[1] or 0),
+                "game_count": int(row[2] or 0),
+                "last_played_at": row[3],
+            }
+            for row in rows
+        ], total
+
     def count_device_assets(self, device_id: str, asset_type: str) -> Optional[int]:
         if _cache:
             cache_key = _cache.count_assets_key(device_id, asset_type)
@@ -5963,6 +6091,11 @@ class PostgresMetadataStore:
         """Count distinct games for a device: gamelist entries per system, falling
         back to the rom-file count for systems that have no gamelist. This is the
         number EmulationStation shows, as opposed to the raw rom-file count."""
+        if _cache:
+            cache_key = _cache.count_games_key(device_id)
+            cached = _cache.get(cache_key)
+            if cached is not None:
+                return int(cached)
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
@@ -5982,13 +6115,16 @@ class PostgresMetadataStore:
                         END AS games
                         FROM overmind_device_assets
                         WHERE device_id = %s AND asset_type = 'rom'
-                        GROUP BY coalesce(system_name, '')
+                        GROUP BY system_name
                     ) per_system
                     """,
                     (device_id,),
                 )
                 row = cur.fetchone()
-                return int(row[0] or 0) if row else 0
+                result = int(row[0] or 0) if row else 0
+        if _cache:
+            _cache.set(cache_key, result, ttl=300)
+        return result
 
     def count_device_games_relational(self, device_id: str) -> Optional[int]:
         """Games count from the relational ``drone_roms`` table (asset store disabled)."""

@@ -25,6 +25,44 @@ class _SqlStateError(Exception):
         self.sqlstate = sqlstate
 
 
+class _MigrationCursor:
+    def __init__(self, fetchone_result=None):
+        self.executed = []
+        self.fetchone_result = fetchone_result
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        return self
+
+    def fetchone(self):
+        return self.fetchone_result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _MigrationConn:
+    def __init__(self, fetchone_result=None):
+        self.autocommit = False
+        self.closed = False
+        self.cursor_obj = _MigrationCursor(fetchone_result=fetchone_result)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def close(self):
+        self.closed = True
+
+
 def test_is_missing_column_error_by_sqlstate():
     assert _is_missing_column_error(_SqlStateError("42703")) is True
     assert _is_missing_column_error(_SqlStateError("23505")) is False
@@ -81,3 +119,34 @@ def test_self_heal_propagates_when_retry_still_fails():
     with pytest.raises(UndefinedColumn):
         store._with_schema_self_heal("get_device", always_missing)
     assert attempts["n"] == 2  # tried once, retried once, then gave up
+
+
+def test_no_transaction_migration_runs_with_autocommit(tmp_path):
+    migration = tmp_path / "0017.concurrent_index.sql"
+    migration.write_text(
+        """
+        -- depends: 0016.transfer_sessions
+        -- no-transaction
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_test ON some_table (id);
+        -- rollback
+        DROP INDEX CONCURRENTLY IF EXISTS idx_test;
+        """,
+        encoding="utf-8",
+    )
+    store = PostgresMetadataStore()
+    check_conn = _MigrationConn(fetchone_result=None)
+    apply_conn = _MigrationConn()
+    mark_conn = _MigrationConn()
+    connections = iter([check_conn, apply_conn, mark_conn])
+    store._connect = lambda: next(connections)  # type: ignore[assignment]
+
+    store._run_migrations(_MigrationConn(), [migration])
+
+    assert apply_conn.autocommit is True
+    assert apply_conn.closed is True
+    applied_sql = apply_conn.cursor_obj.executed[0][0]
+    assert "CREATE INDEX CONCURRENTLY" in applied_sql
+    assert "DROP INDEX" not in applied_sql
+    assert mark_conn.cursor_obj.executed[0][0].startswith(
+        "INSERT INTO _overmind_migrations"
+    )

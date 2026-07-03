@@ -2064,13 +2064,21 @@ async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[s
     
     return {
         "devices": [
-            device_response(d) for d in devices
+            device_response(d, include_inventory_counts=False, include_emulator_configs=False)
+            for d in devices
         ]
     }
 
 
 @app.get("/api/devices/{device_id}", response_model=DeviceModel)
-async def get_device(device_id: str, log_limit: int = 10, authorization: Optional[str] = Header(default=None)):
+async def get_device(
+    device_id: str,
+    log_limit: int = 10,
+    include_inventory: bool = True,
+    include_configs: bool = True,
+    include_logs: bool = True,
+    authorization: Optional[str] = Header(default=None),
+):
     """Get device details."""
     user = get_current_user(authorization)
     device = db.user_can_access_device(user["id"], device_id)
@@ -2079,14 +2087,19 @@ async def get_device(device_id: str, log_limit: int = 10, authorization: Optiona
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    response = device_response(device)
-    stream_payload = _current_drone_log_stream(device_id)
-    if stream_payload is not None:
-        response["log_sources"] = stream_payload
-        response["log_stream_active"] = True
-    else:
-        response["log_sources"] = db.get_device_log_sources(device_id, line_limit=log_limit)
-        response["log_stream_active"] = False
+    response = device_response(
+        device,
+        include_inventory_counts=include_inventory,
+        include_emulator_configs=include_configs,
+    )
+    if include_logs:
+        stream_payload = _current_drone_log_stream(device_id)
+        if stream_payload is not None:
+            response["log_sources"] = stream_payload
+            response["log_stream_active"] = True
+        else:
+            response["log_sources"] = db.get_device_log_sources(device_id, line_limit=log_limit)
+            response["log_stream_active"] = False
     return response
 
 
@@ -2785,23 +2798,10 @@ async def get_device_saves(
     device = db.user_can_access_device(user["id"], device_id)
     if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    saves = db.get_device_saves(device_id)
-    term = str(q or "").strip().lower()
-    if term:
-        def _haystack(row: dict) -> str:
-            return " ".join(str(row.get(key) or "") for key in (
-                "system_name", "system", "save_name", "name", "file_path", "relative_path",
-            )).lower()
-        saves = [row for row in saves if term in _haystack(row)]
-    saves.sort(key=lambda row: (
-        str(row.get("system_name") or row.get("system") or "").lower(),
-        str(row.get("file_path") or row.get("relative_path") or row.get("save_name") or "").lower(),
-    ))
-    total = len(saves)
     per_page = max(1, min(int(per_page or 100), 500))
     page = max(1, int(page or 1))
-    start = (page - 1) * per_page
-    return {"saves": saves[start:start + per_page], "total": total, "page": page, "per_page": per_page}
+    result = db.get_device_saves_page(device_id, query=q, page=page, per_page=per_page)
+    return {"saves": result["rows"], "total": result["total"], "page": page, "per_page": per_page}
 
 
 @app.get("/api/devices/{device_id}/master-bios", response_model=MasterBiosResponse)
@@ -3351,6 +3351,9 @@ async def search_sync_activity(
 @app.get("/api/devices/{device_id}/systems", response_model=SystemsResponse)
 async def get_device_systems(
     device_id: str,
+    q: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 25,
     authorization: Optional[str] = Header(default=None),
 ):
     """Get systems for a selected device."""
@@ -3361,7 +3364,13 @@ async def get_device_systems(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found",
         )
-    return {"systems": db.get_device_systems_summary(device_id)}
+    result = db.get_device_systems_page(device_id, query=q, page=page, per_page=per_page)
+    return {
+        "systems": result["rows"],
+        "total": result["total"],
+        "page": result["page"],
+        "per_page": result["per_page"],
+    }
 
 
 # ==================== Game Play Logging ====================
