@@ -6407,9 +6407,8 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
         "gamelogs": {"d1": [{"id": "g1", "game_name": "Game", "system_name": "snes"}]},
         "download_states": {"d1": {"active": [{"job_id": "j1", "status": "downloading"}], "queued": [], "recent": []}},
     })
-    store._upsert_domain_assets(cur, "d1", "rom", [{"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"}])
+    store._upsert_domain_assets(cur, "d1", "rom", [{"system_name": "snes", "gamelist_id": "2144", "name": "Game", "rom_fingerprint": "abc"}])
     store._upsert_domain_assets(cur, "d1", "bios", [{"file_path": "bios.bin", "bios_md5": "def"}])
-    store._upsert_domain_assets(cur, "d1", "artwork", [{"system_name": "snes", "rom_path": "Game.zip", "artwork_types": ["image"]}])
 
     sql = "\n".join(statement for statement, _ in cur.statements)
     for table_name in [
@@ -6421,11 +6420,13 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
         "INSERT INTO gameplay_sessions",
         "INSERT INTO download_snapshots",
         "INSERT INTO download_items",
-        "INSERT INTO drone_roms",
+        "INSERT INTO drone_games",
         "INSERT INTO drone_bios",
-        "INSERT INTO drone_artwork",
     ]:
         assert table_name in sql
+    # Games live in drone_games (keyed by gamelist_id); drone_roms/drone_artwork are gone.
+    assert "INSERT INTO drone_roms" not in sql
+    assert "INSERT INTO drone_artwork" not in sql
 
 
 def test_postgres_store_batches_artwork_asset_deletes(monkeypatch):
