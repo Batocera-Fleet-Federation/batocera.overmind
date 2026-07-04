@@ -2493,7 +2493,6 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
         # resync only when they differ.
         "romset_files_thumbprint": str((updated or {}).get("romset_files_thumbprint") or "") or None,
         "bios_files_thumbprint": str((updated or {}).get("bios_files_thumbprint") or "") or None,
-        "saves_files_thumbprint": str((updated or {}).get("saves_files_thumbprint") or "") or None,
     }
 
 
@@ -2509,12 +2508,23 @@ async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataU
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload device_id mismatch")
     roms = metadata.get("roms") if isinstance(metadata.get("roms"), list) else []
     bios = metadata.get("bios") if isinstance(metadata.get("bios"), list) else []
-    artwork = metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else []
-    saves = metadata.get("saves") if isinstance(metadata.get("saves"), list) else []
+    dropped_artwork = metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else []
+    dropped_saves = metadata.get("saves") if isinstance(metadata.get("saves"), list) else []
+    metadata["artwork"] = []
+    metadata["saves"] = []
+    metadata.pop("saves_files_thumbprint", None)
+    metadata.pop("saves_root", None)
+    deleted = metadata.get("deleted") if isinstance(metadata.get("deleted"), dict) else None
+    if deleted is not None:
+        deleted["artwork"] = []
+        deleted["saves"] = []
     db.store_rom_metadata(device_id, metadata)
     db.update_device_last_seen(device["id"])
-    print(f"Asset metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)} artwork_count={len(artwork)} saves_count={len(saves)}")
-    return {"rom_count": len(roms), "bios_count": len(bios), "artwork_count": len(artwork), "saves_count": len(saves)}
+    print(
+        f"Asset metadata upload accepted for {device_id}: rom_count={len(roms)} bios_count={len(bios)} "
+        f"artwork_count=0 saves_count=0 dropped_artwork={len(dropped_artwork)} dropped_saves={len(dropped_saves)}"
+    )
+    return {"rom_count": len(roms), "bios_count": len(bios), "artwork_count": 0, "saves_count": 0}
 
 
 @app.post("/api/drones/rom-metadata", response_model=AssetMetadataAck)

@@ -2752,7 +2752,6 @@ class OvermindDatabase:
         before = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
-            "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
         } if swarm_id and not is_inventory_chunk else {}
         row_metadata = metadata
         if update_mode == "inventory_chunk":
@@ -2790,21 +2789,13 @@ class OvermindDatabase:
             if is_inventory_delta or not replace_all:
                 self._delete_asset_rows(device_id, "rom", row_metadata.get("roms") or [])
                 self._delete_asset_rows(device_id, "bios", row_metadata.get("bios") or [])
-                self._delete_asset_rows(device_id, "artwork", row_metadata.get("artwork") or [])
-                self._delete_asset_rows(device_id, "saves", row_metadata.get("saves") or [])
             for system_name, rows in grouped.items():
                 self.add_roms(device_id, system_name, rows, replace=False)
             if row_metadata.get("bios"):
                 self.add_bios(device_id, row_metadata["bios"], replace=False)
-            if row_metadata.get("artwork"):
-                self.add_artwork(device_id, row_metadata["artwork"], replace=False)
-            if row_metadata.get("saves"):
-                self.add_saves(device_id, row_metadata["saves"], replace=False)
             deleted = row_metadata.get("deleted") if is_inventory_delta and isinstance(row_metadata.get("deleted"), dict) else {}
             self._delete_asset_rows(device_id, "rom", deleted.get("roms") or [])
             self._delete_asset_rows(device_id, "bios", deleted.get("bios") or [])
-            self._delete_asset_rows(device_id, "artwork", deleted.get("artwork") or [])
-            self._delete_asset_rows(device_id, "saves", deleted.get("saves") or [])
         drone_fingerprint = str(row_metadata.get("rom_inventory_fingerprint") or "").strip() or None
         delta_complete = False
         if is_inventory_delta:
@@ -2844,18 +2835,15 @@ class OvermindDatabase:
         if should_compute_fingerprint:
             romset_thumbprint = str(row_metadata.get("romset_files_thumbprint") or drone_fingerprint or "").strip() or None
             bios_thumbprint = str(row_metadata.get("bios_files_thumbprint") or "").strip() or None
-            saves_thumbprint = str(row_metadata.get("saves_files_thumbprint") or "").strip() or None
-            if romset_thumbprint is not None or bios_thumbprint is not None or saves_thumbprint is not None:
+            if romset_thumbprint is not None or bios_thumbprint is not None:
                 self.update_device_asset_thumbprints(
                     device_id,
                     romset_thumbprint=romset_thumbprint,
                     bios_thumbprint=bios_thumbprint,
-                    saves_thumbprint=saves_thumbprint,
                 )
         after = {
             "rom": self._master_snapshot_for_swarm(swarm_id, "rom"),
             "bios": self._master_snapshot_for_swarm(swarm_id, "bios"),
-            "artwork": self._master_snapshot_for_swarm(swarm_id, "artwork"),
         } if swarm_id and not is_inventory_chunk else {}
         if not is_inventory_chunk:
             self._notify_master_list_changes(swarm_id, before, after)
@@ -2873,10 +2861,10 @@ class OvermindDatabase:
                 merged[key] = incoming[key]
         merged["chunk_index"] = chunk_index
         merged["inventory_complete"] = bool(incoming.get("inventory_complete"))
-        received = dict(merged.get("inventory_received") or {}) if chunk_index else {"roms": 0, "bios": 0, "artwork": 0}
+        received = dict(merged.get("inventory_received") or {}) if chunk_index else {"roms": 0, "bios": 0}
         received["roms"] = int(received.get("roms") or 0) + len(incoming.get("roms") if isinstance(incoming.get("roms"), list) else [])
         received["bios"] = int(received.get("bios") or 0) + len(incoming.get("bios") if isinstance(incoming.get("bios"), list) else [])
-        received["artwork"] = int(received.get("artwork") or 0) + len(incoming.get("artwork") if isinstance(incoming.get("artwork"), list) else [])
+        received.pop("artwork", None)
         merged["inventory_received"] = received
         return merged
 

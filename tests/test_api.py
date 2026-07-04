@@ -330,7 +330,6 @@ def test_notifications_capture_master_list_add_and_read(client):
         "systems": [{"name": "snes"}],
         "roms": [{"system": "snes", "rom_name": "Chrono Trigger", "file_path": "Chrono Trigger.zip", "rom_fingerprint": "abc"}],
         "bios": [{"file_path": "dc/flash.bin", "bios_md5": "bios-fingerprint"}],
-        "artwork": [{"system": "snes", "rom_path": "Chrono Trigger.zip", "artwork_types": ["image"]}],
     })
 
     response = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"})
@@ -339,7 +338,6 @@ def test_notifications_capture_master_list_add_and_read(client):
     event_types = {row["event_type"] for row in notifications}
     assert "master_rom_added" in event_types
     assert "master_bios_added" in event_types
-    assert "master_artwork_added" in event_types
     assert any("Notify Drone" in row["message"] and "Chrono Trigger.zip" in row["message"] for row in notifications)
     assert all("short_description" in row and "full_description" in row for row in notifications)
     assert any(row["short_description"] == row["title"] and row["full_description"] == row["message"] for row in notifications)
@@ -3656,14 +3654,15 @@ def test_asset_metadata_upload_accepts_drone_sync_payload_fields(client):
     )
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"rom_count": 1, "bios_count": 1, "artwork_count": 1, "saves_count": 0}
+    assert response.json() == {"rom_count": 1, "bios_count": 1, "artwork_count": 0, "saves_count": 0}
     stored = db.get_device_by_device_id("drone-a")["rom_metadata"]
     assert stored["collected_at"] == "2026-05-30T23:43:00+00:00"
     assert stored["bios_root"] == "/userdata/bios"
     assert stored["cache"] == {"schema_version": 3}
+    assert db.get_master_artwork_for_device(user["id"], "drone-a") == []
 
 
-def test_asset_metadata_upload_stores_and_lists_game_saves(client):
+def test_asset_metadata_upload_drops_game_saves(client):
     client.post("/api/auth/register", json={"email": "saves@example.com", "username": "saves-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("saves@example.com")
     db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
@@ -3686,21 +3685,18 @@ def test_asset_metadata_upload_stores_and_lists_game_saves(client):
         },
     )
     assert upload.status_code == 200, upload.text
-    assert upload.json()["saves_count"] == 2
+    assert upload.json()["saves_count"] == 0
 
     listing = client.get("/api/devices/drone-a/saves", headers={"Authorization": f"Bearer {user_token}"})
     assert listing.status_code == 200
-    saves = listing.json()["saves"]
-    assert {row["file_path"] for row in saves} == {"snes/Chrono Trigger.srm", "gba/Metroid.sav"}
-    assert {row["fingerprint"] for row in saves} == {"fp-ct", "fp-mf"}
+    assert listing.json()["saves"] == []
 
-    # The Drone-supplied saves thumbprint is stored verbatim and echoed in the heartbeat.
     heartbeat = client.post(
         "/api/devices/drone-a/heartbeat",
         headers={"Authorization": "Bearer drone-token-a"},
         json={"device_name": "Drone A"},
     )
-    assert heartbeat.json()["saves_files_thumbprint"] == "saves-thumb-1"
+    assert "saves_files_thumbprint" not in heartbeat.json()
 
 
 def test_device_saves_endpoint_pages_and_searches(client):
@@ -3714,12 +3710,7 @@ def test_device_saves_endpoint_pages_and_searches(client):
         for i in range(7)
     ]
     saves.append({"system": "gba", "save_name": "Metroid.sav", "file_path": "gba/Metroid.sav", "fingerprint": "fp-mf", "file_size": 4096, "modified_time": 1717009999})
-    upload = client.post(
-        "/api/devices/drone-sp/rom-metadata",
-        headers={"Authorization": "Bearer drone-token-sp"},
-        json={"device_id": "drone-sp", "type": "asset_metadata", "update_mode": "inventory", "replace_all": True, "saves": saves},
-    )
-    assert upload.status_code == 200, upload.text
+    db.add_saves("drone-sp", saves)
 
     auth = {"Authorization": f"Bearer {token}"}
     # Paging: page 1 of 3 with per_page=3, total=8.
@@ -4265,7 +4256,7 @@ def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client)
     assert action["payload"]["devices"] == [{"device_id": "source-with-bios", "device_name": "Source With BIOS"}]
 
 
-def test_asset_metadata_upload_persists_artwork_and_master_artwork(client):
+def test_asset_metadata_upload_drops_artwork(client):
     client.post("/api/auth/register", json={"email": "artwork@example.com", "username": "artwork-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
@@ -4295,14 +4286,11 @@ def test_asset_metadata_upload_persists_artwork_and_master_artwork(client):
         },
     )
     assert response.status_code == 200
-    assert response.json()["artwork_count"] == 1
+    assert response.json()["artwork_count"] == 0
 
     master_response = client.get("/api/devices/drone-b/master-artwork", headers={"Authorization": f"Bearer {token}"})
     assert master_response.status_code == 200
-    rows = master_response.json()["artwork"]
-    assert {(row["rom_path"], row["artwork_type"]) for row in rows} == {("Game.zip", "image"), ("Game.zip", "marquee")}
-    assert all(row["present_on_selected"] is False for row in rows)
-    assert all(row["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}] for row in rows)
+    assert master_response.json()["artwork"] == []
 
 
 def test_sync_artwork_action_payload_includes_only_source_devices_with_artwork(client):
@@ -5870,7 +5858,7 @@ def test_heartbeat_ignores_rom_metadata_and_rom_metadata_endpoint_persists(clien
         },
     )
     assert heartbeat_response.status_code == 200
-    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint", "saves_files_thumbprint"}
+    assert set(heartbeat_response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint"}
     assert "device" not in heartbeat_response.json()
     swarm_peer = next(row for row in heartbeat_response.json()["swarm"] if row["drone_id"] == "arcade-cabinet-001")
     assert swarm_peer["reachable_url"] == "https://bff-drone-a:443"
@@ -5969,7 +5957,7 @@ def test_heartbeat_survives_noncritical_state_update_failure(client, monkeypatch
         json={"device_name": "Resilient Drone"},
     )
     assert response.status_code == 200
-    assert set(response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint", "saves_files_thumbprint"}
+    assert set(response.json()) == {"actions", "swarm", "log_stream_requested", "romset_files_thumbprint", "bios_files_thumbprint"}
 
 
 def test_invitation_register_auto_verifies_and_rejects_mismatched_email(client):

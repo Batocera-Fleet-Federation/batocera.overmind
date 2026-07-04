@@ -892,7 +892,6 @@ class HeartbeatResponse(ExtensibleContractModel):
     log_stream_requested: bool = False
     romset_files_thumbprint: Optional[str] = None
     bios_files_thumbprint: Optional[str] = None
-    saves_files_thumbprint: Optional[str] = None
 
 
 class AssetMetadataAck(ExtensibleContractModel):

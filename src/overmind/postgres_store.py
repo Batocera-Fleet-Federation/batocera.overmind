@@ -468,7 +468,7 @@ class PostgresMetadataStore:
 
     # Migration IDs that must never block a Lambda cold start:
     # large backfills/indexes exceed the 30 s timeout on production-sized tables.
-    _BACKGROUND_MIGRATION_IDS = frozenset({"0003", "0004", "0017"})
+    _BACKGROUND_MIGRATION_IDS = frozenset({"0003", "0004", "0017", "0018"})
 
     def _run_migrations(self, conn, migration_files: list[Path]) -> None:
         """Apply a list of SQL migration files that have not yet been recorded."""
@@ -742,7 +742,7 @@ class PostgresMetadataStore:
                             (source_id, path, combined, modified_at),
                         )
 
-    def store_device_emulator_configs(self, internal_device_id: str, payload: dict, max_versions: int = 10) -> None:
+    def store_device_emulator_configs(self, internal_device_id: str, payload: dict, max_versions: int = 1) -> None:
         if not self.url or not internal_device_id or not isinstance(payload, dict):
             return
         self.ensure_schema()
@@ -824,7 +824,7 @@ class PostgresMetadataStore:
                               LIMIT %s
                           )
                         """,
-                        (config_id, config_id, max(1, int(max_versions or 10))),
+                        (config_id, config_id, max(1, int(max_versions or 1))),
                     )
 
     def get_device_log_sources(self, internal_device_id: str, line_limit: int = 10) -> dict:
@@ -898,7 +898,7 @@ class PostgresMetadataStore:
                     in cur.fetchall()
                 ]
 
-    def get_device_emulator_configs(self, internal_device_id: str, max_versions: int = 10) -> dict:
+    def get_device_emulator_configs(self, internal_device_id: str, max_versions: int = 1) -> dict:
         payload = {"type": "emulator_configs", "configs": []}
         if not self.url or not internal_device_id:
             return payload
@@ -932,7 +932,7 @@ class PostgresMetadataStore:
                         ORDER BY received_at DESC, id DESC
                         LIMIT %s
                         """,
-                        (config_id, max(1, int(max_versions or 10))),
+                        (config_id, max(1, int(max_versions or 1))),
                     )
                     versions = [
                         {
