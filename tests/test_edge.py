@@ -446,6 +446,12 @@ class StorePresenceTests(unittest.TestCase):
         sql, params = cursor.executed[0]
         self.assertIn("drone_network_state", sql)
         self.assertIn("edge_online", sql)
+        # Regression: the device_id -> internal id lookup must target the real
+        # `drones` table. It previously read `FROM devices` -- no such relation --
+        # so every presence write raised `relation "devices" does not exist` and
+        # edge_online was never persisted (the "Online via Edge" badge never lit).
+        self.assertIn("FROM drones", sql)
+        self.assertNotIn("FROM devices", sql)
         # (online, edge_node, reflexive, online-again-for-CASE, device_id)
         self.assertEqual(params, (True, "node-a", "9.9.9.9:5", True, "dev1"))
 

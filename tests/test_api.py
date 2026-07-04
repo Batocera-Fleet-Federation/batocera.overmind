@@ -1973,6 +1973,31 @@ def test_swarm_payload_exposes_edge_online_for_relay_selection(client):
     assert all("edge_online" in peer for peer in swarm)  # the field a Drone selects relay sources by
 
 
+def test_device_list_and_detail_expose_edge_online(client):
+    # Regression: the device_response shape (GET /api/devices and /api/devices/{id})
+    # must surface edge_online. The swarm/relay payload exposed it, but device_response
+    # omitted it entirely, so Edge presence never reached the device list/detail the UI
+    # and the live swarm networking suite read -- "presence projection not wired". Pairs
+    # with the write-side fix (FROM drones, test_edge.py); the live suite covers the
+    # end-to-end True value.
+    client.post("/api/auth/register", json={"email": "eol@example.com", "username": "eol-at-example.com", "password": "eolpass12345"})
+    token = client.post(
+        "/api/auth/login", json={"email": "eol@example.com", "username": "eol-at-example.com", "password": "eolpass12345"}
+    ).json()["access_token"]
+    owner = db.get_user_by_email("eol@example.com")
+    swarm_id = db.default_swarm_id(owner["id"])
+    db.create_device(owner["id"], "eol-a", "A", {"ip_address": "10.0.0.4"}, raw_token="eol-a-token", swarm_id=swarm_id)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    listing = client.get("/api/devices", headers=headers).json()["devices"]
+    entry = next(d for d in listing if d["device_id"] == "eol-a")
+    assert "edge_online" in entry, "device_response dropped edge_online (presence projection not wired)"
+    assert isinstance(entry["edge_online"], bool)
+
+    detail = client.get("/api/devices/eol-a", headers=headers).json()
+    assert "edge_online" in detail, "device detail dropped edge_online"
+
+
 def test_hive_lists_public_swarms_without_private_owner_data(client):
     client.post("/api/auth/register", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123", "full_name": "Hive Owner"})
     owner_token = client.post("/api/auth/login", json={"email": "hive-owner@example.com", "username": "hive-owner-at-example.com", "password": "testpass123"}).json()["access_token"]

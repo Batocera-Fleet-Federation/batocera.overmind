@@ -2402,7 +2402,7 @@ class PostgresMetadataStore:
                          edge_connected_at, updated_at)
                     SELECT d.id, %s, %s, %s,
                            CASE WHEN %s THEN now() ELSE NULL END, now()
-                    FROM devices d
+                    FROM drones d
                     WHERE d.device_id = %s
                     ON CONFLICT (drone_id) DO UPDATE SET
                         edge_online        = EXCLUDED.edge_online,

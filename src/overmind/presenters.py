@@ -177,6 +177,8 @@ def device_response(
         "api_port": device.get("api_port"),
         "scheme": device.get("scheme") or "https",
         "reachable_url": device.get("reachable_url"),
+        "edge_online": bool(device.get("edge_online")),
+        "reflexive_endpoint": device.get("reflexive_endpoint"),
         "public_resolvable": public_resolvable,
         "peer_resolvable": peer_resolvable,
         "peer_resolved_by": peer_resolved_by,
