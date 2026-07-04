@@ -2769,16 +2769,18 @@ class OvermindDatabase:
             if not system_name:
                 continue
             rom_name = str(item.get("rom_name") or item.get("name") or item.get("title") or "").strip()
-            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("rom_path") or item.get("rom_file") or rom_name).strip()
+            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("rom_path") or item.get("rom_file") or "").strip()
+            # gamelist id is the identity; fall back to the ROM path then name (mirrors the
+            # drone's _gamelist_game_id fallback for unscraped games).
+            gamelist_id = str(item.get("gamelist_game_id") or item.get("gamelist_id") or file_path or rom_name or "").strip()
+            if not gamelist_id:
+                continue
             grouped.setdefault(system_name, []).append({
-                "rom_name": rom_name or file_path,
+                "gamelist_id": gamelist_id,
+                "name": item.get("name") or rom_name or gamelist_id,
+                "rom_name": rom_name or gamelist_id,
                 "rom_fingerprint": item.get("rom_fingerprint") or item.get("fingerprint") or item.get("hash"),
-                "file_path": file_path,
                 "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
-                "entry_type": item.get("entry_type") or "file",
-                "metadata_source": item.get("metadata_source"),
-                "source": item.get("source"),
-                "modified_time": item.get("modified_time") or item.get("mtime"),
             })
         replace_all = bool(row_metadata.get("replace_all"))
         if is_inventory_chunk and replace_all:
@@ -3107,18 +3109,23 @@ class OvermindDatabase:
         for rom in roms:
             if not isinstance(rom, dict):
                 continue
+            gamelist_id = str(rom.get("gamelist_id") or rom.get("gamelist_game_id") or rom.get("file_path") or rom.get("rom_name") or "").strip()
+            if not gamelist_id:
+                continue
+            name = rom.get("name") or rom.get("rom_name")
             cleaned.append({
-                "id": str(uuid.uuid4()),
+                "id": gamelist_id,
                 "device_id": device_id,
                 "system_name": system_name,
-                "rom_name": rom.get("rom_name"),
+                "gamelist_id": gamelist_id,
+                "gamelist_game_id": gamelist_id,
+                "name": name,
+                "rom_name": name,
+                # file_path mirrors the gamelist id for the in-memory read shape (for an
+                # unscraped game the id IS the ROM path). drone_games itself stores no path.
+                "file_path": rom.get("file_path") or gamelist_id,
                 "rom_fingerprint": rom.get("rom_fingerprint"),
-                "file_path": rom.get("file_path"),
                 "file_size": rom.get("file_size"),
-                "entry_type": rom.get("entry_type") or "file",
-                "metadata_source": rom.get("metadata_source"),
-                "source": rom.get("source"),
-                "modified_time": rom.get("modified_time"),
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             })

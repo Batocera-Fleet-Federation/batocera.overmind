@@ -628,6 +628,7 @@ class PostgresMetadataStore:
                 drone_events,
                 drone_artwork,
                 drone_bios,
+                drone_games,
                 drone_roms,
                 asset_inventory_batches,
                 systems,
@@ -2631,8 +2632,8 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     SELECT count(*)
-                    FROM drone_roms r
-                    JOIN drones d ON d.id = r.drone_id
+                    FROM drone_games g
+                    JOIN drones d ON d.id = g.drone_id
                     WHERE d.device_id = %s
                     """,
                     (device_id,),
@@ -5164,31 +5165,15 @@ class PostgresMetadataStore:
         with conn:
             with conn.cursor() as cur:
                 if asset_type:
-                    cur.execute(
-                        "DELETE FROM overmind_device_assets WHERE device_internal_id = %s AND asset_type = %s",
-                        (device_internal_id, asset_type),
-                    )
                     self._clear_domain_assets(cur, device_internal_id, asset_type)
                 else:
-                    cur.execute(
-                        "DELETE FROM overmind_device_assets WHERE device_internal_id = %s",
-                        (device_internal_id,),
-                    )
-                    for kind in ("rom", "bios", "artwork", "saves"):
+                    for kind in ("rom", "bios"):
                         self._clear_domain_assets(cur, device_internal_id, kind)
 
     def begin_device_asset_inventory(self, device_internal_id: str, inventory_id: str) -> None:
-        if not self.assets_enabled():
-            return
-        conn = self._connect()
-        if conn is None:
-            return
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM overmind_device_asset_staging WHERE device_internal_id = %s",
-                    (device_internal_id,),
-                )
+        # Staging removed in the gamelist refactor: chunked inventories are applied as
+        # direct drone_games upserts (db clears on the first chunk for replace_all).
+        return None
 
     def stage_device_assets(
         self,
@@ -5198,93 +5183,11 @@ class PostgresMetadataStore:
         asset_type: str,
         rows: Iterable[dict],
     ) -> list[str]:
-        if not self.assets_enabled():
-            return []
-        conn = self._connect()
-        if conn is None:
-            return []
-        prepared = []
-        row_ids = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            item_key = _asset_key(asset_type, row)
-            if not item_key:
-                continue
-            system_name = str(row.get("system_name") or row.get("system") or "").strip() or None
-            row_id = str(row.get("id") or item_key)
-            payload = {**row, "id": row_id, "device_id": row.get("device_id") or device_id}
-            prepared.append((device_internal_id, inventory_id, device_id, asset_type, item_key, system_name, json.dumps(_encode_state(payload))))
-            row_ids.append(row_id)
-        if not prepared:
-            return row_ids
-        with conn:
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO overmind_device_asset_staging
-                        (device_internal_id, inventory_id, device_id, asset_type, item_key, system_name, payload, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, now())
-                    ON CONFLICT (device_internal_id, inventory_id, asset_type, item_key)
-                    DO UPDATE SET device_id = EXCLUDED.device_id,
-                                  system_name = EXCLUDED.system_name,
-                                  payload = EXCLUDED.payload,
-                                  updated_at = now()
-                    """,
-                    prepared,
-                )
-        return row_ids
+        # No staging table anymore -- write chunk rows straight to the domain tables.
+        return self.upsert_device_assets(device_internal_id, device_id, asset_type, rows)
 
     def publish_device_asset_inventory(self, device_internal_id: str, inventory_id: str) -> None:
-        if not self.assets_enabled():
-            return
-        conn = self._connect()
-        if conn is None:
-            return
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM overmind_device_assets WHERE device_internal_id = %s",
-                    (device_internal_id,),
-                )
-                cur.execute(
-                    """
-                    INSERT INTO overmind_device_assets
-                        (device_internal_id, device_id, asset_type, item_key, system_name, payload,
-                         master_key, sort_key, updated_at)
-                    SELECT device_internal_id, device_id, asset_type, item_key, system_name, payload,
-                        CASE
-                            WHEN asset_type = 'rom' THEN
-                                CASE WHEN nullif(lower(coalesce(payload->>'rom_fingerprint', '')), '') IS NOT NULL
-                                     THEN 'fingerprint:' || lower(payload->>'rom_fingerprint')
-                                ELSE 'path:' || lower(coalesce(system_name, '')) || ':' ||
-                                                lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
-                                END
-                            WHEN asset_type = 'bios' THEN
-                                CASE WHEN nullif(lower(coalesce(payload->>'bios_md5', payload->>'md5', '')), '') IS NOT NULL
-                                     THEN 'fingerprint:' || lower(coalesce(payload->>'bios_md5', payload->>'md5'))
-                                ELSE 'path:' || lower(coalesce(payload->>'file_path',
-                                                       payload->>'relative_path', payload->>'bios_name', ''))
-                                END
-                            ELSE NULL
-                        END,
-                        CASE
-                            WHEN asset_type = 'rom'  THEN lower(coalesce(system_name, '')) || ':' ||
-                                                           lower(coalesce(payload->>'file_path', payload->>'rom_name', ''))
-                            WHEN asset_type = 'bios' THEN lower(coalesce(payload->>'file_path',
-                                                                  payload->>'relative_path', payload->>'bios_name', ''))
-                            ELSE NULL
-                        END,
-                        now()
-                    FROM overmind_device_asset_staging
-                    WHERE device_internal_id = %s AND inventory_id = %s
-                    """,
-                    (device_internal_id, inventory_id),
-                )
-                cur.execute(
-                    "DELETE FROM overmind_device_asset_staging WHERE device_internal_id = %s",
-                    (device_internal_id,),
-                )
+        # Nothing to publish (rows were written directly); just refresh caches.
         if _cache:
             _cache.invalidate_master_assets()
             _cache.invalidate_asset_counts(device_internal_id)
@@ -5293,14 +5196,7 @@ class PostgresMetadataStore:
         if not self.assets_enabled():
             return
         source_rows = [row for row in rows if isinstance(row, dict)]
-        keys = [_asset_key(asset_type, row) for row in source_rows]
-        keys = [key for key in keys if key]
-        paths = [
-            str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or "").replace("\\", "/").strip().lstrip("./").lower()
-            for row in source_rows
-        ]
-        paths = [path for path in paths if path]
-        if not keys and not paths:
+        if not source_rows:
             return
         conn = self._connect()
         if conn is None:
@@ -5308,102 +5204,27 @@ class PostgresMetadataStore:
         with conn:
             with conn.cursor() as cur:
                 if asset_type == "rom":
-                    cur.execute(
-                        "DELETE FROM overmind_device_assets WHERE device_internal_id = %s AND asset_type = %s AND item_key = ANY(%s)",
-                        (device_internal_id, asset_type, keys),
-                    )
-                    cur.execute(
-                        "DELETE FROM drone_roms WHERE drone_id = %s AND normalized_path = ANY(%s)",
-                        (device_internal_id, [_domain_path(row, "rom") for row in source_rows]),
-                    )
+                    gamelist_ids = [
+                        str(row.get("gamelist_id") or row.get("gamelist_game_id") or "").strip()
+                        for row in source_rows
+                    ]
+                    gamelist_ids = [gid for gid in gamelist_ids if gid]
+                    if gamelist_ids:
+                        cur.execute(
+                            "DELETE FROM drone_games WHERE drone_id = %s AND gamelist_id = ANY(%s)",
+                            (device_internal_id, gamelist_ids),
+                        )
                 elif asset_type == "bios":
-                    cur.execute(
-                        """
-                        DELETE FROM overmind_device_assets
-                        WHERE device_internal_id = %s AND asset_type = %s
-                          AND (
-                              item_key = ANY(%s)
-                              OR lower(coalesce(payload->>'file_path', payload->>'relative_path', payload->>'rom_path', '')) = ANY(%s)
-                          )
-                        """,
-                        (device_internal_id, asset_type, keys, paths),
-                    )
-                    cur.execute(
-                        "DELETE FROM drone_bios WHERE drone_id = %s AND normalized_path = ANY(%s)",
-                        (device_internal_id, [_domain_path(row, "bios") for row in source_rows]),
-                    )
-                elif asset_type == "saves":
-                    cur.execute(
-                        "DELETE FROM overmind_device_assets WHERE device_internal_id = %s AND asset_type = %s AND item_key = ANY(%s)",
-                        (device_internal_id, asset_type, keys),
-                    )
-                    cur.execute(
-                        "DELETE FROM drone_saves WHERE drone_id = %s AND normalized_path = ANY(%s)",
-                        (device_internal_id, [_domain_path(row, "saves") for row in source_rows]),
-                    )
-                else:
-                    asset_systems = [
-                        str(row.get("system_name") or row.get("system") or "").strip().lower()
-                        for row in source_rows
-                    ]
-                    asset_paths = [
-                        str(row.get("rom_path") or row.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower()
-                        for row in source_rows
-                    ]
-                    asset_pairs = [(system, path) for system, path in zip(asset_systems, asset_paths) if system and path]
-                    if keys or asset_pairs:
+                    paths = [_domain_path(row, "bios") for row in source_rows]
+                    paths = [path for path in paths if path]
+                    if paths:
                         cur.execute(
-                            """
-                            DELETE FROM overmind_device_assets
-                            WHERE device_internal_id = %s AND asset_type = %s
-                              AND (
-                                  item_key = ANY(%s)
-                                  OR (
-                                      lower(coalesce(system_name, payload->>'system', '')),
-                                      lower(coalesce(payload->>'rom_path', payload->>'file_path', ''))
-                                  ) IN (
-                                      SELECT system_name, rom_path
-                                      FROM unnest(%s::text[], %s::text[]) AS deleted(system_name, rom_path)
-                                  )
-                              )
-                            """,
-                            (
-                                device_internal_id,
-                                asset_type,
-                                keys,
-                                [item[0] for item in asset_pairs],
-                                [item[1] for item in asset_pairs],
-                            ),
+                            "DELETE FROM drone_bios WHERE drone_id = %s AND normalized_path = ANY(%s)",
+                            (device_internal_id, paths),
                         )
-                    artwork_delete_rows = []
-                    for row in source_rows:
-                        system = str(row.get("system_name") or row.get("system") or "").strip().lower()
-                        path = str(row.get("rom_path") or row.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower()
-                        if not system or not path:
-                            continue
-                        for artwork_type in _artwork_types(row):
-                            artwork_delete_rows.append((system, path, artwork_type.lower()))
-                    if artwork_delete_rows:
-                        cur.execute(
-                            """
-                            DELETE FROM drone_artwork
-                            WHERE drone_id = %s
-                              AND (
-                                  lower(system_name),
-                                  normalized_rom_path,
-                                  lower(artwork_type)
-                              ) IN (
-                                  SELECT system_name, rom_path, artwork_type
-                                  FROM unnest(%s::text[], %s::text[], %s::text[]) AS deleted(system_name, rom_path, artwork_type)
-                              )
-                            """,
-                            (
-                                device_internal_id,
-                                [item[0] for item in artwork_delete_rows],
-                                [item[1] for item in artwork_delete_rows],
-                                [item[2] for item in artwork_delete_rows],
-                            ),
-                        )
+        if _cache:
+            _cache.invalidate_master_assets()
+            _cache.invalidate_asset_counts(device_internal_id)
 
     def upsert_device_assets(
         self,
@@ -5897,8 +5718,7 @@ class PostgresMetadataStore:
         per_page = max(1, min(int(per_page), 100))
         offset = (page - 1) * per_page
         where = [
-            "device_internal_id = %s",
-            "asset_type = 'rom'",
+            "drone_id = %s",
             "system_name IS NOT NULL",
         ]
         params: list[object] = [device_internal_id]
@@ -5912,10 +5732,7 @@ class PostgresMetadataStore:
                 cur.execute(
                     f"""
                     SELECT count(*) FROM (
-                        SELECT 1
-                        FROM overmind_device_assets
-                        WHERE {where_sql}
-                        GROUP BY system_name
+                        SELECT 1 FROM drone_games WHERE {where_sql} GROUP BY system_name
                     ) systems
                     """,
                     params,
@@ -5927,7 +5744,7 @@ class PostgresMetadataStore:
                     f"""
                     WITH selected_systems AS (
                         SELECT system_name
-                        FROM overmind_device_assets
+                        FROM drone_games
                         WHERE {where_sql}
                         GROUP BY system_name
                         ORDER BY system_name
@@ -5941,21 +5758,12 @@ class PostgresMetadataStore:
                     )
                     SELECT s.system_name,
                            count(*) AS rom_count,
-                           CASE
-                               WHEN count(*) FILTER (
-                                   WHERE lower(coalesce(a.payload->>'metadata_source', a.payload->>'source', '')) = 'gamelist.xml'
-                               ) = 0
-                               THEN count(*)
-                               ELSE count(*) FILTER (
-                                   WHERE lower(coalesce(a.payload->>'metadata_source', a.payload->>'source', '')) = 'gamelist.xml'
-                               )
-                           END AS game_count,
+                           count(*) AS game_count,
                            p.last_played_at
                     FROM selected_systems s
-                    JOIN overmind_device_assets a
-                      ON a.device_internal_id = %s
-                     AND a.asset_type = 'rom'
-                     AND a.system_name = s.system_name
+                    JOIN drone_games g
+                      ON g.drone_id = %s
+                     AND g.system_name = s.system_name
                     LEFT JOIN played p ON p.system_name = s.system_name
                     GROUP BY s.system_name, p.last_played_at
                     ORDER BY s.system_name
@@ -5974,6 +5782,10 @@ class PostgresMetadataStore:
         ], total
 
     def count_device_assets(self, device_id: str, asset_type: str) -> Optional[int]:
+        source = self._DOMAIN_ASSET_SOURCE.get(asset_type)
+        if not source:
+            return 0
+        table = source[0]
         if _cache:
             cache_key = _cache.count_assets_key(device_id, asset_type)
             cached = _cache.get(cache_key)
@@ -5985,8 +5797,8 @@ class PostgresMetadataStore:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT count(*) FROM overmind_device_assets WHERE device_id = %s AND asset_type = %s",
-                    (device_id, asset_type),
+                    f"SELECT count(*) FROM {table} g JOIN drones d ON d.id = g.drone_id WHERE d.device_id = %s",
+                    (device_id,),
                 )
                 row = cur.fetchone()
                 result = int(row[0] or 0) if row else 0
@@ -5995,9 +5807,7 @@ class PostgresMetadataStore:
         return result
 
     def count_device_games(self, device_id: str) -> Optional[int]:
-        """Count distinct games for a device: gamelist entries per system, falling
-        back to the rom-file count for systems that have no gamelist. This is the
-        number EmulationStation shows, as opposed to the raw rom-file count."""
+        """Count games for a device (every drone_games row is a gamelist entry)."""
         if _cache:
             cache_key = _cache.count_games_key(device_id)
             cached = _cache.get(cache_key)
@@ -6009,22 +5819,7 @@ class PostgresMetadataStore:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT coalesce(sum(games), 0) FROM (
-                        SELECT CASE
-                            WHEN count(*) FILTER (
-                                WHERE lower(coalesce(payload->>'metadata_source', payload->>'source', '')) = 'gamelist.xml'
-                            ) = 0
-                            THEN count(*)
-                            ELSE count(*) FILTER (
-                                WHERE lower(coalesce(payload->>'metadata_source', payload->>'source', '')) = 'gamelist.xml'
-                            )
-                        END AS games
-                        FROM overmind_device_assets
-                        WHERE device_id = %s AND asset_type = 'rom'
-                        GROUP BY system_name
-                    ) per_system
-                    """,
+                    "SELECT count(*) FROM drone_games g JOIN drones d ON d.id = g.drone_id WHERE d.device_id = %s",
                     (device_id,),
                 )
                 row = cur.fetchone()

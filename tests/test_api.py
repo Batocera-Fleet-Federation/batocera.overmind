@@ -1207,34 +1207,29 @@ def test_reachability_identity_check_handles_shared_public_ip(monkeypatch):
     assert writes["b"]["answered_by"] == "drone-a"
 
 
-def test_device_game_count_vs_rom_file_count(client):
+def test_device_game_count_matches_rom_count(client):
+    # gamelist.xml is the source of truth: every reported entry is a gamelist game, so the
+    # game count equals the rom count (the old games-vs-rom-files distinction is removed).
     user_id = db.create_user("games@example.com", auth_utils.hash_password("testpass123"), verified=True, username="games-at-example.com")
     db.create_device(user_id, "games-drone", "Games Drone", {"ip_address": "10.0.0.9"}, raw_token="t")
     token = client.post("/api/auth/login", json={"email": "games@example.com", "password": "testpass123"}).json()["access_token"]
 
-    # snes: 2 gamelist games but 5 rom files (e.g. multi-track/multi-disc).
     db.add_roms("games-drone", "snes", [
-        {"rom_name": "Game A", "file_path": "a.sfc", "metadata_source": "gamelist.xml"},
-        {"rom_name": "Game B", "file_path": "b.sfc", "metadata_source": "gamelist.xml"},
-        {"rom_name": "b-track2", "file_path": "b2.bin", "metadata_source": "filesystem"},
-        {"rom_name": "b-track3", "file_path": "b3.bin", "metadata_source": "filesystem"},
-        {"rom_name": "b-track4", "file_path": "b4.bin", "metadata_source": "filesystem"},
+        {"rom_name": "Game A", "gamelist_game_id": "sa", "file_path": "a.sfc"},
+        {"rom_name": "Game B", "gamelist_game_id": "sb", "file_path": "b.sfc"},
     ])
-    # psx: no gamelist at all -> games falls back to the file count (2).
     db.add_roms("games-drone", "psx", [
-        {"rom_name": "Disc1", "file_path": "d1.chd", "metadata_source": "filesystem"},
-        {"rom_name": "Disc2", "file_path": "d2.chd", "metadata_source": "filesystem"},
+        {"rom_name": "Disc1", "gamelist_game_id": "p1", "file_path": "d1.chd"},
     ])
 
-    assert db.count_device_roms("games-drone") == 7
-    # snes -> 2 gamelist games; psx -> 2 (fallback). Total games = 4.
-    assert db.count_device_games("games-drone") == 4
+    assert db.count_device_roms("games-drone") == 3
+    assert db.count_device_games("games-drone") == 3
 
     response = client.get("/api/devices/games-drone", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     body = response.json()
-    assert body["rom_count"] == 7
-    assert body["game_count"] == 4
+    assert body["rom_count"] == 3
+    assert body["game_count"] == 3
 
 
 def test_managed_config_registry_merge():
@@ -6427,52 +6422,6 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
     # Games live in drone_games (keyed by gamelist_id); drone_roms/drone_artwork are gone.
     assert "INSERT INTO drone_roms" not in sql
     assert "INSERT INTO drone_artwork" not in sql
-
-
-def test_postgres_store_batches_artwork_asset_deletes(monkeypatch):
-    from overmind.postgres_store import PostgresMetadataStore
-
-    class RecordingCursor:
-        def __init__(self):
-            self.statements = []
-
-        def execute(self, sql, params=None):
-            self.statements.append((sql, params))
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class RecordingConnection:
-        def __init__(self):
-            self.cursor_obj = RecordingCursor()
-
-        def cursor(self):
-            return self.cursor_obj
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    store = PostgresMetadataStore()
-    conn = RecordingConnection()
-    monkeypatch.setattr(store, "assets_enabled", lambda: True)
-    monkeypatch.setattr(store, "_connect", lambda: conn)
-
-    store.delete_device_asset_rows("d1", "artwork", [
-        {"system_name": "snes", "rom_path": "Game One.zip", "artwork_types": ["image", "marquee"]},
-        {"system_name": "snes", "rom_path": "Game Two.zip", "artwork_type": "thumbnail"},
-    ])
-
-    assert len(conn.cursor_obj.statements) == 2
-    sql = "\n".join(statement for statement, _ in conn.cursor_obj.statements)
-    assert "FROM unnest(%s::text[], %s::text[])" in sql
-    assert "FROM unnest(%s::text[], %s::text[], %s::text[])" in sql
-    assert len(conn.cursor_obj.statements[1][1][1]) == 3
 
 
 def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
