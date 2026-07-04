@@ -5863,19 +5863,9 @@ class PostgresMetadataStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT system_name, count(*),
-                        CASE
-                            WHEN count(*) FILTER (
-                                WHERE lower(coalesce(payload->>'metadata_source', payload->>'source', '')) = 'gamelist.xml'
-                            ) = 0
-                            THEN count(*)
-                            ELSE count(*) FILTER (
-                                WHERE lower(coalesce(payload->>'metadata_source', payload->>'source', '')) = 'gamelist.xml'
-                            )
-                        END,
-                        count(DISTINCT device_internal_id)
-                    FROM overmind_device_assets
-                    WHERE device_internal_id = ANY(%s) AND asset_type = 'rom' AND system_name IS NOT NULL
+                    SELECT system_name, count(*), count(*), count(DISTINCT drone_id)
+                    FROM drone_games
+                    WHERE drone_id = ANY(%s) AND system_name IS NOT NULL
                     GROUP BY system_name
                     ORDER BY system_name
                     """,
@@ -6044,7 +6034,7 @@ class PostgresMetadataStore:
         return result
 
     def count_device_games_relational(self, device_id: str) -> Optional[int]:
-        """Games count from the relational ``drone_roms`` table (asset store disabled)."""
+        """Games count from the relational ``drone_games`` table (every row is a gamelist game)."""
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
             return None
@@ -6052,17 +6042,10 @@ class PostgresMetadataStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT coalesce(sum(games), 0) FROM (
-                        SELECT CASE
-                            WHEN count(*) FILTER (WHERE lower(coalesce(r.metadata_source, '')) = 'gamelist.xml') = 0
-                            THEN count(*)
-                            ELSE count(*) FILTER (WHERE lower(coalesce(r.metadata_source, '')) = 'gamelist.xml')
-                        END AS games
-                        FROM drone_roms r
-                        JOIN drones d ON d.id = r.drone_id
-                        WHERE d.device_id = %s
-                        GROUP BY coalesce(r.system_name, '')
-                    ) per_system
+                    SELECT count(*)
+                    FROM drone_games g
+                    JOIN drones d ON d.id = g.drone_id
+                    WHERE d.device_id = %s
                     """,
                     (device_id,),
                 )
@@ -6076,47 +6059,32 @@ class PostgresMetadataStore:
         conn = self._connect()
         if conn is None:
             return
+        # Deferred rom_hash_patch: set rom_fingerprint on the drone_games row keyed by
+        # (drone, system, gamelist_id). The initial inventory wrote the row before the
+        # sampled fingerprint was computed.
         updates = []
-        domain_updates = []
         for patch in patches:
             if not isinstance(patch, dict):
                 continue
             fingerprint_value = patch.get("rom_fingerprint") or patch.get("fingerprint") or patch.get("hash")
             if not fingerprint_value:
                 continue
-            item_key = _asset_key("rom", patch)
-            if item_key:
-                updates.append((str(fingerprint_value), device_internal_id, item_key))
-            # The deferred hash patch must also land on the relational drone_roms
-            # table; otherwise fingerprint stays NULL there (master list dedup, games count)
-            # because the initial inventory wrote those rows before fingerprint existed.
             system_name = str(patch.get("system_name") or patch.get("system") or "").strip()
-            normalized_path = _domain_path(patch, "rom")
-            if system_name and normalized_path:
-                domain_updates.append((str(fingerprint_value), device_internal_id, system_name, normalized_path))
-        if not updates and not domain_updates:
+            gamelist_id = str(patch.get("gamelist_id") or patch.get("gamelist_game_id") or "").strip()
+            if system_name and gamelist_id:
+                updates.append((str(fingerprint_value), device_internal_id, system_name, gamelist_id))
+        if not updates:
             return
         with conn:
             with conn.cursor() as cur:
-                if updates:
-                    cur.executemany(
-                        """
-                        UPDATE overmind_device_assets
-                        SET payload = jsonb_set(jsonb_set(payload, '{rom_fingerprint}', to_jsonb(%s::text), true), '{fingerprint}', to_jsonb(%s::text), true),
-                            updated_at = now()
-                        WHERE device_internal_id = %s AND asset_type = 'rom' AND item_key = %s
-                        """,
-                        [(fingerprint, fingerprint, internal_id, key) for fingerprint, internal_id, key in updates],
-                    )
-                if domain_updates:
-                    cur.executemany(
-                        """
-                        UPDATE drone_roms
-                        SET rom_fingerprint = %s, last_seen = now()
-                        WHERE drone_id = %s AND lower(system_name) = lower(%s) AND normalized_path = %s
-                        """,
-                        domain_updates,
-                    )
+                cur.executemany(
+                    """
+                    UPDATE drone_games
+                    SET rom_fingerprint = %s, last_seen = now()
+                    WHERE drone_id = %s AND lower(system_name) = lower(%s) AND gamelist_id = %s
+                    """,
+                    updates,
+                )
 
 
 def _encode_state(value):
