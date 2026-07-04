@@ -1,9 +1,9 @@
-"""Tests for deferred ROM fingerprint hash patches landing on both asset stores.
+"""Tests for deferred ROM fingerprint hash patches landing on drone_games.
 
-The drone uploads the ROM inventory first without fingerprint, then sends fingerprint in a
-separate ``rom_hash_patch``. That patch must update both the jsonb
-``overmind_device_assets`` store and the relational ``drone_roms`` table;
-otherwise fingerprint stays NULL in ``drone_roms`` (master-list dedup, games count).
+The drone uploads the ROM inventory first without a fingerprint, then sends the sampled
+fingerprint in a separate ``rom_hash_patch``. That patch updates the ``drone_games`` row
+keyed by (drone_id, system_name, gamelist_id); otherwise rom_fingerprint stays NULL there
+(master-list dedup / P2P source selection).
 """
 
 import sys
@@ -53,22 +53,23 @@ def _store_with_fake_conn(executed):
     return store
 
 
-def test_update_rom_hashes_patches_both_asset_stores():
+def test_update_rom_hashes_patches_drone_games():
     executed: list = []
     store = _store_with_fake_conn(executed)
 
     store.update_rom_hashes(
         "device-internal-1",
-        [{"system": "snes", "file_path": "Game One.zip", "rom_fingerprint": "ABC123"}],
+        [{"system": "snes", "gamelist_game_id": "2144", "rom_fingerprint": "ABC123"}],
     )
 
     tables = {sql for sql, _ in executed}
-    assert any("overmind_device_assets" in sql for sql in tables)
-    assert any("drone_roms" in sql for sql in tables)
+    assert any("drone_games" in sql for sql in tables)
+    assert not any("overmind_device_assets" in sql for sql in tables)
+    assert not any("drone_roms" in sql for sql in tables)
 
-    drone_params = [params for sql, params in executed if "drone_roms" in sql][0]
-    # (fingerprint, drone_id, system_name, normalized_path) with a lowercased path.
-    assert drone_params == [("ABC123", "device-internal-1", "snes", "game one.zip")]
+    params = [params for sql, params in executed if "drone_games" in sql][0]
+    # (fingerprint, drone_id, system_name, gamelist_id)
+    assert params == [("ABC123", "device-internal-1", "snes", "2144")]
 
 
 def test_update_rom_hashes_skips_patches_without_fingerprint():
