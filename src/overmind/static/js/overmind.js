@@ -120,7 +120,7 @@
             let currentDeviceSystems = {};
             let currentDeviceSystemsPage = { total: 0, page: 1, per_page: 25 };
             let currentSystemRomPages = {};
-            let currentSystemArtworkPages = {};
+            let selectedSystemName = null;
             let deviceRomSearchQuery = '';
             let deviceSystemsPage = 1;
             let masterRomPage = 1;
@@ -139,7 +139,6 @@
             let artworkSourceDeviceFilter = [];
             let artworkSystemFilter = [];
             let masterArtworkPage = 1;
-            let systemPageState = {};
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
             let selectedDeviceDataRefreshTimer = null;
@@ -178,7 +177,8 @@
             const SUPER_ADMIN_EMAIL = 'mr_jerrodh@hotmail.com';
             const MASTER_ROM_PAGE_SIZE = 100;
             const SYSTEMS_PAGE_SIZE = 25;
-            const ROMS_PER_PAGE = 20;
+            const INITIAL_SYSTEM_ROM_LIMIT = 10;
+            const SYSTEM_ROM_LOAD_MORE_SIZE = 25;
             const pageMeta = {
                 auth: ['Overlord Login', 'Access the Overmind'],
                 devices: ['My Swarm', 'Systems and ROMs'],
@@ -2358,7 +2358,7 @@
                 currentDeviceSystems = {};
                 currentDeviceSystemsPage = { total: 0, page: 1, per_page: SYSTEMS_PAGE_SIZE };
                 currentSystemRomPages = {};
-                systemPageState = {};
+                selectedSystemName = null;
                 deviceRomSearchQuery = '';
                 deviceSystemsPage = 1;
                 selectedMasterRomKey = null;
@@ -2808,7 +2808,6 @@
                     if (!response.ok) throw new Error('Failed to load device systems');
                     const data = await response.json();
                     currentSystemRomPages = {};
-                    currentSystemArtworkPages = {};
                     deviceSystemsPage = Number(data.page || deviceSystemsPage || 1);
                     currentDeviceSystemsPage = {
                         total: Number(data.total || 0),
@@ -2820,7 +2819,14 @@
                         if (name) systems[name] = row;
                         return systems;
                     }, {});
+                    if (selectedSystemName && !currentDeviceSystems[selectedSystemName]) {
+                        selectedSystemName = null;
+                        updateRouteQuery({ syn: null, syp: null });
+                    }
                     displaySystemsTree();
+                    if (selectedSystemName && currentDeviceSystems[selectedSystemName]) {
+                        await loadSystemRomPage(selectedSystemName, { reset: true });
+                    }
                 } catch (error) {
                     console.error('Error loading systems:', error);
                     const container = document.getElementById('systems-list');
@@ -2832,8 +2838,9 @@
                 const input = document.getElementById('device-rom-search');
                 deviceRomSearchQuery = (input ? input.value : '').trim();
                 deviceSystemsPage = 1;
-                masterRomPage = 1;
-                updateRouteQuery({ rq: deviceRomSearchQuery, dsp: 1, rp: 1, rs: null });
+                selectedSystemName = null;
+                currentSystemRomPages = {};
+                updateRouteQuery({ rq: deviceRomSearchQuery, dsp: 1, syn: null, syp: null });
                 loadDeviceSystems();
                 scrollAppToTop();
             }
@@ -2853,16 +2860,33 @@
 
             function setDeviceSystemsPage(page) {
                 deviceSystemsPage = Math.max(1, page);
-                updateRouteQuery({ dsp: deviceSystemsPage });
+                selectedSystemName = null;
+                currentSystemRomPages = {};
+                updateRouteQuery({ dsp: deviceSystemsPage, syn: null, syp: null });
                 loadDeviceSystems();
                 scrollAppToTop();
             }
 
-            function setSystemPage(systemName, page) {
-                systemPageState[systemName] = Math.max(1, page);
-                updateRouteQuery({ syn: systemName, syp: systemPageState[systemName] });
-                loadSystemRomPage(systemName);
-                scrollAppToTop();
+            function systemRomState(systemName) {
+                const key = String(systemName || '');
+                if (!currentSystemRomPages[key]) {
+                    currentSystemRomPages[key] = { roms: [], total: 0, nextOffset: 0, loading: false, error: false };
+                }
+                return currentSystemRomPages[key];
+            }
+
+            function selectSystem(systemName) {
+                if (!systemName) return;
+                selectedSystemName = systemName;
+                currentSystemRomPages[systemName] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
+                updateRouteQuery({ syn: systemName, syp: null });
+                displaySystemsTree();
+                loadSystemRomPage(systemName, { reset: true });
+            }
+
+            function loadMoreSystemRoms() {
+                if (!selectedSystemName) return;
+                loadSystemRomPage(selectedSystemName, { reset: false });
             }
 
             function handleDeviceRomFilterChange() {
@@ -2958,33 +2982,55 @@
                 }, []);
             }
 
-            async function loadSystemRomPage(systemName) {
+            async function loadSystemRomPage(systemName, options = {}) {
                 if (!selectedDeviceId || !systemName) return;
-                const page = Math.max(1, systemPageState[systemName] || 1);
-                const key = `${systemName}::${page}`;
-                currentSystemRomPages[key] = { loading: true };
-                currentSystemArtworkPages[key] = { loading: true };
+                const reset = options.reset === true;
+                const state = reset
+                    ? { roms: [], total: Number((currentDeviceSystems[systemName] || {}).rom_count || 0), nextOffset: 0, loading: false, error: false }
+                    : systemRomState(systemName);
+                if (!reset && state.loading) return;
+                const requestDeviceId = selectedDeviceId;
+                const existingRows = reset ? [] : (state.roms || []);
+                const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
+                const pageSize = reset ? INITIAL_SYSTEM_ROM_LIMIT : SYSTEM_ROM_LOAD_MORE_SIZE;
+                currentSystemRomPages[systemName] = {
+                    ...state,
+                    roms: existingRows,
+                    loading: true,
+                    error: false,
+                };
                 renderSystemRomPage(systemName);
                 try {
                     const romParams = new URLSearchParams();
                     romParams.set('system_name', systemName);
-                    romParams.set('page', String(page));
-                    romParams.set('per_page', String(ROMS_PER_PAGE));
-                    const artworkParams = new URLSearchParams();
-                    artworkParams.set('system', systemName);
-                    artworkParams.set('page', '1');
-                    artworkParams.set('per_page', '100');
-                    const [romResponse, artworkResponse] = await Promise.all([
-                        apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`),
-                        apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`),
-                    ]);
+                    romParams.set('offset', String(offset));
+                    romParams.set('per_page', String(pageSize));
+                    const romResponse = await apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`);
                     if (!romResponse.ok) throw new Error('Failed to load system ROMs');
-                    currentSystemRomPages[key] = await romResponse.json();
-                    currentSystemArtworkPages[key] = artworkResponse.ok ? await artworkResponse.json() : { artwork: [] };
+                    const payload = await romResponse.json();
+                    if (selectedDeviceId !== requestDeviceId || selectedSystemName !== systemName) return;
+                    const rows = payload.roms || [];
+                    const loadedRows = reset ? rows : [...(currentSystemRomPages[systemName]?.roms || []), ...rows];
+                    const summary = currentDeviceSystems[systemName] || {};
+                    currentSystemRomPages[systemName] = {
+                        roms: loadedRows,
+                        total: Number(payload.total ?? summary.rom_count ?? loadedRows.length),
+                        nextOffset: offset + rows.length,
+                        per_page: Number(payload.per_page || pageSize),
+                        loading: false,
+                        error: false,
+                    };
                 } catch (error) {
                     console.error('Error loading system ROMs:', error);
-                    currentSystemRomPages[key] = { error: true, roms: [], total: 0, page, per_page: ROMS_PER_PAGE };
-                    currentSystemArtworkPages[key] = { artwork: [] };
+                    const summary = currentDeviceSystems[systemName] || {};
+                    currentSystemRomPages[systemName] = {
+                        ...state,
+                        roms: existingRows,
+                        total: Number(state.total || summary.rom_count || 0),
+                        nextOffset: offset,
+                        loading: false,
+                        error: true,
+                    };
                 }
                 renderSystemRomPage(systemName);
             }
@@ -3173,60 +3219,57 @@
             }
 
             function renderSystemRomPage(systemName) {
-                const target = document.getElementById(`system-rom-page-${cssSafeId(systemName)}`);
+                const target = document.getElementById('selected-system-roms');
                 if (!target) return;
-                const page = Math.max(1, systemPageState[systemName] || 1);
-                const key = `${systemName}::${page}`;
-                const payload = currentSystemRomPages[key];
-                const artworkPayload = currentSystemArtworkPages[key] || {};
+                const payload = currentSystemRomPages[systemName];
                 const summary = currentDeviceSystems[systemName] || {};
-                if (!payload || payload.loading) {
-                    target.innerHTML = '<div class="small text-muted ms-3 mt-2">Loading ROMs...</div>';
-                    return;
-                }
-                if (payload.error) {
-                    target.innerHTML = '<div class="small text-danger ms-3 mt-2">Unable to load ROMs.</div>';
+                if (!payload) {
+                    target.innerHTML = '<div class="small text-muted">Select a system to load ROMs.</div>';
                     return;
                 }
                 const roms = payload.roms || [];
                 const total = Number(payload.total || summary.rom_count || roms.length);
-                const perPage = Number(payload.per_page || ROMS_PER_PAGE);
-                const pageCount = Math.max(1, Math.ceil(total / perPage));
-                const start = (page - 1) * perPage;
-                const artworkLookup = buildArtworkLookup(artworkPayload.artwork || [], systemName);
+                const loaded = roms.length;
+                const hasMore = loaded < total;
+                const firstLoad = payload.loading && !loaded;
                 target.innerHTML = `
-                    <div class="table-responsive ms-3 mt-2">
-                    <table class="table table-sm align-middle rom-artwork-table bff-stack">
-                        <thead><tr>
-                            <th>ROM</th>
-                            <th class="text-nowrap">Size</th>
-                            <th>Artwork</th>
-                        </tr></thead>
-                        <tbody>
-                        ${roms.map(rom => {
-                            const path = rom.file_path || rom.relative_path || rom.rom_name || '';
-                            const size = rom.file_size ? ` ${(rom.file_size / 1024 / 1024).toFixed(2)} MB` : '';
-                            const artworkRows = artworkRowsForRom(rom, artworkLookup, systemName);
-                            return `<tr>
-                                <td>
-                                    <div class="fw-semibold">${escapeHtml(rom.rom_name || path)}</div>
-                                    <div class="text-muted small">${escapeHtml(path)}${rom.rom_fingerprint ? ` <span class="mono">fingerprint: ${escapeHtml(rom.rom_fingerprint)}</span>` : ''}</div>
-                                </td>
-                                <td class="small text-muted text-nowrap">${escapeHtml(size.trim() || 'n/a')}</td>
-                                <td>${renderRomArtworkAssets(artworkRows)}</td>
-                            </tr>`;
-                        }).join('') || '<tr><td colspan="3" class="small text-muted py-2">No ROMs reported for this system.</td></tr>'}
-                        </tbody>
-                    </table>
-                    </div>
-                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 ms-3 mt-2 small text-muted">
-                        <span>Showing ${total ? start + 1 : 0}-${Math.min(start + perPage, total)} of ${total}</span>
-                        <div class="btn-group btn-group-sm bff-segmented" role="group" aria-label="${escapeHtml(systemName)} pages">
-                            <button class="btn btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setSystemPage(${JSON.stringify(systemName)}, ${page - 1})">Previous</button>
-                            <button class="btn btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
-                            <button class="btn btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setSystemPage(${JSON.stringify(systemName)}, ${page + 1})">Next</button>
+                    <div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                            <div>
+                                <strong>${escapeHtml(systemName)}</strong>
+                                <div class="small text-muted">${loaded.toLocaleString()} of ${total.toLocaleString()} ROM files loaded</div>
+                            </div>
+                            ${payload.loading ? '<span class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></span>' : ''}
                         </div>
-                    </div>
+                        ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load ROMs for this system.</div>' : ''}
+                        ${firstLoad ? '<div class="small text-muted py-2">Loading first 10 ROMs...</div>' : `
+                            <div class="table-responsive">
+                            <table class="table table-sm align-middle bff-stack">
+                                <thead><tr><th>ROM</th><th class="text-nowrap">Size</th></tr></thead>
+                                <tbody>
+                                ${roms.map(rom => {
+                                    const path = rom.file_path || rom.relative_path || rom.rom_name || '';
+                                    const size = rom.file_size ? formatBytes(rom.file_size) : 'n/a';
+                                    return `<tr>
+                                        <td>
+                                            <div class="fw-semibold">${escapeHtml(rom.rom_name || path)}</div>
+                                            <div class="text-muted small">${escapeHtml(path)}${rom.rom_fingerprint ? ` <span class="mono">fingerprint: ${escapeHtml(rom.rom_fingerprint)}</span>` : ''}</div>
+                                        </td>
+                                        <td class="small text-muted text-nowrap">${escapeHtml(size)}</td>
+                                    </tr>`;
+                                }).join('') || '<tr><td colspan="2" class="small text-muted py-2">No ROMs reported for this system.</td></tr>'}
+                                </tbody>
+                            </table>
+                            </div>
+                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
+                                <div class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : 'No ROMs reported'}</div>
+                                <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? 'disabled' : ''} onclick="loadMoreSystemRoms()">
+                                    ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+                                    Load next 25
+                                </button>
+                            </div>
+                        `}
+                    </div></div>
                 `;
             }
 
@@ -3260,32 +3303,36 @@
                             <button class="btn btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setDeviceSystemsPage(${page + 1})">Next</button>
                         </div>
                     </div>
-                    <div class="tree-view">
+                    <div class="list-group system-select-list">
                         ${entries.map(([systemName, summary]) => {
                             const count = Number(summary.rom_count || 0);
                             const games = Number(summary.game_count ?? count);
+                            const active = selectedSystemName === systemName;
                             return `
-                                <details ontoggle="if (this.open) loadSystemRomPage(${JSON.stringify(systemName)})">
-                                    <summary>${escapeHtml(systemName)} (${games.toLocaleString()} games &middot; ${count.toLocaleString()} ROM files)</summary>
-                                    <div id="system-rom-page-${cssSafeId(systemName)}" class="system-rom-page">
-                                        <div class="small text-muted ms-3 mt-2">Open to load ROMs.</div>
-                                    </div>
-                                </details>
+                                <button type="button" class="list-group-item list-group-item-action d-flex flex-wrap align-items-center justify-content-between gap-2 ${active ? 'active' : ''}"
+                                    onclick="selectSystem(${JSON.stringify(systemName)})">
+                                    <span class="fw-semibold">${escapeHtml(systemName)}</span>
+                                    <span class="small ${active ? '' : 'text-muted'}">${games.toLocaleString()} games &middot; ${count.toLocaleString()} ROM files</span>
+                                </button>
                             `;
                         }).join('')}
                     </div>
+                    ${selectedSystemName ? `
+                        <div class="mt-3">
+                            <div id="selected-system-roms"></div>
+                        </div>
+                    ` : ''}
                 `;
+                if (selectedSystemName) {
+                    renderSystemRomPage(selectedSystemName);
+                }
             }
 
             function renderDroneMetadataWaitingState(label) {
-                const requestButton = label === 'System & Roms metadata'
-                    ? '<button class="btn btn-primary btn-sm mt-2" type="button" onclick="queueDeviceAction(\'rebuild_asset_metadata\')"><i class="bi bi-database-down me-1"></i>Request System & Rom Data</button>'
-                    : '';
                 return `
                     <div class="empty-state d-flex flex-column align-items-center justify-content-center gap-2 py-4">
                         <div class="spinner-border text-primary" role="status" aria-hidden="true"></div>
                         <div>${label === 'ROM metadata' ? 'Waiting for Drone to upload artwork metadata' : `Waiting for Drone to upload ${escapeHtml(label)}`}</div>
-                        ${requestButton}
                     </div>
                 `;
             }
@@ -3504,6 +3551,10 @@
                 const peerChecks = device.peer_checks || [];
                 const peerResolvedBy = device.peer_resolved_by || [];
                 const info = device.system_info || {};
+                const screenMode = ['full', 'kiosk', 'kid'].includes(String(info.screen_mode || '').toLowerCase())
+                    ? String(info.screen_mode).toLowerCase()
+                    : null;
+                const volumeKnown = Number.isFinite(Number(info.audio_volume));
                 const systemRows = [
                     ['Hostname', info.hostname || device.device_name],
                     ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
@@ -3513,6 +3564,8 @@
                     ['CPU', info.cpu ? `${info.cpu.model || 'CPU'} ${info.cpu.count ? `(${info.cpu.count} cores)` : ''}` : ''],
                     ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
                     ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
+                    ['Screen Mode', screenMode || 'unknown'],
+                    ['Volume', volumeKnown ? (Number(info.audio_volume) <= 0 ? 'muted' : `${Number(info.audio_volume)}%`) : 'unknown'],
                     ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
                     ['Updated', info.last_system_info_update || info.updated_at],
                 ].filter(row => row[1]);
@@ -3602,74 +3655,6 @@
                         ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
                     </div></div>
                 `;
-            }
-
-            function renderDroneMetadataPanel() {
-                const container = document.getElementById('device-metadata-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                const resolved = device.resolved_network || {};
-                const ipv4 = resolved.ipv4 || [];
-                const ipv6 = resolved.ipv6 || [];
-                const publicIp = (device.network || {}).public_ip || (device.network || {}).public || 'n/a';
-                const publicIpStatus = device.peer_resolvable ? ' (peer-resolvable)' : '';
-                const cert = device.certificate || {};
-                const info = device.system_info || {};
-                const sample = device.last_speed_sample;
-                const screenMode = ['full', 'kiosk', 'kid'].includes(String(info.screen_mode || '').toLowerCase())
-                    ? String(info.screen_mode).toLowerCase()
-                    : null;
-                const volumeKnown = Number.isFinite(Number(info.audio_volume));
-                const systemRows = [
-                    ['Hostname', info.hostname || device.device_name],
-                    ['OS', [info.os, info.os_release].filter(Boolean).join(' ')],
-                    ['Batocera', info.batocera_version],
-                    ['Drone App', info.drone_app_version],
-                    ['Architecture', info.architecture],
-                    ['CPU', info.cpu ? `${info.cpu.model || 'CPU'} ${info.cpu.count ? `(${info.cpu.count} cores)` : ''}` : ''],
-                    ['Memory', info.memory ? `${info.memory.available || 'n/a'} available / ${info.memory.total || 'n/a'} total` : ''],
-                    ['Storage', info.disk && info.disk.free_bytes ? `${(Number(info.disk.free_bytes) / 1024 / 1024 / 1024).toFixed(1)} GiB free` : ''],
-                    ['Screen Mode', screenMode || 'unknown'],
-                    ['Volume', volumeKnown ? (Number(info.audio_volume) <= 0 ? 'muted' : `${Number(info.audio_volume)}%`) : 'unknown'],
-                    ['Container', info.container === true ? 'yes' : (info.container === false ? 'no' : '')],
-                    ['Updated', info.last_system_info_update || info.updated_at],
-                ].filter(row => row[1]);
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-                            <strong>Connection Information</strong>
-                            <span class="badge ${device.swarm_connected ? 'text-bg-success' : 'text-bg-secondary'}">${device.swarm_connected ? 'Connected to Swarm' : 'Not Connected to Swarm'}</span>
-                        </div>
-                        <div class="small text-muted mt-2">IPv4: ${ipv4.length ? ipv4.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">IPv6: ${ipv6.length ? ipv6.map(escapeHtml).join(', ') : 'none resolved'}</div>
-                        <div class="small text-muted">Public IP: ${escapeHtml(publicIp)}${publicIpStatus}</div>
-                        <div class="small text-muted">API: ${escapeHtml(device.reachable_url || `${device.scheme || 'https'}://${ipv4[0] || device.device_id}`)}</div>
-                        <hr>
-                        <strong>Certificate</strong>
-                        <div class="small text-muted">Status: ${escapeHtml(cert.status || 'unknown')}</div>
-                        <div class="small text-muted">Fingerprint: ${escapeHtml(cert.fingerprint || 'n/a')}</div>
-                        <div class="small text-muted">Subject: ${escapeHtml(cert.subject || 'n/a')}</div>
-                        <div class="small text-muted">Issuer: ${escapeHtml(cert.issuer || 'n/a')}</div>
-                        <div class="small text-muted">SAN: ${(cert.san || []).map(escapeHtml).join(', ') || 'n/a'}</div>
-                        <div class="small text-muted">Valid: ${escapeHtml(cert.valid_from || 'n/a')} - ${escapeHtml(cert.valid_until || 'n/a')}</div>
-                        <hr>
-                        <strong>System Information</strong>
-                        ${systemRows.length ? `<div class="row g-2 mt-1">${systemRows.map(([label, value]) => `
-                            <div class="col-12 col-md-6"><div class="small text-muted">${escapeHtml(label)}</div><div class="small">${escapeHtml(String(value || ''))}</div></div>
-                        `).join('')}</div>` : '<div class="small text-muted mt-1">No system information reported yet.</div>'}
-                        <hr>
-                        <strong>Speed Sample</strong>
-                        ${sample ? `<div class="small text-muted mt-1">Down ${sample.download_mbps ?? 'n/a'} Mbps / Up ${sample.upload_mbps ?? 'n/a'} Mbps / Latency ${sample.latency_ms ?? 'n/a'} ms</div>` : '<div class="small text-muted mt-1">No speed sample received yet.</div>'}
-                        <hr>
-                        <strong>Swarm P2P Health</strong>
-                        <div class="mt-1">
-                            <span class="badge ${device.peer_resolvable ? 'text-bg-success' : 'text-bg-secondary'} mb-2">${device.peer_resolvable ? 'Resolvable' : 'Not Resolvable'}</span>
-                        </div>
-                        ${(device.peer_resolved_by || []).length ? `<div class="small text-muted">Resolved by: ${(device.peer_resolved_by || []).map(r => escapeHtml(r.source_name || r.source_drone_id || 'unknown')).join(', ')}</div>` : '<div class="small text-muted">No peer has resolved this drone yet.</div>'}
-                        ${(device.peer_checks || []).length ? `<div class="small text-muted mt-1">Outbound checks: ${(device.peer_checks || []).filter(c => c.status === 'pass').length} passed / ${(device.peer_checks || []).length} total</div>` : ''}
-                    </div></div>
-                `;
-                applyRbacUI();
             }
 
             async function loadSwarmRomAvailabilityPanel() {
@@ -4428,7 +4413,7 @@
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'overview';
+                currentDeviceView = ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'admin'].includes(viewName) ? viewName : 'overview';
                 if (updateUrl) {
                     setRoute('devices', selectedDeviceId, currentDeviceView);
                     return;
@@ -4445,7 +4430,6 @@
                 const artworkPanel = document.getElementById('device-artwork-panel');
                 const gamelogsPanel = document.getElementById('device-gamelogs-panel');
                 const configsPanel = document.getElementById('device-configs-panel');
-                const metadataPanel = document.getElementById('device-metadata-panel');
                 const adminPanel = document.getElementById('device-admin-panel');
                 if (overviewPanel) overviewPanel.style.display = currentDeviceView === 'overview' ? 'block' : 'none';
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
@@ -4454,7 +4438,6 @@
                 if (artworkPanel) artworkPanel.style.display = 'none';
                 if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
                 if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
-                if (metadataPanel) metadataPanel.style.display = currentDeviceView === 'metadata' ? 'block' : 'none';
                 if (adminPanel) adminPanel.style.display = currentDeviceView === 'admin' ? 'block' : 'none';
 
                 if (currentDeviceView === 'overview') {
@@ -4469,12 +4452,6 @@
                 if (currentDeviceView === 'saves') loadDeviceSavesPanel();
                 if (currentDeviceView === 'gamelogs') loadGameLogs();
                 if (currentDeviceView === 'configs') loadDeviceConfigs();
-                if (currentDeviceView === 'metadata') {
-                    renderDroneMetadataPanel();
-                    refreshSelectedDroneDetails()
-                        .then(() => renderDroneMetadataPanel())
-                        .catch(error => console.error('Error refreshing selected Drone details:', error));
-                }
                 if (currentDeviceView === 'admin') {
                     renderDeviceAdminPanel();
                     refreshSelectedDroneDetails()
@@ -4553,8 +4530,7 @@
                 masterRomPage = intParam('rp');
                 deviceRomSearchQuery = q.get('rq') || '';
                 selectedMasterRomKey = q.get('rs') || null;
-                const sysName = q.get('syn') || '';
-                systemPageState = sysName ? { [sysName]: intParam('syp') } : {};
+                selectedSystemName = q.get('syn') || null;
                 masterBiosPage = intParam('bp');
                 biosSearchQuery = q.get('bq') || '';
                 biosStatusFilter = q.get('bst') || '';
@@ -4577,8 +4553,8 @@
             }
 
             function normalizeDeviceView(viewName) {
-                if (viewName === 'actions') return 'metadata';
-                return ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'metadata', 'admin'].includes(viewName) ? viewName : 'overview';
+                if (viewName === 'actions' || viewName === 'metadata') return 'overview';
+                return ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'admin'].includes(viewName) ? viewName : 'overview';
             }
 
             function saveRowKey(row) {

@@ -5663,6 +5663,7 @@ class PostgresMetadataStore:
         query: Optional[str] = None,
         page: int = 1,
         per_page: int = 100,
+        offset: Optional[int] = None,
     ) -> tuple[list[dict], int]:
         if not self.assets_enabled():
             return [], 0
@@ -5672,7 +5673,7 @@ class PostgresMetadataStore:
             return [], 0
         page = max(1, int(page))
         per_page = max(1, min(int(per_page), 500))
-        offset = (page - 1) * per_page
+        offset_value = max(0, int(offset)) if offset is not None else (page - 1) * per_page
         where = ["device_internal_id = %s", "asset_type = %s"]
         params: list[object] = [device_internal_id, asset_type]
         if system_name:
@@ -5711,7 +5712,7 @@ class PostgresMetadataStore:
                     ORDER BY system_name NULLS LAST, item_key
                     LIMIT %s OFFSET %s
                     """,
-                    [*params, per_page, offset],
+                    [*params, per_page, offset_value],
                 )
                 rows = cur.fetchall()
         return [_decode_state(row[0]) for row in rows], total

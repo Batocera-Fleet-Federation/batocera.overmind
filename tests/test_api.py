@@ -2898,6 +2898,19 @@ def test_device_roms_support_server_side_pagination(client):
     assert payload["per_page"] == 2
     assert len(payload["roms"]) == 2
 
+    offset_response = client.get(
+        "/api/devices/arcade-cabinet-001/roms?system_name=snes&offset=2&per_page=2",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert offset_response.status_code == 200
+    offset_payload = offset_response.json()
+    assert offset_payload["total"] == 5
+    assert offset_payload["offset"] == 2
+    assert offset_payload["per_page"] == 2
+    assert len(offset_payload["roms"]) == 2
+    assert offset_payload["roms"][0] != payload["roms"][0]
+
 
 def test_device_systems_support_server_side_pagination(client):
     client.post(
@@ -2981,17 +2994,27 @@ def test_device_systems_ui_loads_roms_by_page():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     assert "data-device-view=\"overview\"" in html
+    assert "data-device-view=\"metadata\"" not in html
     assert "currentDeviceView = 'overview';" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/systems?${params.toString()}`)" in js
     assert "params.set('page', String(deviceSystemsPage));" in js
     assert "params.set('per_page', String(SYSTEMS_PAGE_SIZE));" in js
     assert "if (currentDeviceView === 'systems') {\n                    loadDeviceSystems();\n                }" in js
     assert "renderDroneNetworkPanel();\n                    renderDroneTokenPanel();\n                    renderDroneSpeedPanel();" in js
-    assert "romParams.set('page', String(page));" in js
-    assert "romParams.set('per_page', String(ROMS_PER_PAGE));" in js
+    assert "const INITIAL_SYSTEM_ROM_LIMIT = 10;" in js
+    assert "const SYSTEM_ROM_LOAD_MORE_SIZE = 25;" in js
+    assert "function selectSystem(systemName)" in js
+    assert "function loadMoreSystemRoms()" in js
+    assert "const pageSize = reset ? INITIAL_SYSTEM_ROM_LIMIT : SYSTEM_ROM_LOAD_MORE_SIZE;" in js
+    assert "romParams.set('offset', String(offset));" in js
+    assert "romParams.set('per_page', String(pageSize));" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`)" in js
-    assert "apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`)" in js
-    assert "rom-artwork-table" in js
+    loader_start = js.index("async function loadSystemRomPage(systemName, options = {})")
+    loader_end = js.index("function normalizeRomAssetKey", loader_start)
+    loader_source = js[loader_start:loader_end]
+    assert "master-artwork" not in loader_source
+    systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-bios-panel"')]
+    assert "Rebuild Asset Metadata" not in systems_panel
     assert "const artworkRows = artworkRowsForRom(row, artworkLookup, row.system_name || system || '')" in js
     assert "toggleMasterRomDetail" in js
     assert "renderRomDetailPanel(row, artworkRows, sizeText, sources || preferred, statusLabel)" in js
@@ -5067,8 +5090,8 @@ def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
     assert js.count("renderDroneMetadataWaitingState('System & Roms metadata')") >= 2
     assert "renderDroneMetadataWaitingState('BIOS metadata')" in js
     assert "renderDroneMetadataWaitingState('artwork metadata')" in js
-    assert "Request System & Rom Data" in js
-    assert "queueDeviceAction(\\'rebuild_asset_metadata\\')" in js
+    assert "Request System & Rom Data" not in js
+    assert "queueDeviceAction(\\'rebuild_asset_metadata\\')" not in js
     assert "Auto-sync ROM metadata from this Drone" not in js
     assert "overmindConfigVersion" in js
     assert "downloadSelectedOvermindConfigVersion" in js
@@ -5339,9 +5362,11 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "data-device-view=\"actions\"" not in html
     assert "device-actions-panel" not in html
     assert "queueDeviceAction('restart'" in js
-    assert "rebuild_asset_metadata" in html
+    assert "rebuild_asset_metadata" in js
     assert "refresh_emulator_list" in js
-    assert "Rebuild Asset Metadata" in html
+    assert "Rebuild Asset Metadata" in js
+    systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-bios-panel"')]
+    assert "Rebuild Asset Metadata" not in systems_panel
     # Screen mode is an explicit three-value action in the Admin tab.
     assert "deviceKioskToggle" not in js
     assert "queueKioskMode(this.checked)" not in js
@@ -5516,11 +5541,15 @@ def test_drone_metadata_shows_resolvable_public_ip_state():
 
     assert "const publicIpStatus = device.peer_resolvable ? ' (peer-resolvable)' : '';" in js
     assert "Public IP: ${escapeHtml(publicIp)}${publicIpStatus}" in js
-    metadata_start = js.index("function renderDroneMetadataPanel()")
-    metadata_end = js.index("async function loadSwarmRomAvailabilityPanel()", metadata_start)
-    metadata_source = js[metadata_start:metadata_end]
-    assert "Performance Metrics" not in metadata_source
-    assert "renderMetricsGrid(info.performance || {})" in js
+    overview_start = js.index("function renderDroneNetworkPanel()")
+    overview_end = js.index("function renderDroneTokenPanel()", overview_start)
+    overview_source = js[overview_start:overview_end]
+    assert "Performance Metrics" in overview_source
+    assert "renderMetricsGrid(info.performance || {})" in overview_source
+    assert "Screen Mode" in overview_source
+    assert "Volume" in overview_source
+    assert "function renderDroneMetadataPanel()" not in js
+    assert "if (viewName === 'actions' || viewName === 'metadata') return 'overview';" in js
     assert "async function refreshSelectedDroneDetails()" in js
     assert "<strong>Asset Cache</strong>" not in js
 

@@ -322,9 +322,6 @@
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="saves" title="Saves" aria-label="Saves" onclick="switchDeviceView('saves', this)">
                                                 <i class="bi bi-floppy me-1"></i><span class="device-view-label">Saves</span>
                                             </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="metadata" title="Metadata" aria-label="Metadata" onclick="switchDeviceView('metadata', this)">
-                                                <i class="bi bi-info-circle me-1"></i><span class="device-view-label">Metadata</span>
-                                            </button>
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="gamelogs" title="Logs" aria-label="Logs" onclick="switchDeviceView('gamelogs', this)">
                                                 <i class="bi bi-clock-history me-1"></i><span class="device-view-label">Logs</span>
                                             </button>
@@ -351,9 +348,6 @@
                                                 <button class="btn btn-primary" type="button" onclick="submitDeviceRomSearch()">Search</button>
                                             </div>
                                         </div>
-                                        <button class="btn btn-outline-primary mutate-only" type="button" onclick="queueDeviceAction('rebuild_asset_metadata', {refreshActions:false})">
-                                            <i class="bi bi-database-up me-1"></i>Rebuild Asset Metadata
-                                        </button>
                                     </div>
                                     <div id="systems-list"></div>
                                     <div id="swarm-rom-availability-panel" class="mb-3" style="display:none;"></div>
@@ -361,7 +355,6 @@
                                 <div id="device-bios-panel" class="device-subpanel" style="display:none;"></div>
                                 <div id="device-saves-panel" class="device-subpanel" style="display:none;"><div id="saves-list"></div></div>
                                 <div id="device-artwork-panel" class="device-subpanel" style="display:none;"></div>
-                                <div id="device-metadata-panel" class="device-subpanel" style="display:none;"></div>
                                 <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">
                                     <div id="gamelogs-list"></div>
                                 </div>

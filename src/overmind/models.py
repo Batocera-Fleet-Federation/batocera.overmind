@@ -921,6 +921,7 @@ class DeviceRomsResponse(ExtensibleContractModel):
     total: Optional[int] = None
     page: Optional[int] = None
     per_page: Optional[int] = None
+    offset: Optional[int] = None
     systems: Optional[dict] = None
 
 

@@ -3985,12 +3985,14 @@ class OvermindDatabase:
         system_name: Optional[str] = None,
         page: int = 1,
         per_page: int = 100,
+        offset: Optional[int] = None,
     ) -> dict:
         internal_device = self.get_device_by_device_id(device_id)
-        if not internal_device:
-            return {"rows": [], "total": 0, "page": max(1, int(page)), "per_page": max(1, min(int(per_page), 500))}
         page = max(1, int(page))
         per_page = max(1, min(int(per_page), 500))
+        offset_value = max(0, int(offset)) if offset is not None else (page - 1) * per_page
+        if not internal_device:
+            return {"rows": [], "total": 0, "page": page, "per_page": per_page, "offset": offset_value}
         if self._asset_store_enabled():
             rows, total = postgres_store.page_device_assets(
                 internal_device["id"],
@@ -3998,11 +4000,12 @@ class OvermindDatabase:
                 system_name=system_name,
                 page=page,
                 per_page=per_page,
+                offset=offset_value,
             )
-            return {"rows": rows, "total": total, "page": page, "per_page": per_page}
+            return {"rows": rows, "total": total, "page": page, "per_page": per_page, "offset": offset_value}
         rows = self.get_device_roms_by_system(device_id, system_name) if system_name else self.get_device_roms(device_id)
-        start = (page - 1) * per_page
-        return {"rows": rows[start:start + per_page], "total": len(rows), "page": page, "per_page": per_page}
+        start = offset_value
+        return {"rows": rows[start:start + per_page], "total": len(rows), "page": page, "per_page": per_page, "offset": offset_value}
 
     def get_user_systems_summary(self, user_id: str) -> List[dict]:
         """Get system summary across all devices owned by a user."""
