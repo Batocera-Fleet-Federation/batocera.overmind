@@ -6330,59 +6330,48 @@ def test_relational_schema_declares_domain_tables():
         "drone_network_state",
         "drone_system_info",
         "drone_certificates",
-        "drone_roms",
+        "drone_games",
         "drone_bios",
-        "drone_artwork",
         "gameplay_sessions",
-        "drone_log_sources",
-        "drone_emulator_configs",
         "download_items",
         "sync_activity",
+        "transfer_sessions",
         "notifications",
+        "admin_audit_log",
     ]:
         assert f"CREATE TABLE IF NOT EXISTS {table_name}" in migration_sql, f"Missing table: {table_name}"
+    # The gamelist-source-of-truth refactor removed these tables entirely (games live in
+    # the slim drone_games table; artwork/saves/logs/emulator-configs + the JSONB asset
+    # store are gone).
+    for removed in [
+        "drone_roms",
+        "drone_artwork",
+        "drone_saves",
+        "drone_log_sources",
+        "drone_emulator_configs",
+        "overmind_device_assets",
+    ]:
+        assert f"CREATE TABLE IF NOT EXISTS {removed}" not in migration_sql, f"Removed table still declared: {removed}"
     assert "REFERENCES users(id) ON DELETE CASCADE" in migration_sql
     assert "REFERENCES drones(id) ON DELETE CASCADE" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_roms_drone_system" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_actions_drone_status" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received" in migration_sql
-    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_oda_rom_device_system_source" in migration_sql
-    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_oda_rom_internal_system" in migration_sql
-    assert "DROP INDEX CONCURRENTLY IF EXISTS idx_oda_rom_internal_system" in migration_sql
-    assert "DROP INDEX CONCURRENTLY IF EXISTS idx_oda_rom_device_system_source" in migration_sql
+    assert "UNIQUE (drone_id, system_name, gamelist_id)" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_drone_games_drone" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_drone_actions_drone_status" in migration_sql
     assert "OVERMIND_RESET_RELATIONAL_SCHEMA" in store_source
     assert "yoyo" in store_source
-    assert "CREATE INDEX IF NOT EXISTS idx_events_drone_received" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received" in migration_sql
     assert "class _TimedCursor" in store_source
     assert "PostgreSQL query operation=%s duration_ms=%.2f" in store_source
     assert "OVERMIND_POSTGRES_QUERY_LOG_PARAMS" in store_source
-    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected" in migration_sql
-    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in migration_sql
-    assert "ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS drone_token_hash" in migration_sql
-    assert "ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS recovery_reason" in migration_sql
-    assert "ALTER TABLE pending_drone_connections ALTER COLUMN user_id DROP NOT NULL" in migration_sql
-    assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS screen_mode" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS audio_volume" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_enabled" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_idle_minutes" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_target" in migration_sql
-    assert "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint" in migration_sql
-    assert "def store_device_emulator_configs" in store_source
-    assert "def get_device_emulator_configs" in store_source
-    assert "lower(relative_path) NOT LIKE '%%/log/%%'" in store_source
-    assert "lower(relative_path) NOT LIKE '%%/logs/%%'" in store_source
-    assert "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending" in migration_sql
-    assert "if not _persist_json_app_state_enabled():\n            return None" in store_source
-    assert "relational = self._load_relational_state(cur)" not in store_source
+    # Additive columns from the old ALTER migrations are now folded into the single
+    # CREATE TABLE baseline (fresh-from-scratch migration).
+    assert "romset_files_thumbprint TEXT" in migration_sql
+    assert "screen_mode TEXT" in migration_sql
+    assert "audio_volume INTEGER" in migration_sql
+    assert "idle_volume_target INTEGER" in migration_sql
+    assert "edge_online BOOLEAN" in migration_sql
+    assert "batocera_version TEXT" in migration_sql
     assert "def list_user_notifications" in store_source
     assert "def list_user_devices" in store_source
-    assert "WHERE g.drone_id = ANY(%s)" in store_source
-    assert "WHERE n.swarm_id = ANY(%s)" in store_source
-    assert "WHERE user_id = ANY(%s) OR swarm_id = ANY(%s)" in store_source
 
 
 def test_postgres_store_materializes_state_and_assets_into_relational_tables():
