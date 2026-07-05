@@ -3173,7 +3173,6 @@ def test_metadata_inventory_endpoints_use_database_paging_when_assets_are_stored
     responses = [
         client.get("/api/devices/page-target/master-roms?page=3&per_page=17&q=paged", headers=headers),
         client.get("/api/devices/page-target/master-bios?page=2&per_page=11", headers=headers),
-        client.get("/api/devices/page-target/master-artwork?page=4&per_page=9&artwork_type=image", headers=headers),
         client.get("/api/master-roms?page=5&per_page=7", headers=headers),
     ]
 
@@ -3182,11 +3181,9 @@ def test_metadata_inventory_endpoints_use_database_paging_when_assets_are_stored
     assert [(asset_type, params["page"], params["per_page"]) for asset_type, params in calls] == [
         ("rom", 3, 17),
         ("bios", 2, 11),
-        ("artwork", 4, 9),
         ("rom", 5, 7),
     ]
     assert calls[0][1]["query"] == "paged"
-    assert calls[2][1]["artwork_type"] == "image"
 
 
 def test_device_master_rom_presence_survives_grouping_when_selected_row_is_not_first(client, monkeypatch):
@@ -3655,129 +3652,6 @@ def test_asset_metadata_upload_accepts_drone_sync_payload_fields(client):
     assert stored["bios_root"] == "/userdata/bios"
     assert stored["cache"] == {"schema_version": 3}
     assert db.get_master_artwork_for_device(user["id"], "drone-a") == []
-
-
-def test_asset_metadata_upload_drops_game_saves(client):
-    client.post("/api/auth/register", json={"email": "saves@example.com", "username": "saves-at-example.com", "password": "testpass123"})
-    user = db.get_user_by_email("saves@example.com")
-    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
-    login = client.post("/api/auth/login", json={"email": "saves@example.com", "username": "saves-at-example.com", "password": "testpass123"})
-    user_token = login.json()["access_token"]
-
-    upload = client.post(
-        "/api/devices/drone-a/rom-metadata",
-        headers={"Authorization": "Bearer drone-token-a"},
-        json={
-            "device_id": "drone-a",
-            "type": "asset_metadata",
-            "update_mode": "inventory",
-            "replace_all": True,
-            "saves_files_thumbprint": "saves-thumb-1",
-            "saves": [
-                {"system": "snes", "save_name": "Chrono Trigger.srm", "file_path": "snes/Chrono Trigger.srm", "fingerprint": "fp-ct", "file_size": 8192, "modified_time": 1717000000},
-                {"system": "gba", "save_name": "Metroid.sav", "file_path": "gba/Metroid.sav", "fingerprint": "fp-mf", "file_size": 4096, "modified_time": 1717000100},
-            ],
-        },
-    )
-    assert upload.status_code == 200, upload.text
-    assert upload.json()["saves_count"] == 0
-
-    listing = client.get("/api/devices/drone-a/saves", headers={"Authorization": f"Bearer {user_token}"})
-    assert listing.status_code == 200
-    assert listing.json()["saves"] == []
-
-    heartbeat = client.post(
-        "/api/devices/drone-a/heartbeat",
-        headers={"Authorization": "Bearer drone-token-a"},
-        json={"device_name": "Drone A"},
-    )
-    assert "saves_files_thumbprint" not in heartbeat.json()
-
-
-def test_device_saves_endpoint_pages_and_searches(client):
-    client.post("/api/auth/register", json={"email": "saves-page@example.com", "username": "saves-page-at-example.com", "password": "testpass123"})
-    user = db.get_user_by_email("saves-page@example.com")
-    db.create_device(user["id"], "drone-sp", "Drone SP", {"ip_address": "10.0.0.2"}, raw_token="drone-token-sp")
-    token = client.post("/api/auth/login", json={"email": "saves-page@example.com", "username": "saves-page-at-example.com", "password": "testpass123"}).json()["access_token"]
-
-    saves = [
-        {"system": "snes", "save_name": f"Game {i}.srm", "file_path": f"snes/Game {i}.srm", "fingerprint": f"fp-{i}", "file_size": 1000 + i, "modified_time": 1717000000 + i}
-        for i in range(7)
-    ]
-    saves.append({"system": "gba", "save_name": "Metroid.sav", "file_path": "gba/Metroid.sav", "fingerprint": "fp-mf", "file_size": 4096, "modified_time": 1717009999})
-    db.add_saves("drone-sp", saves)
-
-    auth = {"Authorization": f"Bearer {token}"}
-    # Paging: page 1 of 3 with per_page=3, total=8.
-    p1 = client.get("/api/devices/drone-sp/saves?page=1&per_page=3", headers=auth).json()
-    assert p1["total"] == 8 and p1["page"] == 1 and p1["per_page"] == 3
-    assert len(p1["saves"]) == 3
-    p3 = client.get("/api/devices/drone-sp/saves?page=3&per_page=3", headers=auth).json()
-    assert len(p3["saves"]) == 2  # last page
-    ids = [r["file_path"] for r in (p1["saves"] + client.get("/api/devices/drone-sp/saves?page=2&per_page=3", headers=auth).json()["saves"] + p3["saves"])]
-    assert len(set(ids)) == 8  # disjoint pages
-
-    # Search narrows results (across system/name/path).
-    search = client.get("/api/devices/drone-sp/saves?q=metroid", headers=auth).json()
-    assert search["total"] == 1
-    assert search["saves"][0]["file_path"] == "gba/Metroid.sav"
-
-
-def test_device_saves_endpoint_uses_paged_repository_method(client, monkeypatch):
-    client.post(
-        "/api/auth/register",
-        json={
-            "email": "saves-repo@example.com",
-            "username": "saves-repo-at-example.com",
-            "password": "testpass123",
-        },
-    )
-    user = db.get_user_by_email("saves-repo@example.com")
-    db.create_device(
-        user["id"],
-        "drone-saves-repo",
-        "Drone Saves Repo",
-        {"ip_address": "10.0.0.2"},
-        raw_token="drone-token-saves-repo",
-    )
-    token = client.post(
-        "/api/auth/login",
-        json={
-            "email": "saves-repo@example.com",
-            "username": "saves-repo-at-example.com",
-            "password": "testpass123",
-        },
-    ).json()["access_token"]
-
-    def fail_unpaged_load(device_id):
-        raise AssertionError(f"unexpected unpaged saves load for {device_id}")
-
-    calls = []
-
-    def fake_page(device_id, *, query=None, page=1, per_page=100):
-        calls.append(
-            {"device_id": device_id, "query": query, "page": page, "per_page": per_page}
-        )
-        return {
-            "rows": [{"system_name": "snes", "file_path": "snes/A.srm"}],
-            "total": 1,
-            "page": page,
-            "per_page": per_page,
-        }
-
-    monkeypatch.setattr(db, "get_device_saves", fail_unpaged_load)
-    monkeypatch.setattr(db, "get_device_saves_page", fake_page)
-
-    response = client.get(
-        "/api/devices/drone-saves-repo/saves?q=a&page=2&per_page=25",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["total"] == 1
-    assert calls == [
-        {"device_id": "drone-saves-repo", "query": "a", "page": 2, "per_page": 25}
-    ]
 
 
 def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_last_chunk(client):
@@ -4249,43 +4123,6 @@ def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client)
     action = claim.json()["actions"][0]
     assert action["action"] == "sync_bios"
     assert action["payload"]["devices"] == [{"device_id": "source-with-bios", "device_name": "Source With BIOS"}]
-
-
-def test_asset_metadata_upload_drops_artwork(client):
-    client.post("/api/auth/register", json={"email": "artwork@example.com", "username": "artwork-at-example.com", "password": "testpass123"})
-    token = client.post(
-        "/api/auth/login",
-        json={"email": "artwork@example.com", "username": "artwork-at-example.com", "password": "testpass123"},
-    ).json()["access_token"]
-    user = db.get_user_by_email("artwork@example.com")
-    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
-    db.create_device(user["id"], "drone-b", "Drone B", {"ip_address": "10.0.0.3"}, raw_token="drone-token-b")
-
-    response = client.post(
-        "/api/devices/drone-a/rom-metadata",
-        headers={"Authorization": "Bearer drone-token-a"},
-        json={
-            "device_id": "drone-a",
-            "type": "asset_metadata",
-            "roms": [],
-            "systems": [],
-            "bios": [],
-            "artwork": [{
-                "system": "snes",
-                "rom_path": "Game.zip",
-                "rom_name": "Game.zip",
-                "title": "Game",
-                "artwork_types": ["image", "marquee"],
-            }],
-            "gamelists": [],
-        },
-    )
-    assert response.status_code == 200
-    assert response.json()["artwork_count"] == 0
-
-    master_response = client.get("/api/devices/drone-b/master-artwork", headers={"Authorization": f"Bearer {token}"})
-    assert master_response.status_code == 200
-    assert master_response.json()["artwork"] == []
 
 
 def test_sync_artwork_action_payload_includes_only_source_devices_with_artwork(client):
@@ -4890,88 +4727,6 @@ def test_gameplay_history_is_a_table_log_source():
     assert "type: 'gameplay'" in source
     assert "overmindGameplayViewer" in source
     assert "gameplayViewer.innerHTML = renderGameplayTable(source.gamelogs)" in source
-
-
-def test_log_source_upload_persists_and_streams_while_view_requested(client):
-    client.post("/api/auth/register", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"})
-    token = client.post("/api/auth/login", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"}).json()["access_token"]
-    user_id = db.get_user_by_email("log-upload@example.com")["id"]
-    db.create_device(user_id, "log-upload-drone", "Log Upload Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
-
-    inactive = client.post(
-        "/api/devices/log-upload-drone/log-sources",
-        headers={"Authorization": "Bearer drone-token"},
-        json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "ignored\n"}]}]},
-    )
-    assert inactive.status_code == 200
-    stored = db.get_device_log_sources("log-upload-drone")
-    assert stored["logs"][0]["files"][0]["content"] == "ignored"
-
-    view = client.post("/api/devices/log-upload-drone/log-stream/view", headers={"Authorization": f"Bearer {token}"})
-    assert view.status_code == 200
-    heartbeat = client.post(
-        "/api/devices/log-upload-drone/heartbeat",
-        headers={"Authorization": "Bearer drone-token"},
-        json={"device_name": "Log Upload Drone"},
-    )
-    assert heartbeat.json()["log_stream_requested"] is True
-    active = client.post(
-        "/api/devices/log-upload-drone/log-sources",
-        headers={"Authorization": "Bearer drone-token"},
-        json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-1\n"}]}]},
-    )
-    assert active.status_code == 200
-    device_response = client.get("/api/devices/log-upload-drone", headers={"Authorization": f"Bearer {token}"})
-    assert device_response.status_code == 200
-    assert device_response.json()["log_stream_active"] is True
-    assert device_response.json()["log_sources"]["logs"][0]["files"][0]["content"] == "line-1\n"
-    persisted = db.get_device_log_sources("log-upload-drone", line_limit=10)
-    assert persisted["logs"][0]["files"][0]["content"] == "ignored\nline-1"
-
-
-def test_log_source_upload_accepts_drone_incremental_fields_and_marks_online(client):
-    user_id = db.create_user("log-upload-online@example.com", "hash")
-    internal_id = db.create_device(user_id, "log-online-drone", "Log Online Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
-    db.devices[internal_id]["last_seen"] = datetime.utcnow() - timedelta(seconds=999)
-    db.devices[internal_id]["last_known_status"] = "offline"
-
-    response = client.post(
-        "/api/devices/log-online-drone/log-sources",
-        headers={"Authorization": "Bearer drone-token"},
-        json={
-            "type": "log_sources",
-            "collected_at": "2026-05-31T02:31:51+00:00",
-            "append": True,
-            "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-1\n"}]}],
-        },
-    )
-    assert response.status_code == 200
-    device = db.get_device_by_device_id("log-online-drone")
-    assert device["last_known_status"] == "online"
-    assert device["last_seen"] >= datetime.utcnow() - timedelta(seconds=5)
-    assert db.get_device_log_sources("log-online-drone")["logs"][0]["source"] == "drone_stdout"
-
-
-def test_emulator_config_upload_stores_changed_configs(client):
-    user_id = db.create_user("config-upload@example.com", "hash")
-    db.create_device(user_id, "config-upload-drone", "Config Upload Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
-
-    response = client.post(
-        "/api/devices/config-upload-drone/emulator-configs",
-        headers={"Authorization": "Bearer drone-token"},
-        json={
-            "type": "emulator_configs",
-            "incremental": True,
-            "configs": [{"root": "/configs", "relative_path": "retroarch.cfg", "content": "video_driver = vulkan", "md5": "abc123", "fingerprint": "abc123"}],
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted"}
-    device = db.get_device_by_device_id("config-upload-drone")
-    assert device["emulator_configs"]["configs"][0]["relative_path"] == "retroarch.cfg"
-    assert device["emulator_configs"]["configs"][0]["md5"] == "abc123"
-    assert device["emulator_configs"]["configs"][0]["versions"][0]["content"] == "video_driver = vulkan"
 
 
 def test_emulator_config_upload_writes_relational_store_when_available(client, monkeypatch):
@@ -6653,7 +6408,6 @@ def test_drone_api_uses_explicit_contract_models():
     assert "async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataUpload" in source
     assert "async def update_device_downloads(device_id: str, payload: DroneDownloadsReport" in source
     assert "async def complete_device_action(device_id: str, action_id: str, payload: DroneActionCompleteRequest" in source
-    assert "async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorConfigsUpload" in source
     assert "class StrictContractModel(BaseModel):" in models
     assert 'ConfigDict(extra="forbid")' in models
 

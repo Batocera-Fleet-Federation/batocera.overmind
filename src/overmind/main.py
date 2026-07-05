@@ -2804,29 +2804,6 @@ async def get_device_bios(device_id: str, authorization: Optional[str] = Header(
     return {"bios": db.get_device_bios(device_id)}
 
 
-@app.get("/api/devices/{device_id}/saves", response_model=DeviceSavesResponse)
-async def get_device_saves(
-    device_id: str,
-    q: Optional[str] = None,
-    page: int = 1,
-    per_page: int = 100,
-    authorization: Optional[str] = Header(default=None),
-):
-    """List the game-save files a Drone has reported, for the Saves tab.
-
-    Paginated + searchable, mirroring the master-ROM table contract
-    ({rows, total, page, per_page}) so the UI can use the same paging pattern.
-    """
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    per_page = max(1, min(int(per_page or 100), 500))
-    page = max(1, int(page or 1))
-    result = db.get_device_saves_page(device_id, query=q, page=page, per_page=per_page)
-    return {"saves": result["rows"], "total": result["total"], "page": page, "per_page": per_page}
-
-
 @app.get("/api/devices/{device_id}/master-bios", response_model=MasterBiosResponse)
 async def get_device_master_bios(
     device_id: str,
@@ -2864,37 +2841,6 @@ async def get_swarm_master_bios(
     user = get_current_user(authorization)
     result = db.get_swarm_master_bios_page(user["id"], query=q, page=page, per_page=per_page)
     return {"bios": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
-
-
-@app.get("/api/devices/{device_id}/master-artwork", response_model=MasterArtworkResponse)
-async def get_device_master_artwork(
-    device_id: str,
-    q: Optional[str] = None,
-    system: Optional[str] = None,
-    artwork_type: Optional[str] = None,
-    status: Optional[str] = None,
-    page: int = 1,
-    per_page: int = 100,
-    authorization: Optional[str] = Header(default=None),
-):
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    result = db.get_master_assets_page_for_device(
-        device["user_id"],
-        device_id,
-        "artwork",
-        query=q,
-        system_name=system,
-        artwork_type=artwork_type,
-        status=status,
-        page=page,
-        per_page=per_page,
-    )
-    if result is None:
-        raise HTTPException(status_code=404, detail="Device not found")
-    return {"artwork": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
 @app.post("/api/devices/{device_id}/sync-rom", response_model=SyncRomResponse)
@@ -3442,40 +3388,6 @@ async def upload_device_game_logs(device_id: str, payload: DroneGameLogsUpload, 
     device = get_current_drone(device_id, authorization)
     result = payload.model_dump(exclude_none=True)
     result["type"] = "game_logs"
-    db.store_action_result(device, result)
-    return {"status": "accepted"}
-
-
-@app.post("/api/devices/{device_id}/log-sources", response_model=StatusResponse)
-async def upload_device_log_sources(device_id: str, payload: DroneLogSourcesUpload, authorization: Optional[str] = Header(default=None)):
-    """Accept Drone log source content and persist it for selected Drone log views."""
-    device = get_current_drone(device_id, authorization)
-    db.update_device_last_seen(device["id"])
-    result = payload.model_dump(exclude_none=True)
-    result["type"] = "log_sources"
-    db.store_action_result(device, result)
-    _store_drone_log_stream(device_id, result)
-    return {"status": "accepted"}
-
-
-@app.post("/api/devices/{device_id}/log-stream/view", response_model=LogStreamResponse)
-async def request_device_log_stream(device_id: str, authorization: Optional[str] = Header(default=None)):
-    """Mark a Drone logs view as active so the next heartbeat requests live log streaming."""
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    _request_drone_log_stream(device_id)
-    return {"status": "stream_requested", "ttl_seconds": DRONE_LOG_STREAM_TTL_SECONDS}
-
-
-@app.post("/api/devices/{device_id}/emulator-configs", response_model=StatusResponse)
-async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorConfigsUpload, authorization: Optional[str] = Header(default=None)):
-    """Accept changed emulator configs from a Drone."""
-    device = get_current_drone(device_id, authorization)
-    db.update_device_last_seen(device["id"])
-    result = payload.model_dump(exclude_none=True)
-    result["type"] = "emulator_configs"
     db.store_action_result(device, result)
     return {"status": "accepted"}
 
