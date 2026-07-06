@@ -12,6 +12,14 @@ CREATE TABLE IF NOT EXISTS overmind_schema_versions (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Full in-memory-store snapshot mirror (db.py's store_app_state/_persist_state), distinct
+-- from the removed per-asset overmind_device_assets store above.
+CREATE TABLE IF NOT EXISTS overmind_app_state (
+    id TEXT PRIMARY KEY,
+    state JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Users ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS users (
