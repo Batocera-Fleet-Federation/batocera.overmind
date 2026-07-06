@@ -2855,7 +2855,7 @@
 
             async function refreshSelectedDroneDetails() {
                 if (!selectedDeviceId) return null;
-                const response = await apiGet(`/api/devices/${selectedDeviceId}?include_inventory=false&include_configs=false&include_logs=false`, { showLoader: false });
+                const response = await apiGet(`/api/devices/${selectedDeviceId}?include_inventory=false&include_configs=false`, { showLoader: false });
                 if (!response.ok) throw new Error('Failed to load device details');
                 const device = await response.json();
                 const index = currentDevices.findIndex(item => item.device_id === device.device_id);

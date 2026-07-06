@@ -185,10 +185,6 @@ OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
 OVERMIND_LOG_CAPTURE_LINES = max(100, int(os.getenv("OVERMIND_LOG_CAPTURE_LINES", "1000")))
 _STREAM_LOG_CAPTURE: Optional["StreamLogCapture"] = None
-DRONE_LOG_STREAM_TTL_SECONDS = int(os.getenv("DRONE_LOG_STREAM_TTL_SECONDS", "75"))
-_DRONE_LOG_STREAM_REQUESTS: dict[str, float] = {}
-_DRONE_LOG_STREAM_PAYLOADS: dict[str, dict] = {}
-_DRONE_LOG_STREAM_LOCK = threading.RLock()
 
 admin_user_row = partial(_admin_user_row, data_store=db, super_admin_email=SUPER_ADMIN_EMAIL)
 admin_swarm_row = partial(_admin_swarm_row, data_store=db)
@@ -268,37 +264,6 @@ class StreamLogCapture:
             "captured_at": datetime.utcnow().isoformat() + "Z",
             "capture_active": True,
         }
-
-
-def _drone_log_stream_active(device_id: str) -> bool:
-    now = time.monotonic()
-    with _DRONE_LOG_STREAM_LOCK:
-        expires_at = _DRONE_LOG_STREAM_REQUESTS.get(device_id)
-        if not expires_at or expires_at <= now:
-            _DRONE_LOG_STREAM_REQUESTS.pop(device_id, None)
-            _DRONE_LOG_STREAM_PAYLOADS.pop(device_id, None)
-            return False
-        return True
-
-
-def _request_drone_log_stream(device_id: str) -> None:
-    with _DRONE_LOG_STREAM_LOCK:
-        _DRONE_LOG_STREAM_REQUESTS[device_id] = time.monotonic() + DRONE_LOG_STREAM_TTL_SECONDS
-
-
-def _store_drone_log_stream(device_id: str, payload: dict) -> None:
-    if not _drone_log_stream_active(device_id):
-        return
-    with _DRONE_LOG_STREAM_LOCK:
-        _DRONE_LOG_STREAM_PAYLOADS[device_id] = dict(payload)
-
-
-def _current_drone_log_stream(device_id: str) -> Optional[dict]:
-    if not _drone_log_stream_active(device_id):
-        return None
-    with _DRONE_LOG_STREAM_LOCK:
-        payload = _DRONE_LOG_STREAM_PAYLOADS.get(device_id)
-        return dict(payload) if isinstance(payload, dict) else None
 
 
 _LOG_TAIL_REENTRY = threading.local()
@@ -2073,10 +2038,8 @@ async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[s
 @app.get("/api/devices/{device_id}", response_model=DeviceModel)
 async def get_device(
     device_id: str,
-    log_limit: int = 10,
     include_inventory: bool = True,
     include_configs: bool = True,
-    include_logs: bool = True,
     authorization: Optional[str] = Header(default=None),
 ):
     """Get device details."""
@@ -2087,20 +2050,11 @@ async def get_device(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    response = device_response(
+    return device_response(
         device,
         include_inventory_counts=include_inventory,
         include_emulator_configs=include_configs,
     )
-    if include_logs:
-        stream_payload = _current_drone_log_stream(device_id)
-        if stream_payload is not None:
-            response["log_sources"] = stream_payload
-            response["log_stream_active"] = True
-        else:
-            response["log_sources"] = db.get_device_log_sources(device_id, line_limit=log_limit)
-            response["log_stream_active"] = False
-    return response
 
 
 @app.get("/api/devices/{device_id}/peer-certificate/{peer_id}", response_model=PeerCertificateResponse)
@@ -2487,7 +2441,6 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
     return {
         "actions": actions,
         "swarm": swarm,
-        "log_stream_requested": _drone_log_stream_active(device_id),
         # Echo the asset thumbprints Overmind last stored (verbatim from the Drone's last
         # upload). The Drone compares these against what it holds on disk and pushes a
         # resync only when they differ.
