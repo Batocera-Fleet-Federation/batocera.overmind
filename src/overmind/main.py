@@ -47,7 +47,7 @@ from overmind.models import (
     # Phase 2-4 request models
     AdminAssignRequest, DroneClaimRequest, IntegrationTokenCreateRequest, SignCsrRequest,
     AutoSyncUpdateRequest, DeviceActionRequest, SyncRomRequest, SyncBiosRequest,
-    SyncArtworkRequest, SyncArtworkBulkRequest, SyncSystemRequest, BulkSyncRequest,
+    SyncSystemRequest, BulkSyncRequest,
     # Phase 2-4 response models
     DeviceModel, GenericObjectResponse, HealthResponse,
     AdminOverviewResponse, AdminSyncActionsResponse, AdminAuditLogResponse,
@@ -57,10 +57,10 @@ from overmind.models import (
     IntegrationTokensResponse, IntegrationTokenEnvelope, DroneConnectionsResponse,
     AutoSyncPolicyResponse, ActionsResponse, DeleteActionsResponse, DownloadsResponse,
     ActionEnvelope, ActionQueuedResponse, ClaimActionsResponse, SyncRomResponse,
-    SyncArtworkBulkResponse, BulkSyncResponse, HeartbeatResponse, AssetMetadataAck,
-    SpeedUploadResponse, SpeedSamplesResponse, LogStreamResponse,
+    BulkSyncResponse, HeartbeatResponse, AssetMetadataAck,
+    SpeedUploadResponse, SpeedSamplesResponse,
     DeviceRomsResponse, MasterRomsResponse, BiosListResponse, MasterBiosResponse,
-    MasterArtworkResponse, DeviceSavesResponse, RomUpdateResponse, SyncActivityResponse,
+    RomUpdateResponse, SyncActivityResponse,
     SystemsResponse, GameplayLogResponse, GamelogsResponse,
     TransferCreateRequest, TransferResponse,
 )
@@ -1024,11 +1024,9 @@ def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = No
     return eligible
 
 
-# NOTE: ROM sync intentionally does NOT pull associated artwork. The previous
-# "queue_associated_artwork_syncs" machinery (which queued sync_artwork actions tagged
-# triggered_by="sync_rom") has been removed so that triggering a ROM sync transfers only
-# the ROM. Artwork is synced solely through the explicit artwork-sync endpoints
-# (/api/devices/{id}/sync-artwork and /sync-artwork-bulk).
+# NOTE: ROM sync does not separately queue artwork. Overmind no longer stores an
+# artwork inventory (gamelist-source-of-truth refactor) -- the receiving Drone pulls
+# artwork itself from the source peer's gamelist right after the ROM lands.
 
 
 # ==================== Authentication ====================
@@ -2913,160 +2911,6 @@ async def sync_device_bios(device_id: str, body: SyncBiosRequest, authorization:
     })
     notify_sync_triggered(user, device, "BIOS", f"BIOS sync for {bios_path}", [device], source_devices, action)
     return {"action": action}
-
-
-@app.post("/api/devices/{device_id}/sync-artwork", response_model=ActionEnvelope)
-async def sync_device_artwork(device_id: str, body: SyncArtworkRequest, authorization: Optional[str] = Header(default=None)):
-    payload = body.model_dump(exclude_none=True)
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    require_device_admin(user, device)
-    system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
-    rom_path = str(payload.get("rom_path") or payload.get("file_path") or payload.get("rom_name") or "").strip()
-    artwork_type = str(payload.get("artwork_type") or "").strip()
-    if not system_name or not rom_path or not artwork_type:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name, rom_path, and artwork_type are required")
-    source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
-    if not source_devices:
-        requested_path = rom_path.replace("\\", "/").strip().lstrip("./").lower()
-        requested_type = artwork_type.strip().lower()
-        for row in db.get_master_artwork_for_device(device["user_id"], device_id) or []:
-            row_system = str(row.get("system_name") or "").strip().lower()
-            row_path = str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-            row_type = str(row.get("artwork_type") or "").strip().lower()
-            if row_system == system_name.lower() and row_path == requested_path and row_type == requested_type:
-                source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
-                break
-    source_devices = resolvable_asset_sources(source_devices, device_id)
-    if not source_devices:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has this artwork")
-    action = db.create_device_action(device["user_id"], device_id, "sync_artwork", {
-        "asset_type": "artwork",
-        "system_name": system_name,
-        "system": system_name,
-        "rom_name": payload.get("rom_name") or rom_path,
-        "rom_path": rom_path,
-        "file_path": rom_path,
-        "artwork_type": artwork_type,
-        "devices": source_devices,
-    })
-    if not action:
-        raise HTTPException(status_code=404, detail="Device not found")
-    db.add_rom_sync_activity(device_id, {
-        "sync_id": action["id"],
-        "asset_type": "artwork",
-        "target_drone_id": device_id,
-        "system": system_name,
-        "rom_name": payload.get("rom_name") or rom_path,
-        "rom_path": rom_path,
-        "relative_path": rom_path,
-        "artwork_type": artwork_type,
-        "action": "download",
-        "status": "pending",
-    })
-    notify_sync_triggered(user, device, "Artwork", f"{artwork_type} artwork sync for {system_name}/{rom_path}", [device], source_devices, action)
-    return {"action": action}
-
-
-@app.post("/api/devices/{device_id}/sync-artwork-bulk", response_model=SyncArtworkBulkResponse)
-async def sync_device_artwork_bulk(device_id: str, body: SyncArtworkBulkRequest, authorization: Optional[str] = Header(default=None)):
-    payload = body.model_dump(exclude_none=True)
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    require_device_admin(user, device)
-
-    raw_systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
-    systems = {
-        str(item or "").strip().lower()
-        for item in raw_systems
-        if str(item or "").strip() and str(item or "").strip().lower() != "all"
-    }
-    raw_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
-    source_device_ids = {
-        str(item.get("device_id") if isinstance(item, dict) else item or "").strip()
-        for item in raw_devices
-        if str(item.get("device_id") if isinstance(item, dict) else item or "").strip()
-        and str(item.get("device_id") if isinstance(item, dict) else item or "").strip().lower() != "any"
-    }
-    artwork_type = str(payload.get("artwork_type") or "").strip().lower()
-
-    rows = db.get_master_artwork_for_device(device["user_id"], device_id) or []
-    actions = []
-    queued_assets = 0
-    skipped_assets = 0
-    for row in rows:
-        system_name = str(row.get("system_name") or row.get("system") or "").strip()
-        rom_path = str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").strip()
-        row_type = str(row.get("artwork_type") or "").strip()
-        if not system_name or not rom_path or not row_type:
-            skipped_assets += 1
-            continue
-        if systems and system_name.lower() not in systems:
-            continue
-        if artwork_type and row_type.lower() != artwork_type:
-            continue
-        if row.get("present_on_selected"):
-            continue
-
-        available_sources = row.get("devices") if isinstance(row.get("devices"), list) else []
-        source_devices = resolvable_asset_sources(available_sources, device_id)
-        if source_device_ids:
-            source_devices = [
-                source for source in source_devices
-                if source.get("device_id") in source_device_ids
-            ]
-        if not source_devices:
-            skipped_assets += 1
-            continue
-
-        action = db.create_device_action(device["user_id"], device_id, "sync_artwork", {
-            "asset_type": "artwork",
-            "system_name": system_name,
-            "system": system_name,
-            "rom_name": row.get("rom_name") or rom_path,
-            "rom_path": rom_path,
-            "file_path": rom_path,
-            "artwork_type": row_type,
-            "devices": source_devices,
-        })
-        if not action:
-            skipped_assets += 1
-            continue
-        actions.append(action)
-        queued_assets += 1
-        db.add_rom_sync_activity(device_id, {
-            "sync_id": action["id"],
-            "asset_type": "artwork",
-            "target_drone_id": device_id,
-            "system": system_name,
-            "rom_name": row.get("rom_name") or rom_path,
-            "rom_path": rom_path,
-            "relative_path": rom_path,
-            "artwork_type": row_type,
-            "action": "download",
-            "status": "pending",
-        })
-
-    if actions:
-        sources = []
-        for action in actions:
-            payload_devices = ((action.get("payload") or {}).get("devices") if isinstance(action.get("payload"), dict) else []) or []
-            sources.extend(payload_devices)
-        notify_sync_triggered(user, device, "Artwork", f"bulk artwork sync ({queued_assets} item(s))", [device], sources, actions[0])
-
-    return {
-        "status": "queued",
-        "systems": sorted(systems) if systems else ["all"],
-        "source_device_ids": sorted(source_device_ids) if source_device_ids else ["any"],
-        "action_count": len(actions),
-        "queued_artwork_count": queued_assets,
-        "skipped_artwork_count": skipped_assets,
-        "actions": actions,
-    }
 
 
 @app.post("/api/devices/{device_id}/sync-system", response_model=SyncRomResponse)

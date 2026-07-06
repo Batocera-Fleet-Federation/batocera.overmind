@@ -3324,12 +3324,6 @@ def test_sync_rom_does_not_queue_associated_artwork_by_default(client):
     db.create_device(user["id"], "target-without-assets", "Target Assets", {"ip_address": "10.0.0.3"}, raw_token="b")
     mark_source_resolvable("source-with-assets")
     db.add_roms("source-with-assets", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "abc"}])
-    db.add_artwork("source-with-assets", [{
-        "system": "snes",
-        "rom_path": "/userdata/roms/snes/Game.zip",
-        "rom_name": "Game.zip",
-        "artwork_types": ["image", "marquee"],
-    }])
 
     response = client.post(
         "/api/devices/target-without-assets/sync-rom",
@@ -3654,7 +3648,6 @@ def test_asset_metadata_upload_accepts_drone_sync_payload_fields(client):
     assert stored["collected_at"] == "2026-05-30T23:43:00+00:00"
     assert stored["bios_root"] == "/userdata/bios"
     assert stored["cache"] == {"schema_version": 3}
-    assert db.get_master_artwork_for_device(user["id"], "drone-a") == []
 
 
 def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_last_chunk(client):
@@ -4128,88 +4121,33 @@ def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client)
     assert action["payload"]["devices"] == [{"device_id": "source-with-bios", "device_name": "Source With BIOS"}]
 
 
-def test_sync_artwork_action_payload_includes_only_source_devices_with_artwork(client):
+def test_sync_artwork_endpoints_removed(client):
+    # Overmind no longer stores an artwork inventory (gamelist-source-of-truth
+    # refactor) -- the dedicated artwork-sync endpoints are gone; artwork now
+    # travels automatically with a ROM sync, resolved by the receiving Drone.
     client.post("/api/auth/register", json={"email": "sync-artwork@example.com", "username": "sync-artwork-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
         json={"email": "sync-artwork@example.com", "username": "sync-artwork-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("sync-artwork@example.com")
-    db.create_device(user["id"], "source-without-artwork", "Source Without Artwork", {"ip_address": "10.0.0.2"}, raw_token="a")
-    db.create_device(user["id"], "source-with-artwork", "Source With Artwork", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
-    mark_source_resolvable("source-with-artwork")
-    db.add_artwork("source-with-artwork", [{
-        "system": "snes",
-        "rom_path": "Game.zip",
-        "rom_name": "Game.zip",
-        "artwork_types": ["image"],
-    }])
 
+    # No API route is registered at these paths anymore; the SPA catch-all route
+    # (GET-only) still matches the path, so Starlette reports 405, not 404.
     response = client.post(
         "/api/devices/target-c/sync-artwork",
         headers={"Authorization": f"Bearer {token}"},
         json={"system": "snes", "rom_path": "Game.zip", "artwork_type": "image"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 405
 
-    claim = client.post(
-        "/api/devices/target-c/actions/claim",
-        headers={"Authorization": "Bearer c"},
-        json={},
-    )
-    assert claim.status_code == 200
-    action = claim.json()["actions"][0]
-    assert action["action"] == "sync_artwork"
-    assert action["payload"]["devices"] == [{"device_id": "source-with-artwork", "device_name": "Source With Artwork"}]
-    assert action["payload"]["artwork_type"] == "image"
-
-
-def test_bulk_sync_artwork_filters_sources_and_systems(client):
-    client.post("/api/auth/register", json={"email": "bulk-artwork@example.com", "username": "bulk-artwork-at-example.com", "password": "testpass123"})
-    token = client.post(
-        "/api/auth/login",
-        json={"email": "bulk-artwork@example.com", "username": "bulk-artwork-at-example.com", "password": "testpass123"},
-    ).json()["access_token"]
-    user = db.get_user_by_email("bulk-artwork@example.com")
-    db.create_device(user["id"], "source-a", "Source A", {"ip_address": "10.0.0.2"}, raw_token="a")
-    db.create_device(user["id"], "source-b", "Source B", {"ip_address": "10.0.0.3"}, raw_token="b")
-    db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
-    mark_source_resolvable("source-a")
-    db.add_artwork("source-a", [{
-        "system": "snes",
-        "rom_path": "Game.zip",
-        "rom_name": "Game.zip",
-        "artwork_types": ["image"],
-    }])
-    db.add_artwork("source-b", [{
-        "system": "gba",
-        "rom_path": "Other.gba",
-        "rom_name": "Other.gba",
-        "artwork_types": ["image"],
-    }])
-
-    response = client.post(
+    bulk_response = client.post(
         "/api/devices/target-c/sync-artwork-bulk",
         headers={"Authorization": f"Bearer {token}"},
-        json={"systems": ["snes"], "devices": ["source-a"]},
+        json={"systems": ["snes"]},
     )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["action_count"] == 1
-    assert payload["queued_artwork_count"] == 1
-
-    claim = client.post(
-        "/api/devices/target-c/actions/claim",
-        headers={"Authorization": "Bearer c"},
-        json={},
-    )
-    assert claim.status_code == 200
-    action = claim.json()["actions"][0]
-    assert action["action"] == "sync_artwork"
-    assert action["payload"]["system_name"] == "snes"
-    assert action["payload"]["rom_path"] == "Game.zip"
-    assert action["payload"]["devices"] == [{"device_id": "source-a", "device_name": "Source A"}]
+    assert bulk_response.status_code == 405
 
 
 def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
@@ -4227,12 +4165,6 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     db.add_roms("drone-a", "snes", [{"rom_name": "A.zip", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 8}])
     db.add_roms("drone-b", "snes", [{"rom_name": "B.zip", "file_path": "B.zip", "rom_fingerprint": "bbb", "file_size": 9}])
     db.add_roms("drone-c", "snes", [{"rom_name": "C.zip", "file_path": "C.zip", "rom_fingerprint": "ccc", "file_size": 10}])
-    db.add_artwork("drone-b", [{
-        "system": "snes",
-        "rom_path": "B.zip",
-        "rom_name": "B.zip",
-        "artwork_types": ["image"],
-    }])
 
     response = client.post(
         "/api/bulk-sync",
@@ -5073,7 +5005,6 @@ def test_rebuild_asset_metadata_action_clears_existing_device_assets(client):
     db.create_device(user["id"], "clear-drone", "Clear Drone", {})
     db.add_roms("clear-drone", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "file_size": 3}])
     db.add_bios("clear-drone", [{"bios_name": "bios.bin", "file_path": "bios.bin"}])
-    db.add_artwork("clear-drone", [{"system": "snes", "rom_path": "Game.zip", "artwork_types": ["image"]}])
     device = db.get_device_by_device_id("clear-drone")
     device["rom_metadata"] = {"systems": [{"name": "snes", "rom_count": 1}]}
     device["rom_systems"] = [{"name": "snes", "rom_count": 1}]
@@ -5087,7 +5018,6 @@ def test_rebuild_asset_metadata_action_clears_existing_device_assets(client):
     assert response.status_code == 200
     assert db.get_device_roms("clear-drone") == []
     assert db.get_device_bios("clear-drone") == []
-    assert db._asset_rows_for_device_internal(device["id"], "artwork") == []
     assert device["rom_metadata"] == {}
     assert db.get_user_systems_summary(user["id"]) == []
 

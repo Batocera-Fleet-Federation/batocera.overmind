@@ -700,21 +700,6 @@ class OvermindDatabase:
                         "devices": [],
                     })
                     row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
-            elif asset_type == "artwork":
-                for artwork in self._asset_rows_for_device_internal(internal_id, "artwork"):
-                    for artwork_type in artwork.get("artwork_types", []):
-                        key = self._artwork_key(artwork, artwork_type)
-                        if not key[0] or not key[1] or not key[2]:
-                            continue
-                        row = rows.setdefault(key, {
-                            "asset_type": "artwork",
-                            "system_name": artwork.get("system_name") or artwork.get("system"),
-                            "name": artwork.get("rom_name") or artwork.get("rom_path"),
-                            "path": artwork.get("rom_path") or artwork.get("file_path"),
-                            "artwork_type": artwork_type,
-                            "devices": [],
-                        })
-                        row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
         return rows
 
     def _asset_store_enabled(self) -> bool:
@@ -3487,52 +3472,6 @@ class OvermindDatabase:
             row_ids.append(row["id"])
         return row_ids
 
-    def _artwork_key(self, row: dict, artwork_type: str) -> tuple:
-        return (
-            str(row.get("system_name") or row.get("system") or "").strip().lower(),
-            str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
-            str(artwork_type or "").strip().lower(),
-        )
-
-    def get_master_artwork_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
-        selected = self.get_device_by_device_id(selected_device_id)
-        if not selected or selected["user_id"] != user_id:
-            return None
-        devices = {device["device_id"]: device for device in self.get_user_devices(user_id)}
-        selected_keys = {
-            self._artwork_key(row, artwork_type)
-            for row in self._asset_rows_for_device_internal(selected["id"], "artwork")
-            for artwork_type in row.get("artwork_types", [])
-        }
-        master: Dict[tuple, dict] = {}
-        for item in self._asset_rows_for_devices(list(devices.values()), "artwork"):
-            device = devices.get(item.get("device_id")) or {}
-            if device:
-                for artwork_type in item.get("artwork_types", []):
-                    key = self._artwork_key(item, artwork_type)
-                    if not key[0] or not key[1] or not key[2]:
-                        continue
-                    row = master.setdefault(key, {
-                        "asset_type": "artwork",
-                        "system_name": item.get("system_name") or item.get("system"),
-                        "system": item.get("system_name") or item.get("system"),
-                        "rom_name": item.get("rom_name") or item.get("rom_path"),
-                        "rom_path": item.get("rom_path") or item.get("file_path"),
-                        "file_path": item.get("rom_path") or item.get("file_path"),
-                        "title": item.get("title"),
-                        "artwork_type": artwork_type,
-                        "devices": [],
-                        "present_on_selected": key in selected_keys,
-                    })
-                    info = device.get("system_info") or {}
-                    row["devices"].append({
-                        "device_id": device["device_id"],
-                        "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
-                    })
-        rows = list(master.values())
-        rows.sort(key=lambda row: (str(row.get("system_name") or "").lower(), str(row.get("rom_path") or "").lower(), str(row.get("artwork_type") or "").lower()))
-        return rows
-
     def get_master_roms_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)
         if not selected or selected["user_id"] != user_id:
@@ -3755,7 +3694,6 @@ class OvermindDatabase:
         loaders = {
             "rom": self.get_master_roms_for_device,
             "bios": self.get_master_bios_for_device,
-            "artwork": self.get_master_artwork_for_device,
         }
         rows = loaders[asset_type](user_id, selected_device_id) or []
         filtered = self._filter_master_rows(
