@@ -4188,6 +4188,30 @@ class OvermindDatabase:
         all_logs = self.get_device_gamelogs(device_id)
         return [log for log in all_logs if log.get("system_name") == system_name]
 
+    def get_swarm_gamelogs(self, user_id: str, *, limit: int = 200) -> List[dict]:
+        """Fleet-wide play history across the user's Drones, newest first.
+
+        Gameplay history moved from the (removed) per-device Logs tab to the
+        Drone-Swarm overview, so this aggregates every accessible Drone's sessions
+        and stamps each row with its Drone's name for the combined table.
+        """
+        devices = self.get_user_devices(user_id)
+        rows: List[dict] = []
+        for device in devices:
+            device_id = device.get("device_id")
+            if not device_id:
+                continue
+            name = device.get("device_name") or (device.get("system_info") or {}).get("hostname") or device_id
+            for log in self.get_device_gamelogs(device_id) or []:
+                rows.append({**log, "device_id": device_id, "device_name": name})
+
+        def _played_key(row: dict):
+            value = row.get("played_at")
+            return str(value or "")
+
+        rows.sort(key=_played_key, reverse=True)
+        return rows[: max(1, int(limit))]
+
     def store_device_log_sources(self, device_id: str, payload: dict) -> None:
         device = self.get_device_by_device_id(device_id)
         if not device or not isinstance(payload, dict):

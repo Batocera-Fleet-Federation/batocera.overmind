@@ -1586,7 +1586,7 @@
             }
 
             function setSwarmView(view) {
-                if (!view || !['drones', 'downloads', 'sync-activity', 'master-list'].includes(view)) {
+                if (!view || !['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'].includes(view)) {
                     view = 'drones';
                 }
 
@@ -2300,6 +2300,65 @@
                     });
                 } catch (error) {
                     panel.innerHTML = '<div class="empty-state">Unable to load swarm master list.</div>';
+                }
+            }
+
+            async function showSwarmGameplay(updateUrl = true) {
+                if (updateUrl) {
+                    setSwarmView('gameplay');
+                    return;
+                }
+                setActiveSwarmView('gameplay');
+                const panel = document.getElementById('swarm-global-panel');
+                const list = document.getElementById('devices-list');
+                if (!panel) return;
+                if (list) list.style.display = 'none';
+                panel.style.display = 'block';
+                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading play history...</div></div>`;
+                try {
+                    const response = await apiGet('/api/gameplay?limit=200');
+                    if (!response.ok) throw new Error('Failed to load play history');
+                    const payload = await response.json();
+                    const rows = payload.gamelogs || [];
+                    if (!rows.length) {
+                        panel.innerHTML = `<div class="card"><div class="card-body py-2">
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                                <strong><i class="bi bi-controller me-1"></i>Play History</strong>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="showSwarmGameplay(false)"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                            </div>
+                            <div class="empty-state">No gameplay sessions reported across the swarm yet.</div>
+                        </div></div>`;
+                        return;
+                    }
+                    const body = rows.map(log => {
+                        const when = log.played_at ? new Date(log.played_at).toLocaleString() : '—';
+                        const system = log.system_name || '';
+                        const game = log.game_name || log.rom_name || log.rom_path || 'Unknown';
+                        return `<tr>
+                            <td class="small">${escapeHtml(log.device_name || log.device_id || '—')}</td>
+                            <td>${system ? `<span class="badge text-bg-secondary">${escapeHtml(system)}</span>` : '<span class="text-muted">—</span>'}</td>
+                            <td>${escapeHtml(game)}</td>
+                            <td class="small text-nowrap">${escapeHtml(when)}</td>
+                            <td class="small text-nowrap">${escapeHtml(formatGameplayDuration(log.duration_seconds))}</td>
+                        </tr>`;
+                    }).join('');
+                    panel.innerHTML = `<div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <strong><i class="bi bi-controller me-1"></i>Play History</strong>
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="small text-muted">${rows.length} session${rows.length === 1 ? '' : 's'} across the swarm</span>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="showSwarmGameplay(false)"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover align-middle gameplay-history-table bff-stack">
+                                <thead><tr><th>Drone</th><th>System</th><th>Game</th><th>Played</th><th>Duration</th></tr></thead>
+                                <tbody>${body}</tbody>
+                            </table>
+                        </div>
+                    </div></div>`;
+                } catch (error) {
+                    panel.innerHTML = '<div class="empty-state">Unable to load play history.</div>';
                 }
             }
 
@@ -4683,13 +4742,13 @@
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 if (tab === 'devices' && parts[1] === 'swarm') {
                     if (parts[3] === 'swarm') {
-                        const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
+                        const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'];
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[4]) ? parts[4] : 'drones' };
                     }
                     if (parts[3] === 'device') {
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: normalizeDeviceView(parts[5]), swarmView: 'drones' };
                     }
-                    const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
+                    const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'];
                     return { tab, deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[2]) ? parts[2] : 'drones' };
                 }
                 if (tab === 'devices' && parts[1] === 'device') {
@@ -4721,6 +4780,7 @@
                     if (view === 'downloads') showSwarmDownloads(false);
                     else if (view === 'sync-activity') showSwarmSyncActivity(false);
                     else if (view === 'master-list') showSwarmMasterList(false);
+                    else if (view === 'gameplay') showSwarmGameplay(false);
                     else showSwarmHome(false);
                 }
                 updateSharedSwarmNavButton();

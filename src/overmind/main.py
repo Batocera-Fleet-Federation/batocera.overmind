@@ -3418,8 +3418,19 @@ async def get_device_gamelogs(
         gamelogs = db.get_device_gamelogs_by_system(device_id, system_name)
     else:
         gamelogs = db.get_device_gamelogs(device_id)
-    
+
     return {"gamelogs": gamelogs}
+
+
+@app.get("/api/gameplay", response_model=GamelogsResponse)
+async def get_swarm_gameplay(
+    limit: int = 200,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Fleet-wide play history for the Drone-Swarm overview (all accessible Drones)."""
+    user = get_current_user(authorization)
+    limit = max(1, min(int(limit or 200), 500))
+    return {"gamelogs": db.get_swarm_gamelogs(user["id"], limit=limit)}
 
 
 @app.get("/api/systems", response_model=SystemsResponse)

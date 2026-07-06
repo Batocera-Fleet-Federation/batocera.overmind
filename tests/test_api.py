@@ -4721,12 +4721,42 @@ def test_game_log_retry_updates_session_without_creating_duplicate(client):
     assert snapshot[0]["duration_seconds"] == 90
 
 
-def test_gameplay_history_is_a_table_log_source():
+def test_gameplay_history_moved_to_swarm_overview():
+    # Gameplay history relocated from the removed per-device Logs tab to a fleet-wide
+    # "Play History" segment on the Drone-Swarm overview.
+    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     source = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
-    assert "label: 'Gameplay History'" in source
-    assert "type: 'gameplay'" in source
-    assert "overmindGameplayViewer" in source
-    assert "gameplayViewer.innerHTML = renderGameplayTable(source.gamelogs)" in source
+    assert 'data-swarm-view="gameplay"' in html
+    assert "async function showSwarmGameplay(" in source
+    assert "apiGet('/api/gameplay?limit=200')" in source
+    assert "if (view === 'gameplay') showSwarmGameplay(false);" in source
+
+
+def test_swarm_gameplay_endpoint_aggregates_across_devices(client):
+    client.post("/api/auth/register", json={"email": "play@example.com", "username": "play-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "play@example.com", "username": "play-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("play@example.com")
+    db.create_device(user["id"], "play-drone-a", "Play Drone A", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "play-drone-b", "Play Drone B", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.log_gameplay("play-drone-a", "snes", "Super Mario World", 1200)
+    db.log_gameplay("play-drone-b", "nes", "Contra", 600)
+
+    response = client.get("/api/gameplay", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    rows = response.json()["gamelogs"]
+    assert len(rows) == 2
+    names = {row["game_name"] for row in rows}
+    assert names == {"Super Mario World", "Contra"}
+    # Each row is stamped with its Drone for the combined fleet table.
+    drones = {row["device_name"] for row in rows}
+    assert drones == {"Play Drone A", "Play Drone B"}
+
+
+def test_swarm_gameplay_endpoint_requires_auth(client):
+    assert client.get("/api/gameplay").status_code in (401, 403)
 
 
 def test_emulator_config_upload_writes_relational_store_when_available(client, monkeypatch):
