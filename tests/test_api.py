@@ -369,7 +369,7 @@ def test_notifications_capture_drone_status_transition_and_sync_trigger(client):
     sync = client.post(
         "/api/devices/target-drone/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
     )
     assert sync.status_code == 200
     notifications = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]
@@ -1207,34 +1207,29 @@ def test_reachability_identity_check_handles_shared_public_ip(monkeypatch):
     assert writes["b"]["answered_by"] == "drone-a"
 
 
-def test_device_game_count_vs_rom_file_count(client):
+def test_device_game_count_matches_rom_count(client):
+    # gamelist.xml is the source of truth: every reported entry is a gamelist game, so the
+    # game count equals the rom count (the old games-vs-rom-files distinction is removed).
     user_id = db.create_user("games@example.com", auth_utils.hash_password("testpass123"), verified=True, username="games-at-example.com")
     db.create_device(user_id, "games-drone", "Games Drone", {"ip_address": "10.0.0.9"}, raw_token="t")
     token = client.post("/api/auth/login", json={"email": "games@example.com", "password": "testpass123"}).json()["access_token"]
 
-    # snes: 2 gamelist games but 5 rom files (e.g. multi-track/multi-disc).
     db.add_roms("games-drone", "snes", [
-        {"rom_name": "Game A", "file_path": "a.sfc", "metadata_source": "gamelist.xml"},
-        {"rom_name": "Game B", "file_path": "b.sfc", "metadata_source": "gamelist.xml"},
-        {"rom_name": "b-track2", "file_path": "b2.bin", "metadata_source": "filesystem"},
-        {"rom_name": "b-track3", "file_path": "b3.bin", "metadata_source": "filesystem"},
-        {"rom_name": "b-track4", "file_path": "b4.bin", "metadata_source": "filesystem"},
+        {"rom_name": "Game A", "gamelist_game_id": "sa", "file_path": "a.sfc"},
+        {"rom_name": "Game B", "gamelist_game_id": "sb", "file_path": "b.sfc"},
     ])
-    # psx: no gamelist at all -> games falls back to the file count (2).
     db.add_roms("games-drone", "psx", [
-        {"rom_name": "Disc1", "file_path": "d1.chd", "metadata_source": "filesystem"},
-        {"rom_name": "Disc2", "file_path": "d2.chd", "metadata_source": "filesystem"},
+        {"rom_name": "Disc1", "gamelist_game_id": "p1", "file_path": "d1.chd"},
     ])
 
-    assert db.count_device_roms("games-drone") == 7
-    # snes -> 2 gamelist games; psx -> 2 (fallback). Total games = 4.
-    assert db.count_device_games("games-drone") == 4
+    assert db.count_device_roms("games-drone") == 3
+    assert db.count_device_games("games-drone") == 3
 
     response = client.get("/api/devices/games-drone", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     body = response.json()
-    assert body["rom_count"] == 7
-    assert body["game_count"] == 4
+    assert body["rom_count"] == 3
+    assert body["game_count"] == 3
 
 
 def test_managed_config_registry_merge():
@@ -3008,14 +3003,17 @@ def test_device_systems_ui_loads_roms_by_page():
     assert "romParams.set('per_page', String(pageSize));" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`)" in js
     loader_start = js.index("async function loadSystemRomPage(systemName, options = {})")
-    loader_end = js.index("function normalizeRomAssetKey", loader_start)
+    loader_end = js.index("function renderRomDetailValue", loader_start)
     loader_source = js[loader_start:loader_end]
     assert "master-artwork" not in loader_source
     systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-bios-panel"')]
     assert "Rebuild Asset Metadata" not in systems_panel
-    assert "const artworkRows = artworkRowsForRom(row, artworkLookup, row.system_name || system || '')" in js
+    # Artwork is no longer stored in Overmind, so the ROM detail row/panel dropped
+    # the per-ROM artwork chip rendering entirely (gamelist-source refactor).
+    assert "artworkRowsForRom" not in js
+    assert "renderRomArtworkDetails" not in js
     assert "toggleMasterRomDetail" in js
-    assert "renderRomDetailPanel(row, artworkRows, sizeText, sources || preferred, statusLabel)" in js
+    assert "renderRomDetailPanel(row, sizeText, sources || preferred, statusLabel)" in js
     assert "document.querySelectorAll('.rom-master-detail-row').forEach" in js
 
 
@@ -3178,7 +3176,6 @@ def test_metadata_inventory_endpoints_use_database_paging_when_assets_are_stored
     responses = [
         client.get("/api/devices/page-target/master-roms?page=3&per_page=17&q=paged", headers=headers),
         client.get("/api/devices/page-target/master-bios?page=2&per_page=11", headers=headers),
-        client.get("/api/devices/page-target/master-artwork?page=4&per_page=9&artwork_type=image", headers=headers),
         client.get("/api/master-roms?page=5&per_page=7", headers=headers),
     ]
 
@@ -3187,11 +3184,9 @@ def test_metadata_inventory_endpoints_use_database_paging_when_assets_are_stored
     assert [(asset_type, params["page"], params["per_page"]) for asset_type, params in calls] == [
         ("rom", 3, 17),
         ("bios", 2, 11),
-        ("artwork", 4, 9),
         ("rom", 5, 7),
     ]
     assert calls[0][1]["query"] == "paged"
-    assert calls[2][1]["artwork_type"] == "image"
 
 
 def test_device_master_rom_presence_survives_grouping_when_selected_row_is_not_first(client, monkeypatch):
@@ -3304,7 +3299,7 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     response = client.post(
         "/api/devices/target-c/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
     )
     assert response.status_code == 200
 
@@ -3329,17 +3324,11 @@ def test_sync_rom_does_not_queue_associated_artwork_by_default(client):
     db.create_device(user["id"], "target-without-assets", "Target Assets", {"ip_address": "10.0.0.3"}, raw_token="b")
     mark_source_resolvable("source-with-assets")
     db.add_roms("source-with-assets", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "abc"}])
-    db.add_artwork("source-with-assets", [{
-        "system": "snes",
-        "rom_path": "/userdata/roms/snes/Game.zip",
-        "rom_name": "Game.zip",
-        "artwork_types": ["image", "marquee"],
-    }])
 
     response = client.post(
         "/api/devices/target-without-assets/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc"},
     )
 
     assert response.status_code == 200
@@ -3371,7 +3360,7 @@ def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):
     response = client.post(
         "/api/devices/blocked-target/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc"},
     )
 
     assert response.status_code == 400
@@ -3394,7 +3383,7 @@ def test_sync_folder_rom_payload_matches_by_path_without_fingerprint(client):
     response = client.post(
         "/api/devices/target-folder/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "ps3", "file_path": "Game.ps3", "entry_type": "folder", "file_size": 10},
+        json={"system_name": "ps3", "gamelist_id": "Game.ps3", "entry_type": "folder", "file_size": 10},
     )
     assert response.status_code == 200
 
@@ -3659,130 +3648,6 @@ def test_asset_metadata_upload_accepts_drone_sync_payload_fields(client):
     assert stored["collected_at"] == "2026-05-30T23:43:00+00:00"
     assert stored["bios_root"] == "/userdata/bios"
     assert stored["cache"] == {"schema_version": 3}
-    assert db.get_master_artwork_for_device(user["id"], "drone-a") == []
-
-
-def test_asset_metadata_upload_drops_game_saves(client):
-    client.post("/api/auth/register", json={"email": "saves@example.com", "username": "saves-at-example.com", "password": "testpass123"})
-    user = db.get_user_by_email("saves@example.com")
-    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
-    login = client.post("/api/auth/login", json={"email": "saves@example.com", "username": "saves-at-example.com", "password": "testpass123"})
-    user_token = login.json()["access_token"]
-
-    upload = client.post(
-        "/api/devices/drone-a/rom-metadata",
-        headers={"Authorization": "Bearer drone-token-a"},
-        json={
-            "device_id": "drone-a",
-            "type": "asset_metadata",
-            "update_mode": "inventory",
-            "replace_all": True,
-            "saves_files_thumbprint": "saves-thumb-1",
-            "saves": [
-                {"system": "snes", "save_name": "Chrono Trigger.srm", "file_path": "snes/Chrono Trigger.srm", "fingerprint": "fp-ct", "file_size": 8192, "modified_time": 1717000000},
-                {"system": "gba", "save_name": "Metroid.sav", "file_path": "gba/Metroid.sav", "fingerprint": "fp-mf", "file_size": 4096, "modified_time": 1717000100},
-            ],
-        },
-    )
-    assert upload.status_code == 200, upload.text
-    assert upload.json()["saves_count"] == 0
-
-    listing = client.get("/api/devices/drone-a/saves", headers={"Authorization": f"Bearer {user_token}"})
-    assert listing.status_code == 200
-    assert listing.json()["saves"] == []
-
-    heartbeat = client.post(
-        "/api/devices/drone-a/heartbeat",
-        headers={"Authorization": "Bearer drone-token-a"},
-        json={"device_name": "Drone A"},
-    )
-    assert "saves_files_thumbprint" not in heartbeat.json()
-
-
-def test_device_saves_endpoint_pages_and_searches(client):
-    client.post("/api/auth/register", json={"email": "saves-page@example.com", "username": "saves-page-at-example.com", "password": "testpass123"})
-    user = db.get_user_by_email("saves-page@example.com")
-    db.create_device(user["id"], "drone-sp", "Drone SP", {"ip_address": "10.0.0.2"}, raw_token="drone-token-sp")
-    token = client.post("/api/auth/login", json={"email": "saves-page@example.com", "username": "saves-page-at-example.com", "password": "testpass123"}).json()["access_token"]
-
-    saves = [
-        {"system": "snes", "save_name": f"Game {i}.srm", "file_path": f"snes/Game {i}.srm", "fingerprint": f"fp-{i}", "file_size": 1000 + i, "modified_time": 1717000000 + i}
-        for i in range(7)
-    ]
-    saves.append({"system": "gba", "save_name": "Metroid.sav", "file_path": "gba/Metroid.sav", "fingerprint": "fp-mf", "file_size": 4096, "modified_time": 1717009999})
-    db.add_saves("drone-sp", saves)
-
-    auth = {"Authorization": f"Bearer {token}"}
-    # Paging: page 1 of 3 with per_page=3, total=8.
-    p1 = client.get("/api/devices/drone-sp/saves?page=1&per_page=3", headers=auth).json()
-    assert p1["total"] == 8 and p1["page"] == 1 and p1["per_page"] == 3
-    assert len(p1["saves"]) == 3
-    p3 = client.get("/api/devices/drone-sp/saves?page=3&per_page=3", headers=auth).json()
-    assert len(p3["saves"]) == 2  # last page
-    ids = [r["file_path"] for r in (p1["saves"] + client.get("/api/devices/drone-sp/saves?page=2&per_page=3", headers=auth).json()["saves"] + p3["saves"])]
-    assert len(set(ids)) == 8  # disjoint pages
-
-    # Search narrows results (across system/name/path).
-    search = client.get("/api/devices/drone-sp/saves?q=metroid", headers=auth).json()
-    assert search["total"] == 1
-    assert search["saves"][0]["file_path"] == "gba/Metroid.sav"
-
-
-def test_device_saves_endpoint_uses_paged_repository_method(client, monkeypatch):
-    client.post(
-        "/api/auth/register",
-        json={
-            "email": "saves-repo@example.com",
-            "username": "saves-repo-at-example.com",
-            "password": "testpass123",
-        },
-    )
-    user = db.get_user_by_email("saves-repo@example.com")
-    db.create_device(
-        user["id"],
-        "drone-saves-repo",
-        "Drone Saves Repo",
-        {"ip_address": "10.0.0.2"},
-        raw_token="drone-token-saves-repo",
-    )
-    token = client.post(
-        "/api/auth/login",
-        json={
-            "email": "saves-repo@example.com",
-            "username": "saves-repo-at-example.com",
-            "password": "testpass123",
-        },
-    ).json()["access_token"]
-
-    def fail_unpaged_load(device_id):
-        raise AssertionError(f"unexpected unpaged saves load for {device_id}")
-
-    calls = []
-
-    def fake_page(device_id, *, query=None, page=1, per_page=100):
-        calls.append(
-            {"device_id": device_id, "query": query, "page": page, "per_page": per_page}
-        )
-        return {
-            "rows": [{"system_name": "snes", "file_path": "snes/A.srm"}],
-            "total": 1,
-            "page": page,
-            "per_page": per_page,
-        }
-
-    monkeypatch.setattr(db, "get_device_saves", fail_unpaged_load)
-    monkeypatch.setattr(db, "get_device_saves_page", fake_page)
-
-    response = client.get(
-        "/api/devices/drone-saves-repo/saves?q=a&page=2&per_page=25",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["total"] == 1
-    assert calls == [
-        {"device_id": "drone-saves-repo", "query": "a", "page": 2, "per_page": 25}
-    ]
 
 
 def test_asset_metadata_queued_full_refresh_keeps_existing_rows_visible_until_last_chunk(client):
@@ -4256,125 +4121,33 @@ def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client)
     assert action["payload"]["devices"] == [{"device_id": "source-with-bios", "device_name": "Source With BIOS"}]
 
 
-def test_asset_metadata_upload_drops_artwork(client):
-    client.post("/api/auth/register", json={"email": "artwork@example.com", "username": "artwork-at-example.com", "password": "testpass123"})
-    token = client.post(
-        "/api/auth/login",
-        json={"email": "artwork@example.com", "username": "artwork-at-example.com", "password": "testpass123"},
-    ).json()["access_token"]
-    user = db.get_user_by_email("artwork@example.com")
-    db.create_device(user["id"], "drone-a", "Drone A", {"ip_address": "10.0.0.2"}, raw_token="drone-token-a")
-    db.create_device(user["id"], "drone-b", "Drone B", {"ip_address": "10.0.0.3"}, raw_token="drone-token-b")
-
-    response = client.post(
-        "/api/devices/drone-a/rom-metadata",
-        headers={"Authorization": "Bearer drone-token-a"},
-        json={
-            "device_id": "drone-a",
-            "type": "asset_metadata",
-            "roms": [],
-            "systems": [],
-            "bios": [],
-            "artwork": [{
-                "system": "snes",
-                "rom_path": "Game.zip",
-                "rom_name": "Game.zip",
-                "title": "Game",
-                "artwork_types": ["image", "marquee"],
-            }],
-            "gamelists": [],
-        },
-    )
-    assert response.status_code == 200
-    assert response.json()["artwork_count"] == 0
-
-    master_response = client.get("/api/devices/drone-b/master-artwork", headers={"Authorization": f"Bearer {token}"})
-    assert master_response.status_code == 200
-    assert master_response.json()["artwork"] == []
-
-
-def test_sync_artwork_action_payload_includes_only_source_devices_with_artwork(client):
+def test_sync_artwork_endpoints_removed(client):
+    # Overmind no longer stores an artwork inventory (gamelist-source-of-truth
+    # refactor) -- the dedicated artwork-sync endpoints are gone; artwork now
+    # travels automatically with a ROM sync, resolved by the receiving Drone.
     client.post("/api/auth/register", json={"email": "sync-artwork@example.com", "username": "sync-artwork-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
         json={"email": "sync-artwork@example.com", "username": "sync-artwork-at-example.com", "password": "testpass123"},
     ).json()["access_token"]
     user = db.get_user_by_email("sync-artwork@example.com")
-    db.create_device(user["id"], "source-without-artwork", "Source Without Artwork", {"ip_address": "10.0.0.2"}, raw_token="a")
-    db.create_device(user["id"], "source-with-artwork", "Source With Artwork", {"ip_address": "10.0.0.3"}, raw_token="b")
     db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
-    mark_source_resolvable("source-with-artwork")
-    db.add_artwork("source-with-artwork", [{
-        "system": "snes",
-        "rom_path": "Game.zip",
-        "rom_name": "Game.zip",
-        "artwork_types": ["image"],
-    }])
 
+    # No API route is registered at these paths anymore; the SPA catch-all route
+    # (GET-only) still matches the path, so Starlette reports 405, not 404.
     response = client.post(
         "/api/devices/target-c/sync-artwork",
         headers={"Authorization": f"Bearer {token}"},
         json={"system": "snes", "rom_path": "Game.zip", "artwork_type": "image"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 405
 
-    claim = client.post(
-        "/api/devices/target-c/actions/claim",
-        headers={"Authorization": "Bearer c"},
-        json={},
-    )
-    assert claim.status_code == 200
-    action = claim.json()["actions"][0]
-    assert action["action"] == "sync_artwork"
-    assert action["payload"]["devices"] == [{"device_id": "source-with-artwork", "device_name": "Source With Artwork"}]
-    assert action["payload"]["artwork_type"] == "image"
-
-
-def test_bulk_sync_artwork_filters_sources_and_systems(client):
-    client.post("/api/auth/register", json={"email": "bulk-artwork@example.com", "username": "bulk-artwork-at-example.com", "password": "testpass123"})
-    token = client.post(
-        "/api/auth/login",
-        json={"email": "bulk-artwork@example.com", "username": "bulk-artwork-at-example.com", "password": "testpass123"},
-    ).json()["access_token"]
-    user = db.get_user_by_email("bulk-artwork@example.com")
-    db.create_device(user["id"], "source-a", "Source A", {"ip_address": "10.0.0.2"}, raw_token="a")
-    db.create_device(user["id"], "source-b", "Source B", {"ip_address": "10.0.0.3"}, raw_token="b")
-    db.create_device(user["id"], "target-c", "Target C", {"ip_address": "10.0.0.4"}, raw_token="c")
-    mark_source_resolvable("source-a")
-    db.add_artwork("source-a", [{
-        "system": "snes",
-        "rom_path": "Game.zip",
-        "rom_name": "Game.zip",
-        "artwork_types": ["image"],
-    }])
-    db.add_artwork("source-b", [{
-        "system": "gba",
-        "rom_path": "Other.gba",
-        "rom_name": "Other.gba",
-        "artwork_types": ["image"],
-    }])
-
-    response = client.post(
+    bulk_response = client.post(
         "/api/devices/target-c/sync-artwork-bulk",
         headers={"Authorization": f"Bearer {token}"},
-        json={"systems": ["snes"], "devices": ["source-a"]},
+        json={"systems": ["snes"]},
     )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["action_count"] == 1
-    assert payload["queued_artwork_count"] == 1
-
-    claim = client.post(
-        "/api/devices/target-c/actions/claim",
-        headers={"Authorization": "Bearer c"},
-        json={},
-    )
-    assert claim.status_code == 200
-    action = claim.json()["actions"][0]
-    assert action["action"] == "sync_artwork"
-    assert action["payload"]["system_name"] == "snes"
-    assert action["payload"]["rom_path"] == "Game.zip"
-    assert action["payload"]["devices"] == [{"device_id": "source-a", "device_name": "Source A"}]
+    assert bulk_response.status_code == 405
 
 
 def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
@@ -4392,12 +4165,6 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     db.add_roms("drone-a", "snes", [{"rom_name": "A.zip", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 8}])
     db.add_roms("drone-b", "snes", [{"rom_name": "B.zip", "file_path": "B.zip", "rom_fingerprint": "bbb", "file_size": 9}])
     db.add_roms("drone-c", "snes", [{"rom_name": "C.zip", "file_path": "C.zip", "rom_fingerprint": "ccc", "file_size": 10}])
-    db.add_artwork("drone-b", [{
-        "system": "snes",
-        "rom_path": "B.zip",
-        "rom_name": "B.zip",
-        "artwork_types": ["image"],
-    }])
 
     response = client.post(
         "/api/bulk-sync",
@@ -4417,10 +4184,10 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     assert claim_b.status_code == 200
     claim_a_actions = claim_a.json()["actions"]
     assert [action["action"] for action in claim_a_actions] == ["sync_system"]
-    assert claim_a_actions[0]["payload"]["roms"][0]["file_path"] == "B.zip"
+    assert claim_a_actions[0]["payload"]["roms"][0]["gamelist_id"] == "B.zip"
     assert claim_a_actions[0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-b", "device_name": "Drone B"}]
     assert claim_a_actions[0]["payload"]["roms"][0]["sync_id"]
-    assert claim_b.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "A.zip"
+    assert claim_b.json()["actions"][0]["payload"]["roms"][0]["gamelist_id"] == "A.zip"
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
     activity_a = client.get("/api/devices/drone-a/sync-activity", headers={"Authorization": f"Bearer {token}"}).json()["activity"]
     target_activity = next(row for row in activity_a if row["target_drone_id"] == "drone-a")
@@ -4751,26 +4518,9 @@ def test_sync_action_completion_does_not_create_per_artwork_notifications(client
     )
 
 
-def test_action_results_store_raw_logs_for_selected_drone_view(client):
-    user_id = db.create_user("logs@example.com", "hash")
-    internal_id = db.create_device(user_id, "log-drone", "Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
-    device = db.get_device(internal_id)
-
-    db.store_action_result(device, {
-        "type": "log_sources",
-            "logs": [{"source": "drone_stderr", "files": [{"path": "/tmp/drone.err", "content": "line-1\nline-2"}]}],
-        })
-    db.store_action_result(device, {
-        "type": "log_sources",
-        "logs": [{"source": "drone_stderr", "files": [{"path": "/tmp/drone.err", "content": "line-3"}]}],
-    })
-
-    logs = db.get_device_log_sources("log-drone", line_limit=2)
-    assert logs["logs"][0]["source"] == "drone_stderr"
-    assert logs["logs"][0]["files"][0]["content"] == "line-2\nline-3"
-
-
-def test_game_log_result_does_not_store_raw_logs(client):
+def test_game_log_result_stores_sessions_not_raw_logs(client):
+    # Overmind never stores raw drone/ES logs (gamelist-source-of-truth refactor) --
+    # a "game_logs" action result only persists the parsed gameplay sessions.
     user_id = db.create_user("es-logs@example.com", "hash")
     internal_id = db.create_device(user_id, "es-log-drone", "ES Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
     device = db.get_device(internal_id)
@@ -4781,8 +4531,8 @@ def test_game_log_result_does_not_store_raw_logs(client):
         "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "raw\n"}]}],
     })
 
-    assert not db.get_device_log_sources("es-log-drone")["logs"]
     assert device["game_logs"]["sessions"][0]["game_name"] == "Game.sfc"
+    assert "log_sources" not in device or not device.get("log_sources")
 
 
 def test_action_results_merge_configs_and_exclude_bak_files(client):
@@ -4889,94 +4639,42 @@ def test_game_log_retry_updates_session_without_creating_duplicate(client):
     assert snapshot[0]["duration_seconds"] == 90
 
 
-def test_gameplay_history_is_a_table_log_source():
+def test_gameplay_history_moved_to_swarm_overview():
+    # Gameplay history relocated from the removed per-device Logs tab to a fleet-wide
+    # "Play History" segment on the Drone-Swarm overview.
+    html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     source = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
-    assert "label: 'Gameplay History'" in source
-    assert "type: 'gameplay'" in source
-    assert "overmindGameplayViewer" in source
-    assert "gameplayViewer.innerHTML = renderGameplayTable(source.gamelogs)" in source
+    assert 'data-swarm-view="gameplay"' in html
+    assert "async function showSwarmGameplay(" in source
+    assert "apiGet('/api/gameplay?limit=200')" in source
+    assert "if (view === 'gameplay') showSwarmGameplay(false);" in source
 
 
-def test_log_source_upload_persists_and_streams_while_view_requested(client):
-    client.post("/api/auth/register", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"})
-    token = client.post("/api/auth/login", json={"email": "log-upload@example.com", "username": "log-upload-at-example.com", "password": "testpass123"}).json()["access_token"]
-    user_id = db.get_user_by_email("log-upload@example.com")["id"]
-    db.create_device(user_id, "log-upload-drone", "Log Upload Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
+def test_swarm_gameplay_endpoint_aggregates_across_devices(client):
+    client.post("/api/auth/register", json={"email": "play@example.com", "username": "play-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "play@example.com", "username": "play-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("play@example.com")
+    db.create_device(user["id"], "play-drone-a", "Play Drone A", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "play-drone-b", "Play Drone B", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.log_gameplay("play-drone-a", "snes", "Super Mario World", 1200)
+    db.log_gameplay("play-drone-b", "nes", "Contra", 600)
 
-    inactive = client.post(
-        "/api/devices/log-upload-drone/log-sources",
-        headers={"Authorization": "Bearer drone-token"},
-        json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "ignored\n"}]}]},
-    )
-    assert inactive.status_code == 200
-    stored = db.get_device_log_sources("log-upload-drone")
-    assert stored["logs"][0]["files"][0]["content"] == "ignored"
-
-    view = client.post("/api/devices/log-upload-drone/log-stream/view", headers={"Authorization": f"Bearer {token}"})
-    assert view.status_code == 200
-    heartbeat = client.post(
-        "/api/devices/log-upload-drone/heartbeat",
-        headers={"Authorization": "Bearer drone-token"},
-        json={"device_name": "Log Upload Drone"},
-    )
-    assert heartbeat.json()["log_stream_requested"] is True
-    active = client.post(
-        "/api/devices/log-upload-drone/log-sources",
-        headers={"Authorization": "Bearer drone-token"},
-        json={"logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-1\n"}]}]},
-    )
-    assert active.status_code == 200
-    device_response = client.get("/api/devices/log-upload-drone", headers={"Authorization": f"Bearer {token}"})
-    assert device_response.status_code == 200
-    assert device_response.json()["log_stream_active"] is True
-    assert device_response.json()["log_sources"]["logs"][0]["files"][0]["content"] == "line-1\n"
-    persisted = db.get_device_log_sources("log-upload-drone", line_limit=10)
-    assert persisted["logs"][0]["files"][0]["content"] == "ignored\nline-1"
-
-
-def test_log_source_upload_accepts_drone_incremental_fields_and_marks_online(client):
-    user_id = db.create_user("log-upload-online@example.com", "hash")
-    internal_id = db.create_device(user_id, "log-online-drone", "Log Online Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
-    db.devices[internal_id]["last_seen"] = datetime.utcnow() - timedelta(seconds=999)
-    db.devices[internal_id]["last_known_status"] = "offline"
-
-    response = client.post(
-        "/api/devices/log-online-drone/log-sources",
-        headers={"Authorization": "Bearer drone-token"},
-        json={
-            "type": "log_sources",
-            "collected_at": "2026-05-31T02:31:51+00:00",
-            "append": True,
-            "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "line-1\n"}]}],
-        },
-    )
+    response = client.get("/api/gameplay", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
-    device = db.get_device_by_device_id("log-online-drone")
-    assert device["last_known_status"] == "online"
-    assert device["last_seen"] >= datetime.utcnow() - timedelta(seconds=5)
-    assert db.get_device_log_sources("log-online-drone")["logs"][0]["source"] == "drone_stdout"
+    rows = response.json()["gamelogs"]
+    assert len(rows) == 2
+    names = {row["game_name"] for row in rows}
+    assert names == {"Super Mario World", "Contra"}
+    # Each row is stamped with its Drone for the combined fleet table.
+    drones = {row["device_name"] for row in rows}
+    assert drones == {"Play Drone A", "Play Drone B"}
 
 
-def test_emulator_config_upload_stores_changed_configs(client):
-    user_id = db.create_user("config-upload@example.com", "hash")
-    db.create_device(user_id, "config-upload-drone", "Config Upload Drone", {"ip_address": "10.0.0.2"}, raw_token="drone-token")
-
-    response = client.post(
-        "/api/devices/config-upload-drone/emulator-configs",
-        headers={"Authorization": "Bearer drone-token"},
-        json={
-            "type": "emulator_configs",
-            "incremental": True,
-            "configs": [{"root": "/configs", "relative_path": "retroarch.cfg", "content": "video_driver = vulkan", "md5": "abc123", "fingerprint": "abc123"}],
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted"}
-    device = db.get_device_by_device_id("config-upload-drone")
-    assert device["emulator_configs"]["configs"][0]["relative_path"] == "retroarch.cfg"
-    assert device["emulator_configs"]["configs"][0]["md5"] == "abc123"
-    assert device["emulator_configs"]["configs"][0]["versions"][0]["content"] == "video_driver = vulkan"
+def test_swarm_gameplay_endpoint_requires_auth(client):
+    assert client.get("/api/gameplay").status_code in (401, 403)
 
 
 def test_emulator_config_upload_writes_relational_store_when_available(client, monkeypatch):
@@ -5072,23 +4770,19 @@ def test_selected_drone_config_view_reads_relational_store(client, monkeypatch):
 
 def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
-    css = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/css/overmind.css").read_text(encoding="utf-8")
     assert "Waiting for Drone to upload" in js
-    assert "Waiting for Drone to upload artwork metadata" in js
     assert js.count("renderDroneMetadataWaitingState('System & Roms metadata')") >= 2
     assert "renderDroneMetadataWaitingState('BIOS metadata')" in js
-    assert "renderDroneMetadataWaitingState('artwork metadata')" in js
     assert "Request System & Rom Data" not in js
     assert "queueDeviceAction(\\'rebuild_asset_metadata\\')" not in js
     assert "Auto-sync ROM metadata from this Drone" not in js
-    assert "overmindConfigVersion" in js
-    assert "downloadSelectedOvermindConfigVersion" in js
-    assert "overmindConfigFilter" in js
-    assert "filterOvermindConfigs" in js
-    assert "config-source-scroll" in js
-    assert ".config-source-scroll" in css
-    assert "max-height: 520px" in css
-    assert "update automatically every 30 seconds" in js
+    # Artwork/emulator-config metadata is no longer stored or shown by Overmind
+    # (gamelist-source refactor); their waiting-state + config viewer are gone.
+    assert "renderDroneMetadataWaitingState('artwork metadata')" not in js
+    assert "overmindConfigVersion" not in js
+    assert "downloadSelectedOvermindConfigVersion" not in js
+    assert "overmindConfigFilter" not in js
+    assert "filterOvermindConfigs" not in js
     assert "Collect Configs" not in js
 
 
@@ -5294,7 +4988,6 @@ def test_rebuild_asset_metadata_action_clears_existing_device_assets(client):
     db.create_device(user["id"], "clear-drone", "Clear Drone", {})
     db.add_roms("clear-drone", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "file_size": 3}])
     db.add_bios("clear-drone", [{"bios_name": "bios.bin", "file_path": "bios.bin"}])
-    db.add_artwork("clear-drone", [{"system": "snes", "rom_path": "Game.zip", "artwork_types": ["image"]}])
     device = db.get_device_by_device_id("clear-drone")
     device["rom_metadata"] = {"systems": [{"name": "snes", "rom_count": 1}]}
     device["rom_systems"] = [{"name": "snes", "rom_count": 1}]
@@ -5308,7 +5001,6 @@ def test_rebuild_asset_metadata_action_clears_existing_device_assets(client):
     assert response.status_code == 200
     assert db.get_device_roms("clear-drone") == []
     assert db.get_device_bios("clear-drone") == []
-    assert db._asset_rows_for_device_internal(device["id"], "artwork") == []
     assert device["rom_metadata"] == {}
     assert db.get_user_systems_summary(user["id"]) == []
 
@@ -5377,26 +5069,26 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "Auto-sync ROM metadata from this Drone" not in js
     assert "loadGameLogs({queue:" not in js
     assert "loadDeviceConfigs({queue:" not in js
-    assert "if (currentDeviceView === 'gamelogs') loadGameLogs({showLoader: false});" in js
-    assert "if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});" in js
+    # Saves/Logs/Configs device tabs were removed in the gamelist-source refactor.
+    assert "data-device-view=\"saves\"" not in html
+    assert "data-device-view=\"gamelogs\"" not in html
+    assert "data-device-view=\"configs\"" not in html
+    assert "if (currentDeviceView === 'gamelogs') loadGameLogs({showLoader: false});" not in js
+    assert "if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});" not in js
 
 
-def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
+def test_combined_logs_viewer_removed_with_logs_tab():
+    # The whole per-device Logs tab (emulator log/gameplay combined viewer) was
+    # removed in the gamelist-source refactor; gameplay lives on the swarm overview.
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
 
-    assert "function renderCombinedLogsShell()" in js
-    assert "const shellExists = Boolean(document.getElementById('overmindLogContent'));" in js
-    assert "if (!shellExists) {" in js
-    assert "selectOvermindLogSource(selectedIndex, shellExists);" in js
-    assert "[10, 20, 50, 100]" in js
-    assert "log_limit=${encodeURIComponent(logLimit)}" in js
-    assert "if (content.textContent !== nextContent) {" in js
-    assert "newestLogLinesFirst(source.content, getOvermindLogLineLimit())" in js
-    assert "async function loadGameLogs(options = {})" in js
-    assert "apiGet(`/api/devices/${deviceId}/gamelogs`, { showLoader: options.showLoader !== false })" in js
-    assert "file.content || file.path" not in js
-    assert "No log output reported yet." in js
-    assert "join('\\\\n\\\\n')" not in js
+    assert "function renderCombinedLogsShell()" not in js
+    assert "function displayCombinedLogs(" not in js
+    assert "function selectOvermindLogSource(" not in js
+    assert "async function loadGameLogs(" not in js
+    assert "function buildCombinedLogSources(" not in js
+    # formatGameplayDuration survives — reused by the swarm-overview Play History table.
+    assert "function formatGameplayDuration(seconds)" in js
 
 
 def test_background_device_refresh_updates_ui_without_rebuilding_current_view():
@@ -5419,7 +5111,7 @@ def test_navigation_renders_once_through_hash_route():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
 
     select_start = js.index("function selectDevice(deviceId)")
-    select_source = js[select_start:js.index("async function loadGameLogs", select_start)]
+    select_source = js[select_start:js.index("function formatGameplayDuration", select_start)]
     assert "setRoute('devices', deviceId, 'overview');" in select_source
     assert "updateSelectedDeviceWorkspace();" not in select_source
     assert "switchDeviceView('systems'" not in select_source
@@ -5451,9 +5143,9 @@ def test_periodic_download_and_config_refreshes_preserve_rendered_ui():
     assert "function updateSwarmDownloadsInPlace(rows)" in js
     assert "if (options.quiet && updateSwarmDownloadsInPlace(rows)) {" in js
     assert 'data-download-field="progress-bar"' in js
-    assert "async function loadDeviceConfigs(options = {})" in js
-    assert "if (container.dataset.configSignature === signature) return;" in js
-    assert "loadDeviceConfigs({showLoader: false})" in js
+    # The Configs device tab was removed in the gamelist-source refactor, so its
+    # periodic in-place refresh no longer runs.
+    assert "loadDeviceConfigs({showLoader: false})" not in js
 
 
 def test_metadata_panels_submit_searches_explicitly_and_show_loading_toast():
@@ -5476,9 +5168,10 @@ def test_metadata_panels_submit_searches_explicitly_and_show_loading_toast():
     assert 'onclick="submitDeviceRomSearch()"' in html
     assert 'oninput="handleDeviceRomSearch(event)"' not in html
     assert "function submitBiosSearch()" in js
-    assert "function submitArtworkSearch()" in js
     assert 'oninput="handleBiosSearch(event)"' not in js
-    assert 'oninput="handleArtworkSearch(event)"' not in js
+    # The artwork search panel was removed with the gamelist-source refactor
+    # (Overmind no longer stores artwork inventory to search).
+    assert "function submitArtworkSearch" not in js
 
 
 def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
@@ -6330,59 +6023,48 @@ def test_relational_schema_declares_domain_tables():
         "drone_network_state",
         "drone_system_info",
         "drone_certificates",
-        "drone_roms",
+        "drone_games",
         "drone_bios",
-        "drone_artwork",
         "gameplay_sessions",
-        "drone_log_sources",
-        "drone_emulator_configs",
         "download_items",
         "sync_activity",
+        "transfer_sessions",
         "notifications",
+        "admin_audit_log",
     ]:
         assert f"CREATE TABLE IF NOT EXISTS {table_name}" in migration_sql, f"Missing table: {table_name}"
+    # The gamelist-source-of-truth refactor removed these tables entirely (games live in
+    # the slim drone_games table; artwork/saves/logs/emulator-configs + the JSONB asset
+    # store are gone).
+    for removed in [
+        "drone_roms",
+        "drone_artwork",
+        "drone_saves",
+        "drone_log_sources",
+        "drone_emulator_configs",
+        "overmind_device_assets",
+    ]:
+        assert f"CREATE TABLE IF NOT EXISTS {removed}" not in migration_sql, f"Removed table still declared: {removed}"
     assert "REFERENCES users(id) ON DELETE CASCADE" in migration_sql
     assert "REFERENCES drones(id) ON DELETE CASCADE" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_roms_drone_system" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_actions_drone_status" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_notifications_pending_delivery" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_speed_samples_drone_received" in migration_sql
-    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_oda_rom_device_system_source" in migration_sql
-    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_oda_rom_internal_system" in migration_sql
-    assert "DROP INDEX CONCURRENTLY IF EXISTS idx_oda_rom_internal_system" in migration_sql
-    assert "DROP INDEX CONCURRENTLY IF EXISTS idx_oda_rom_device_system_source" in migration_sql
+    assert "UNIQUE (drone_id, system_name, gamelist_id)" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_drone_games_drone" in migration_sql
+    assert "CREATE INDEX IF NOT EXISTS idx_drone_actions_drone_status" in migration_sql
     assert "OVERMIND_RESET_RELATIONAL_SCHEMA" in store_source
     assert "yoyo" in store_source
-    assert "CREATE INDEX IF NOT EXISTS idx_events_drone_received" in migration_sql
-    assert "CREATE INDEX IF NOT EXISTS idx_peer_checks_source_received" in migration_sql
     assert "class _TimedCursor" in store_source
     assert "PostgreSQL query operation=%s duration_ms=%.2f" in store_source
     assert "OVERMIND_POSTGRES_QUERY_LOG_PARAMS" in store_source
-    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS swarm_connected" in migration_sql
-    assert "ALTER TABLE drones ADD COLUMN IF NOT EXISTS drone_token_hash" in migration_sql
-    assert "ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS drone_token_hash" in migration_sql
-    assert "ALTER TABLE pending_drone_connections ADD COLUMN IF NOT EXISTS recovery_reason" in migration_sql
-    assert "ALTER TABLE pending_drone_connections ALTER COLUMN user_id DROP NOT NULL" in migration_sql
-    assert "ALTER TABLE drone_network_state ADD COLUMN IF NOT EXISTS public_resolvable" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS batocera_version" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS screen_mode" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS audio_volume" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_enabled" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_idle_minutes" in migration_sql
-    assert "ALTER TABLE drone_system_info ADD COLUMN IF NOT EXISTS idle_volume_target" in migration_sql
-    assert "ALTER TABLE drone_emulator_configs ADD COLUMN IF NOT EXISTS fingerprint" in migration_sql
-    assert "def store_device_emulator_configs" in store_source
-    assert "def get_device_emulator_configs" in store_source
-    assert "lower(relative_path) NOT LIKE '%%/log/%%'" in store_source
-    assert "lower(relative_path) NOT LIKE '%%/logs/%%'" in store_source
-    assert "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS delivery_pending" in migration_sql
-    assert "if not _persist_json_app_state_enabled():\n            return None" in store_source
-    assert "relational = self._load_relational_state(cur)" not in store_source
+    # Additive columns from the old ALTER migrations are now folded into the single
+    # CREATE TABLE baseline (fresh-from-scratch migration).
+    assert "romset_files_thumbprint TEXT" in migration_sql
+    assert "screen_mode TEXT" in migration_sql
+    assert "audio_volume INTEGER" in migration_sql
+    assert "idle_volume_target INTEGER" in migration_sql
+    assert "edge_online BOOLEAN" in migration_sql
+    assert "batocera_version TEXT" in migration_sql
     assert "def list_user_notifications" in store_source
     assert "def list_user_devices" in store_source
-    assert "WHERE g.drone_id = ANY(%s)" in store_source
-    assert "WHERE n.swarm_id = ANY(%s)" in store_source
-    assert "WHERE user_id = ANY(%s) OR swarm_id = ANY(%s)" in store_source
 
 
 def test_postgres_store_materializes_state_and_assets_into_relational_tables():
@@ -6418,9 +6100,8 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
         "gamelogs": {"d1": [{"id": "g1", "game_name": "Game", "system_name": "snes"}]},
         "download_states": {"d1": {"active": [{"job_id": "j1", "status": "downloading"}], "queued": [], "recent": []}},
     })
-    store._upsert_domain_assets(cur, "d1", "rom", [{"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"}])
+    store._upsert_domain_assets(cur, "d1", "rom", [{"system_name": "snes", "gamelist_id": "2144", "name": "Game", "rom_fingerprint": "abc"}])
     store._upsert_domain_assets(cur, "d1", "bios", [{"file_path": "bios.bin", "bios_md5": "def"}])
-    store._upsert_domain_assets(cur, "d1", "artwork", [{"system_name": "snes", "rom_path": "Game.zip", "artwork_types": ["image"]}])
 
     sql = "\n".join(statement for statement, _ in cur.statements)
     for table_name in [
@@ -6432,57 +6113,13 @@ def test_postgres_store_materializes_state_and_assets_into_relational_tables():
         "INSERT INTO gameplay_sessions",
         "INSERT INTO download_snapshots",
         "INSERT INTO download_items",
-        "INSERT INTO drone_roms",
+        "INSERT INTO drone_games",
         "INSERT INTO drone_bios",
-        "INSERT INTO drone_artwork",
     ]:
         assert table_name in sql
-
-
-def test_postgres_store_batches_artwork_asset_deletes(monkeypatch):
-    from overmind.postgres_store import PostgresMetadataStore
-
-    class RecordingCursor:
-        def __init__(self):
-            self.statements = []
-
-        def execute(self, sql, params=None):
-            self.statements.append((sql, params))
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class RecordingConnection:
-        def __init__(self):
-            self.cursor_obj = RecordingCursor()
-
-        def cursor(self):
-            return self.cursor_obj
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    store = PostgresMetadataStore()
-    conn = RecordingConnection()
-    monkeypatch.setattr(store, "assets_enabled", lambda: True)
-    monkeypatch.setattr(store, "_connect", lambda: conn)
-
-    store.delete_device_asset_rows("d1", "artwork", [
-        {"system_name": "snes", "rom_path": "Game One.zip", "artwork_types": ["image", "marquee"]},
-        {"system_name": "snes", "rom_path": "Game Two.zip", "artwork_type": "thumbnail"},
-    ])
-
-    assert len(conn.cursor_obj.statements) == 2
-    sql = "\n".join(statement for statement, _ in conn.cursor_obj.statements)
-    assert "FROM unnest(%s::text[], %s::text[])" in sql
-    assert "FROM unnest(%s::text[], %s::text[], %s::text[])" in sql
-    assert len(conn.cursor_obj.statements[1][1][1]) == 3
+    # Games live in drone_games (keyed by gamelist_id); drone_roms/drone_artwork are gone.
+    assert "INSERT INTO drone_roms" not in sql
+    assert "INSERT INTO drone_artwork" not in sql
 
 
 def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
@@ -6714,7 +6351,6 @@ def test_drone_api_uses_explicit_contract_models():
     assert "async def upload_drone_rom_metadata(device_id: str, payload: DroneAssetMetadataUpload" in source
     assert "async def update_device_downloads(device_id: str, payload: DroneDownloadsReport" in source
     assert "async def complete_device_action(device_id: str, action_id: str, payload: DroneActionCompleteRequest" in source
-    assert "async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorConfigsUpload" in source
     assert "class StrictContractModel(BaseModel):" in models
     assert 'ConfigDict(extra="forbid")' in models
 

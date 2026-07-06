@@ -38,7 +38,7 @@
       <div class="hero">
         <div class="hero-badge"><i class="bi bi-broadcast-pin"></i> Fleet command for Batocera arcades</div>
         <h1>Batocera Overmind</h1>
-        <p><strong>One free, open-source command center for all your Batocera machines.</strong> See what's online, sync games, saves, and artwork between cabinets, and fix problems from your browser — no SSH, no walking to each machine.</p>
+        <p><strong>One free, open-source command center for all your Batocera machines.</strong> See what's online, sync games and BIOS between cabinets, and fix problems from your browser — no SSH, no walking to each machine.</p>
       </div>
 
       <div class="feature-strip" aria-label="What Batocera Overmind does">
@@ -50,7 +50,7 @@
         <div class="feature-pill">
           <i class="bi bi-arrow-repeat"></i>
           <h3>Sync between cabinets</h3>
-          <p>Copy games, saves, BIOS, artwork, and configs machine-to-machine.</p>
+          <p>Copy games and BIOS machine-to-machine, artwork included automatically.</p>
         </div>
         <div class="feature-pill">
           <i class="bi bi-sliders"></i>
@@ -60,7 +60,7 @@
         <div class="feature-pill">
           <i class="bi bi-bug"></i>
           <h3>Debug without the cabinet</h3>
-          <p>Read logs, configs, and machine state from your browser — no SSH.</p>
+          <p>Read machine state, storage, and network health from your browser — no SSH.</p>
         </div>
       </div>
 
@@ -69,7 +69,7 @@
         <p>Got Batocera machines you don't sit next to every day? That's exactly who Overmind is for.</p>
         <ul>
           <li><strong>Airbnbs &amp; vacation rentals:</strong> give guests a polished arcade, lock it to Kiosk mode, and update or fix it remotely between stays — no trip to the property.</li>
-          <li><strong>Home arcades &amp; game rooms:</strong> keep every cabinet's games, saves, and artwork in sync from the couch.</li>
+          <li><strong>Home arcades &amp; game rooms:</strong> keep every cabinet's games in sync from the couch.</li>
           <li><strong>Bars, cafes &amp; businesses:</strong> manage a whole floor of machines, set volume, and restart anything from one screen.</li>
           <li><strong>Multiple properties or locations:</strong> one dashboard for every machine, wherever it lives.</li>
         </ul>
@@ -284,6 +284,7 @@
                                         <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="downloads" onclick="setSwarmView('downloads')"><i class="bi bi-cloud-arrow-down me-1"></i>Downloads</button>
                                         <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="sync-activity" onclick="setSwarmView('sync-activity')"><i class="bi bi-clock-history me-1"></i>Sync Activity</button>
                                         <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="master-list" onclick="setSwarmView('master-list')"><i class="bi bi-list-stars me-1"></i>Master List</button>
+                                        <button class="btn btn-outline-primary btn-sm swarm-view-btn" data-swarm-view="gameplay" onclick="setSwarmView('gameplay')"><i class="bi bi-controller me-1"></i>Play History</button>
                                     </div>
                                 </div>
                                 <div id="pending-connections"></div>
@@ -319,15 +320,6 @@
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="bios" title="Bios" aria-label="Bios" onclick="switchDeviceView('bios', this)">
                                                 <i class="bi bi-cpu me-1"></i><span class="device-view-label">Bios</span>
                                             </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="saves" title="Saves" aria-label="Saves" onclick="switchDeviceView('saves', this)">
-                                                <i class="bi bi-floppy me-1"></i><span class="device-view-label">Saves</span>
-                                            </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="gamelogs" title="Logs" aria-label="Logs" onclick="switchDeviceView('gamelogs', this)">
-                                                <i class="bi bi-clock-history me-1"></i><span class="device-view-label">Logs</span>
-                                            </button>
-                                            <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="configs" title="Configs" aria-label="Configs" onclick="switchDeviceView('configs', this)">
-                                                <i class="bi bi-file-earmark-code me-1"></i><span class="device-view-label">Configs</span>
-                                            </button>
                                             <button class="btn btn-outline-primary btn-sm device-view-btn" data-device-view="admin" title="Admin" aria-label="Admin" onclick="switchDeviceView('admin', this)">
                                                 <i class="bi bi-sliders me-1"></i><span class="device-view-label">Admin</span>
                                             </button>
@@ -353,14 +345,6 @@
                                     <div id="swarm-rom-availability-panel" class="mb-3" style="display:none;"></div>
                                 </div>
                                 <div id="device-bios-panel" class="device-subpanel" style="display:none;"></div>
-                                <div id="device-saves-panel" class="device-subpanel" style="display:none;"><div id="saves-list"></div></div>
-                                <div id="device-artwork-panel" class="device-subpanel" style="display:none;"></div>
-                                <div id="device-gamelogs-panel" class="device-subpanel" style="display:none;">
-                                    <div id="gamelogs-list"></div>
-                                </div>
-                                <div id="device-configs-panel" class="device-subpanel" style="display:none;">
-                                    <div id="configs-list"></div>
-                                </div>
                                 <div id="device-admin-panel" class="device-subpanel" style="display:none;"></div>
                             </div>
                         </div>
@@ -513,8 +497,8 @@
                                         <ul class="mb-0">
                                             <li><strong>Monitor every machine</strong> &mdash; online status, system info, storage, and gameplay history from one dashboard.</li>
                                             <li><strong>Manage remotely</strong> &mdash; open a Drone and use the <strong>Admin</strong> tab to turn <strong>Kiosk</strong> mode on/off, set <strong>Volume</strong>, <strong>Restart</strong> the machine, or rebuild its asset cache. Each request shows its progress under <strong>Recent Actions</strong> as it moves from pending to completed.</li>
-                                            <li><strong>Sync content between cabinets</strong> &mdash; copy games, saves, BIOS, and artwork directly from one machine to another, so you set things up once and let the others pull it. <em>(Needs the one-time router step below.)</em></li>
-                                            <li><strong>Debug from your desk</strong> &mdash; read logs, emulator configs, and metadata without walking over to the cabinet.</li>
+                                            <li><strong>Sync content between cabinets</strong> &mdash; copy games and BIOS directly from one machine to another (artwork comes along automatically), so you set things up once and let the others pull it. <em>(Needs the one-time router step below.)</em></li>
+                                            <li><strong>Debug from your desk</strong> &mdash; read system info, storage, and network health without walking over to the cabinet.</li>
                                         </ul>
                                     </div>
                                 </div>
@@ -522,7 +506,7 @@
 
                             <div class="device-card mt-3">
                                 <h4 class="h5"><i class="bi bi-router me-2"></i>Full setup: share files between machines</h4>
-                                <p class="text-muted">Monitoring and remote actions work as soon as a Drone is connected. <strong>One extra step</strong> lets your machines send games, saves, BIOS, and artwork to each other: you tell your router to pass incoming secure traffic (port <code>443</code>) through to the Batocera machine. This is called <em>port forwarding</em>, and you only do it once per machine.</p>
+                                <p class="text-muted">Monitoring and remote actions work as soon as a Drone is connected. <strong>One extra step</strong> lets your machines send games and BIOS to each other: you tell your router to pass incoming secure traffic (port <code>443</code>) through to the Batocera machine. This is called <em>port forwarding</em>, and you only do it once per machine.</p>
 
                                 <div class="my-3 p-3 border rounded" style="border-color:rgba(255,255,255,0.15)!important;background:rgba(255,255,255,0.04);">
                                     <i class="bi bi-info-circle me-1"></i> <strong>Not ready to share files?</strong> Skip this entirely. The Drone still connects for monitoring and remote actions &mdash; it just won't share files with other Drones.

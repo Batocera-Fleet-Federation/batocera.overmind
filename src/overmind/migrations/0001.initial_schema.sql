@@ -1,6 +1,10 @@
--- Initial Overmind schema: all tables created from scratch.
--- Legacy asset-store tables (drone_action_results, overmind_app_state, overmind_device_assets,
--- overmind_device_asset_staging) are included here alongside the full relational schema.
+-- Initial Overmind schema (rebuilt from scratch for the gamelist-source-of-truth refactor).
+--
+-- gamelist.xml is the Drone's source of truth for games. Overmind stores only slim game
+-- rows (drone_games) plus BIOS, device telemetry, gameplay history, P2P/transfer state, and
+-- auth. The previous JSONB asset store (overmind_device_assets/_staging), drone_roms,
+-- drone_artwork, drone_saves, drone/ES logs, and emulator configs are intentionally NOT
+-- created -- the DB is wiped before this baseline is applied (see the plan's Part D).
 
 CREATE TABLE IF NOT EXISTS overmind_schema_versions (
     id TEXT PRIMARY KEY,
@@ -8,44 +12,12 @@ CREATE TABLE IF NOT EXISTS overmind_schema_versions (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Legacy asset store tables -------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS drone_action_results (
-    id BIGSERIAL PRIMARY KEY,
-    device_id TEXT NOT NULL,
-    action_id TEXT,
-    result_type TEXT,
-    result JSONB NOT NULL,
-    received_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
+-- Full in-memory-store snapshot mirror (db.py's store_app_state/_persist_state), distinct
+-- from the removed per-asset overmind_device_assets store above.
 CREATE TABLE IF NOT EXISTS overmind_app_state (
     id TEXT PRIMARY KEY,
     state JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS overmind_device_assets (
-    device_internal_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    asset_type TEXT NOT NULL,
-    item_key TEXT NOT NULL,
-    system_name TEXT,
-    payload JSONB NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (device_internal_id, asset_type, item_key)
-);
-
-CREATE TABLE IF NOT EXISTS overmind_device_asset_staging (
-    device_internal_id TEXT NOT NULL,
-    inventory_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    asset_type TEXT NOT NULL,
-    item_key TEXT NOT NULL,
-    system_name TEXT,
-    payload JSONB NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (device_internal_id, inventory_id, asset_type, item_key)
 );
 
 -- Users ---------------------------------------------------------------------------
@@ -173,6 +145,10 @@ CREATE TABLE IF NOT EXISTS drones (
     rom_inventory_fingerprint_algorithm TEXT,
     rom_inventory_fingerprint_at TIMESTAMPTZ,
     drone_rom_inventory_fingerprint_at TIMESTAMPTZ,
+    romset_files_thumbprint TEXT,
+    bios_files_thumbprint TEXT,
+    romset_files_thumbprint_at TIMESTAMPTZ,
+    bios_files_thumbprint_at TIMESTAMPTZ,
     registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen TIMESTAMPTZ,
     removed_at TIMESTAMPTZ
@@ -186,6 +162,10 @@ CREATE TABLE IF NOT EXISTS drone_network_state (
     public_resolvable BOOLEAN NOT NULL DEFAULT false,
     public_ip TEXT,
     checked_at TIMESTAMPTZ,
+    edge_online BOOLEAN,
+    edge_node TEXT,
+    reflexive_endpoint TEXT,
+    edge_connected_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -212,6 +192,11 @@ CREATE TABLE IF NOT EXISTS drone_system_info (
     memory_total TEXT,
     batocera_version TEXT,
     container BOOLEAN,
+    screen_mode TEXT,
+    audio_volume INTEGER,
+    idle_volume_enabled BOOLEAN,
+    idle_volume_idle_minutes INTEGER,
+    idle_volume_target INTEGER,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -300,7 +285,7 @@ CREATE TABLE IF NOT EXISTS pending_drone_connections (
     status TEXT NOT NULL DEFAULT 'pending'
 );
 
--- Game Assets ---------------------------------------------------------------------
+-- Games & BIOS --------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS systems (
     id BIGSERIAL PRIMARY KEY,
@@ -308,33 +293,27 @@ CREATE TABLE IF NOT EXISTS systems (
     display_name TEXT
 );
 
-CREATE TABLE IF NOT EXISTS asset_inventory_batches (
-    id TEXT PRIMARY KEY,
-    drone_id TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
-    update_mode TEXT NOT NULL,
-    replace_all BOOLEAN NOT NULL DEFAULT false,
-    chunk_index INTEGER,
-    chunk_total INTEGER,
-    inventory_complete BOOLEAN,
-    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at TIMESTAMPTZ
-);
-
-CREATE TABLE IF NOT EXISTS drone_roms (
+-- Slim game inventory: gamelist.xml is the source of truth. A game is identified by
+-- (drone_id, system_name, gamelist_id); rom_fingerprint (sample-fp-v1) is the content
+-- check used for P2P source selection. The ROM path and artwork are NOT stored -- the
+-- owning Drone resolves them from its own gamelist.xml at transfer time.
+CREATE TABLE IF NOT EXISTS drone_games (
     id BIGSERIAL PRIMARY KEY,
     drone_id TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
     system_id BIGINT REFERENCES systems(id) ON DELETE SET NULL,
     system_name TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    normalized_path TEXT NOT NULL,
-    rom_name TEXT,
-    rom_md5 TEXT,
+    gamelist_id TEXT NOT NULL,
+    name TEXT,
+    rom_fingerprint TEXT,
     file_size BIGINT,
-    entry_type TEXT NOT NULL DEFAULT 'file',
-    metadata_source TEXT,
     last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (drone_id, system_name, normalized_path)
+    UNIQUE (drone_id, system_name, gamelist_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_drone_games_drone ON drone_games (drone_id);
+CREATE INDEX IF NOT EXISTS idx_drone_games_drone_system_name ON drone_games (drone_id, system_name, name);
+CREATE INDEX IF NOT EXISTS idx_drone_games_fingerprint ON drone_games (rom_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_drone_games_system_gamelist ON drone_games (system_name, gamelist_id);
 
 CREATE TABLE IF NOT EXISTS drone_bios (
     id BIGSERIAL PRIMARY KEY,
@@ -348,19 +327,8 @@ CREATE TABLE IF NOT EXISTS drone_bios (
     UNIQUE (drone_id, normalized_path)
 );
 
-CREATE TABLE IF NOT EXISTS drone_artwork (
-    id BIGSERIAL PRIMARY KEY,
-    drone_id TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
-    system_id BIGINT REFERENCES systems(id) ON DELETE SET NULL,
-    system_name TEXT NOT NULL,
-    rom_path TEXT NOT NULL,
-    normalized_rom_path TEXT NOT NULL,
-    rom_name TEXT,
-    title TEXT,
-    artwork_type TEXT NOT NULL,
-    last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (drone_id, system_name, normalized_rom_path, artwork_type)
-);
+CREATE INDEX IF NOT EXISTS idx_drone_bios_drone ON drone_bios (drone_id);
+CREATE INDEX IF NOT EXISTS idx_drone_bios_md5 ON drone_bios (bios_md5);
 
 -- Actions & Results ---------------------------------------------------------------
 
@@ -440,7 +408,7 @@ CREATE TABLE IF NOT EXISTS sync_activity (
     status TEXT NOT NULL DEFAULT 'pending',
     system_name TEXT,
     file_path TEXT,
-    rom_md5 TEXT,
+    rom_fingerprint TEXT,
     bios_md5 TEXT,
     artwork_type TEXT,
     bytes_transferred BIGINT,
@@ -451,7 +419,27 @@ CREATE TABLE IF NOT EXISTS sync_activity (
     received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Gaming & Monitoring -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS transfer_sessions (
+    id              TEXT PRIMARY KEY,
+    swarm_id        TEXT,
+    from_device     TEXT,
+    to_device       TEXT,
+    asset           TEXT,
+    transport_used  TEXT,
+    status          TEXT NOT NULL DEFAULT 'offered',
+    bytes_total     BIGINT,
+    bytes_done      BIGINT NOT NULL DEFAULT 0,
+    token_hash      TEXT,
+    error           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at      TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS transfer_sessions_to_device_idx ON transfer_sessions (to_device);
+CREATE INDEX IF NOT EXISTS transfer_sessions_status_idx ON transfer_sessions (status);
+
+-- Gameplay & Telemetry ------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS gameplay_sessions (
     id TEXT PRIMARY KEY,
@@ -459,53 +447,14 @@ CREATE TABLE IF NOT EXISTS gameplay_sessions (
     system_name TEXT,
     game_name TEXT NOT NULL,
     rom_path TEXT,
-    rom_md5 TEXT,
+    rom_fingerprint TEXT,
     played_at TIMESTAMPTZ,
     duration_seconds INTEGER,
     received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS drone_log_sources (
-    id BIGSERIAL PRIMARY KEY,
-    drone_id TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
-    source TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (drone_id, source)
-);
-
-CREATE TABLE IF NOT EXISTS drone_log_files (
-    id BIGSERIAL PRIMARY KEY,
-    source_id BIGINT NOT NULL REFERENCES drone_log_sources(id) ON DELETE CASCADE,
-    path TEXT NOT NULL,
-    content TEXT NOT NULL,
-    modified_at TIMESTAMPTZ,
-    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (source_id, path)
-);
-
-CREATE TABLE IF NOT EXISTS drone_emulator_configs (
-    id BIGSERIAL PRIMARY KEY,
-    drone_id TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
-    root TEXT,
-    relative_path TEXT NOT NULL,
-    current_content TEXT NOT NULL,
-    md5 TEXT,
-    fingerprint TEXT,
-    size_bytes BIGINT,
-    truncated BOOLEAN NOT NULL DEFAULT false,
-    error TEXT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (drone_id, relative_path)
-);
-
-CREATE TABLE IF NOT EXISTS drone_emulator_config_versions (
-    id BIGSERIAL PRIMARY KEY,
-    config_id BIGINT NOT NULL REFERENCES drone_emulator_configs(id) ON DELETE CASCADE,
-    content TEXT NOT NULL,
-    md5 TEXT,
-    fingerprint TEXT,
-    received_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+CREATE INDEX IF NOT EXISTS idx_gameplay_sessions_drone ON gameplay_sessions (drone_id, played_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gameplay_sessions_played_at ON gameplay_sessions (played_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS drone_speed_samples (
     id BIGSERIAL PRIMARY KEY,
@@ -585,5 +534,42 @@ CREATE TABLE IF NOT EXISTS notification_delivery_attempts (
     error TEXT
 );
 
--- rollback intentionally omitted: dropping all production tables requires
--- explicit DBA action, not an automated migration rollback.
+-- Admin / Ops ---------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    actor_user_id TEXT,
+    actor_email TEXT,
+    target_type TEXT,
+    target_id TEXT,
+    target_label TEXT,
+    details TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at ON admin_audit_log (created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS landing_visits (
+    ip TEXT PRIMARY KEY,
+    first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+    visit_count BIGINT NOT NULL DEFAULT 1,
+    user_agent TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_landing_visits_last_seen ON landing_visits (last_seen DESC);
+
+-- Common lookup indexes -----------------------------------------------------------
+
+CREATE INDEX IF NOT EXISTS idx_drones_user_id ON drones (user_id);
+CREATE INDEX IF NOT EXISTS idx_drones_swarm_id ON drones (swarm_id);
+CREATE INDEX IF NOT EXISTS idx_drones_last_seen ON drones (last_seen);
+CREATE INDEX IF NOT EXISTS idx_swarm_memberships_user ON swarm_memberships (user_id);
+CREATE INDEX IF NOT EXISTS idx_device_admin_claims_user ON device_admin_claims (user_id);
+CREATE INDEX IF NOT EXISTS idx_sync_activity_target ON sync_activity (target_drone_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_drone_actions_drone_status ON drone_actions (drone_id, status);
+
+-- rollback intentionally omitted: dropping all production tables requires explicit DBA
+-- action, not an automated migration rollback.

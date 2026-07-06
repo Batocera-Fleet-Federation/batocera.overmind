@@ -90,7 +90,6 @@ def test_phase2_4_response_models_registered():
         "HeartbeatResponse",
         "AdminOverviewResponse",
         "MasterRomsResponse",
-        "DeviceSavesResponse",
         "ActionsResponse",
     ):
         assert name in schemas, f"{name} missing from OpenAPI components"

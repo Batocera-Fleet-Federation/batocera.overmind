@@ -126,19 +126,9 @@
             let masterRomPage = 1;
             let swarmMasterPage = 1;
             let selectedMasterRomKey = null;
-            let savesSearchQuery = '';
-            let savesPage = 1;
-            let selectedSaveKey = null;
-            const SAVES_PAGE_SIZE = 100;
             let biosSearchQuery = '';
             let biosStatusFilter = '';
             let masterBiosPage = 1;
-            let artworkSearchQuery = '';
-            let artworkStatusFilter = '';
-            let artworkTypeFilter = '';
-            let artworkSourceDeviceFilter = [];
-            let artworkSystemFilter = [];
-            let masterArtworkPage = 1;
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
             let selectedDeviceDataRefreshTimer = null;
@@ -1586,7 +1576,7 @@
             }
 
             function setSwarmView(view) {
-                if (!view || !['drones', 'downloads', 'sync-activity', 'master-list'].includes(view)) {
+                if (!view || !['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'].includes(view)) {
                     view = 'drones';
                 }
 
@@ -2303,6 +2293,65 @@
                 }
             }
 
+            async function showSwarmGameplay(updateUrl = true) {
+                if (updateUrl) {
+                    setSwarmView('gameplay');
+                    return;
+                }
+                setActiveSwarmView('gameplay');
+                const panel = document.getElementById('swarm-global-panel');
+                const list = document.getElementById('devices-list');
+                if (!panel) return;
+                if (list) list.style.display = 'none';
+                panel.style.display = 'block';
+                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading play history...</div></div>`;
+                try {
+                    const response = await apiGet('/api/gameplay?limit=200');
+                    if (!response.ok) throw new Error('Failed to load play history');
+                    const payload = await response.json();
+                    const rows = payload.gamelogs || [];
+                    if (!rows.length) {
+                        panel.innerHTML = `<div class="card"><div class="card-body py-2">
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                                <strong><i class="bi bi-controller me-1"></i>Play History</strong>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="showSwarmGameplay(false)"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                            </div>
+                            <div class="empty-state">No gameplay sessions reported across the swarm yet.</div>
+                        </div></div>`;
+                        return;
+                    }
+                    const body = rows.map(log => {
+                        const when = log.played_at ? new Date(log.played_at).toLocaleString() : '—';
+                        const system = log.system_name || '';
+                        const game = log.game_name || log.rom_name || log.rom_path || 'Unknown';
+                        return `<tr>
+                            <td class="small">${escapeHtml(log.device_name || log.device_id || '—')}</td>
+                            <td>${system ? `<span class="badge text-bg-secondary">${escapeHtml(system)}</span>` : '<span class="text-muted">—</span>'}</td>
+                            <td>${escapeHtml(game)}</td>
+                            <td class="small text-nowrap">${escapeHtml(when)}</td>
+                            <td class="small text-nowrap">${escapeHtml(formatGameplayDuration(log.duration_seconds))}</td>
+                        </tr>`;
+                    }).join('');
+                    panel.innerHTML = `<div class="card"><div class="card-body py-2">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <strong><i class="bi bi-controller me-1"></i>Play History</strong>
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="small text-muted">${rows.length} session${rows.length === 1 ? '' : 's'} across the swarm</span>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="showSwarmGameplay(false)"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover align-middle gameplay-history-table bff-stack">
+                                <thead><tr><th>Drone</th><th>System</th><th>Game</th><th>Played</th><th>Duration</th></tr></thead>
+                                <tbody>${body}</tbody>
+                            </table>
+                        </div>
+                    </div></div>`;
+                } catch (error) {
+                    panel.innerHTML = '<div class="empty-state">Unable to load play history.</div>';
+                }
+            }
+
             function setSwarmMasterPage(page) {
                 swarmMasterPage = Math.max(1, page);
                 updateRouteQuery({ mp: swarmMasterPage });
@@ -2362,83 +2411,7 @@
                 deviceRomSearchQuery = '';
                 deviceSystemsPage = 1;
                 selectedMasterRomKey = null;
-                savesSearchQuery = '';
-                savesPage = 1;
-                selectedSaveKey = null;
                 setRoute('devices', deviceId, 'overview');
-            }
-
-            async function loadGameLogs(options = {}) {
-                if (!selectedDeviceId) {
-                    document.getElementById('gamelogs-list').innerHTML = '<div class="empty-state">Select a Drone to view logs.</div>';
-                    return;
-                }
-                const deviceId = selectedDeviceId;
-                try {
-                    const streamResp = await fetch(`/api/devices/${deviceId}/log-stream/view`, {
-                        method: 'POST',
-                        headers: { 'Authorization': `Bearer ${authToken}` }
-                    });
-                    await handleApiAuthFailure(streamResp);
-                    const logLimit = getOvermindLogLineLimit();
-                    const [logsResp, deviceResp] = await Promise.all([
-                        apiGet(`/api/devices/${deviceId}/gamelogs`, { showLoader: options.showLoader !== false }),
-                        apiGet(`/api/devices/${deviceId}?log_limit=${encodeURIComponent(logLimit)}&include_inventory=false&include_configs=true&include_logs=true`, { showLoader: options.showLoader !== false })
-                    ]);
-                    if (!logsResp.ok) throw new Error('Failed to load game logs');
-                    if (!deviceResp.ok) throw new Error('Failed to load device details');
-                    const logsData = await logsResp.json();
-                    const deviceData = await deviceResp.json();
-                    if (selectedDeviceId !== deviceId) return;
-                    displayCombinedLogs({
-                        gamelogs: logsData.gamelogs || [],
-                        emulator_configs: deviceData.emulator_configs || [],
-                        log_sources: deviceData.log_sources || []
-                    });
-                } catch (error) {
-                    console.error('Error loading logs:', error);
-                }
-            }
-
-            function getOvermindLogLineLimit() {
-                const allowed = [10, 20, 50, 100];
-                const stored = Number(localStorage.getItem('overmind_log_line_limit') || 10);
-                return allowed.includes(stored) ? stored : 10;
-            }
-
-            function setOvermindLogLineLimit(value) {
-                const allowed = [10, 20, 50, 100];
-                const requested = Number(value);
-                const nextValue = allowed.includes(requested) ? requested : 10;
-                localStorage.setItem('overmind_log_line_limit', String(nextValue));
-                const input = document.getElementById('overmindLogLineLimit');
-                if (input) input.value = String(nextValue);
-                loadGameLogs();
-            }
-
-            function renderPassiveUpdateNotice(label) {
-                return `<div class="small text-muted mb-2">${escapeHtml(label)} update automatically every 30 seconds.</div>`;
-            }
-
-            function buildCombinedLogSources(gamelogs, log_sources) {
-                const sources = [{
-                    id: 'gameplay_history',
-                    label: 'Gameplay History',
-                    type: 'gameplay',
-                    gamelogs: Array.isArray(gamelogs) ? gamelogs : []
-                }];
-                const logPayload = log_sources && !Array.isArray(log_sources) ? log_sources : {};
-                const sourceRows = Array.isArray(logPayload.logs) ? logPayload.logs : (Array.isArray(log_sources) ? log_sources : []);
-                sourceRows.forEach(row => {
-                    const label = row.source || row.name || row.path || 'log_source';
-                    const content = (row.files || []).map(file => {
-                        if (typeof file === 'string') return file;
-                        if (Object.prototype.hasOwnProperty.call(file, 'content')) return String(file.content || '');
-                        return '';
-                    }).filter(Boolean).join('\n\n') || 'No log output reported yet.';
-                    sources.push({id: label, label: label.replaceAll('_', ' '), path: (row.files || []).map(f => f.path || f.name).filter(Boolean).join(', '), content});
-                });
-                return sources;
             }
 
             function formatGameplayDuration(seconds) {
@@ -2449,349 +2422,6 @@
                 const hours = Math.floor(minutes / 60);
                 if (hours > 0) return `${hours}h ${minutes % 60}m`;
                 return `${minutes}m`;
-            }
-
-            function renderGameplayTable(gamelogs) {
-                const bySession = new Map();
-                (Array.isArray(gamelogs) ? gamelogs : []).forEach(log => {
-                    const key = [
-                        log.played_at || log.started_at || '',
-                        String(log.system_name || log.system || '').trim().toLowerCase(),
-                        String(log.game_name || log.rom_name || log.rom_path || '').trim().toLowerCase(),
-                        String(log.rom_path || '').trim().toLowerCase()
-                    ].join('|');
-                    bySession.set(key, {...(bySession.get(key) || {}), ...log});
-                });
-                const rows = Array.from(bySession.values()).sort((a, b) => {
-                    const at = a.played_at ? Date.parse(a.played_at) : 0;
-                    const bt = b.played_at ? Date.parse(b.played_at) : 0;
-                    return bt - at;
-                });
-                const header = `
-                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-                        <strong><i class="bi bi-controller me-1"></i>Gameplay History</strong>
-                        <span class="small text-muted">${rows.length} session${rows.length === 1 ? '' : 's'}</span>
-                    </div>`;
-                if (!rows.length) {
-                    return `${header}<div class="empty-state">No gameplay sessions reported yet.</div>`;
-                }
-                const body = rows.map(log => {
-                    const when = log.played_at ? new Date(log.played_at).toLocaleString() : '—';
-                    const system = log.system_name || '';
-                    const game = log.game_name || log.rom_name || log.rom_path || 'Unknown';
-                    const romPath = log.rom_path || '';
-                    return `<tr>
-                        <td>${system ? `<span class="badge text-bg-secondary">${escapeHtml(system)}</span>` : '<span class="text-muted">—</span>'}</td>
-                        <td>${escapeHtml(game)}</td>
-                        <td class="small mono text-muted">${escapeHtml(romPath)}</td>
-                        <td class="small text-nowrap">${escapeHtml(when)}</td>
-                        <td class="small text-nowrap">${escapeHtml(formatGameplayDuration(log.duration_seconds))}</td>
-                    </tr>`;
-                }).join('');
-                return `${header}
-                    <div class="table-responsive">
-                        <table class="table table-sm table-hover align-middle gameplay-history-table bff-stack">
-                            <thead><tr>
-                                <th>System</th><th>Game</th><th>ROM Path</th><th>Played</th><th>Duration</th>
-                            </tr></thead>
-                            <tbody>${body}</tbody>
-                        </table>
-                    </div>`;
-            }
-
-            function renderCombinedLogsShell() {
-                const container = document.getElementById('gamelogs-list');
-                if (!container) return;
-                container.innerHTML = `
-                    ${renderPassiveUpdateNotice('Gameplay logs')}
-                    <div class="row">
-                        <div class="col-md-3 mb-3">
-                                <div class="card log-card">
-                                    <div class="card-header">Log Sources</div>
-                                    <div class="list-group list-group-flush source-selector" id="overmindLogSources"></div>
-                            </div>
-                        </div>
-                        <div class="col-md-9">
-                            <div class="card log-card">
-                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <span id="overmindLogTitle">Select a log source</span>
-                                    <div class="d-flex flex-wrap align-items-center gap-2">
-                                        <div id="overmindLogTextControls" class="d-flex flex-wrap align-items-center gap-2">
-                                        <label for="overmindLogLineLimit" class="small text-muted mb-0">Lines</label>
-                                        <select id="overmindLogLineLimit" class="form-select form-select-sm" style="width:6rem;" onchange="setOvermindLogLineLimit(this.value)">
-                                            ${[10, 20, 50, 100].map(value => `<option value="${value}" ${getOvermindLogLineLimit() === value ? 'selected' : ''}>${value}</option>`).join('')}
-                                        </select>
-                                        </div>
-                                        <button class="btn btn-sm btn-outline-primary" onclick="loadGameLogs()">Refresh View</button>
-                                    </div>
-                                </div>
-                                <div class="card-body">
-                                    <div id="overmindTextLogViewer">
-                                        <div id="overmindLogPath" class="small text-muted mb-2"></div>
-                                        <pre id="overmindLogContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a source from the left panel to view logs.</pre>
-                                    </div>
-                                    <div id="overmindGameplayViewer" style="display:none;"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }
-
-            function updateOvermindLogSourceButtons(sources) {
-                const list = document.getElementById('overmindLogSources');
-                if (!list) return;
-                const signature = sources.map(source => `${source.id}|${source.label}|${source.path}|${source.type}`).join('||');
-                if (list.dataset.signature === signature) return;
-                list.dataset.signature = signature;
-                list.innerHTML = sources.map((source, index) => `
-                    <button type="button" class="list-group-item list-group-item-action text-start" onclick="selectOvermindLogSource(${index})">
-                        <i class="bi ${source.type === 'gameplay' ? 'bi-controller' : 'bi-journal-text'} me-2"></i>${escapeHtml(source.label)}
-                    </button>
-                `).join('');
-            }
-
-            function displayCombinedLogs({gamelogs, emulator_configs, log_sources}) {
-                const sources = buildCombinedLogSources(gamelogs, log_sources);
-                const shellExists = Boolean(document.getElementById('overmindLogContent'));
-                const previousSource = (window.overmindLogSources || [])[window.overmindSelectedLogIndex];
-                const selectedSourceId = window.overmindSelectedLogSourceId || (previousSource && previousSource.id) || (sources[0] && sources[0].id);
-                if (!shellExists) {
-                    renderCombinedLogsShell();
-                }
-                window.overmindLogSources = sources;
-                updateOvermindLogSourceButtons(sources);
-                if (sources.length) {
-                    const selectedIndex = Math.max(0, sources.findIndex(source => source.id === selectedSourceId));
-                    selectOvermindLogSource(selectedIndex, shellExists);
-                } else {
-                    const content = document.getElementById('overmindLogContent');
-                    const title = document.getElementById('overmindLogTitle');
-                    if (title) title.textContent = 'No log sources';
-                    if (content) content.textContent = 'No emulator log sources reported yet.';
-                }
-            }
-
-            function selectOvermindLogSource(index, preserveScroll = false) {
-                const sources = window.overmindLogSources || [];
-                const source = sources[index];
-                if (!source) return;
-                window.overmindSelectedLogIndex = index;
-                window.overmindSelectedLogSourceId = source.id;
-                document.querySelectorAll('#overmindLogSources .list-group-item').forEach((node, idx) => node.classList.toggle('active', idx === index));
-                const title = document.getElementById('overmindLogTitle');
-                const path = document.getElementById('overmindLogPath');
-                const content = document.getElementById('overmindLogContent');
-                const textViewer = document.getElementById('overmindTextLogViewer');
-                const gameplayViewer = document.getElementById('overmindGameplayViewer');
-                const textControls = document.getElementById('overmindLogTextControls');
-                if (title) title.textContent = source.label;
-                if (source.type === 'gameplay') {
-                    if (textViewer) textViewer.style.display = 'none';
-                    if (textControls) textControls.style.display = 'none';
-                    if (gameplayViewer) {
-                        gameplayViewer.style.display = 'block';
-                        gameplayViewer.innerHTML = renderGameplayTable(source.gamelogs);
-                    }
-                    return;
-                }
-                if (textViewer) textViewer.style.display = 'block';
-                if (textControls) textControls.style.display = 'flex';
-                if (gameplayViewer) gameplayViewer.style.display = 'none';
-                if (path) path.textContent = source.path || '';
-                if (content) {
-                    const nextContent = newestLogLinesFirst(source.content, getOvermindLogLineLimit());
-                    const wasAtTop = content.scrollTop < 24;
-                    const previousScrollTop = content.scrollTop;
-                    if (content.textContent !== nextContent) {
-                        content.textContent = nextContent;
-                        content.scrollTop = preserveScroll && !wasAtTop ? previousScrollTop : 0;
-                    }
-                }
-            }
-
-            async function loadDeviceConfigs(options = {}) {
-                const container = document.getElementById('configs-list');
-                if (!selectedDeviceId || !container) return;
-                const deviceId = selectedDeviceId;
-                try {
-                    const response = await apiGet(`/api/devices/${deviceId}?include_inventory=false&include_configs=true&include_logs=false`, { showLoader: options.showLoader !== false });
-                    if (!response.ok) throw new Error('Failed to load config data');
-                    const device = await response.json();
-                    if (selectedDeviceId !== deviceId) return;
-                    displayDeviceConfigs(device.emulator_configs || null);
-                } catch (error) {
-                    if (selectedDeviceId === deviceId && !container.innerHTML.trim()) {
-                        container.innerHTML = '<div class="empty-state">Unable to load emulator configs.</div>';
-                    }
-                }
-            }
-
-            function displayDeviceConfigs(configPayload) {
-                const container = document.getElementById('configs-list');
-                const configs = configPayload && Array.isArray(configPayload.configs) ? configPayload.configs : [];
-                const signature = `${selectedDeviceId}:${JSON.stringify(configPayload || null)}`;
-                if (container.dataset.configSignature === signature) return;
-                container.dataset.configSignature = signature;
-                if (!configs.length) {
-                    container.innerHTML = `<div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
-                            <div>
-                                <strong>Emulator Configs</strong>
-                                <div class="small text-muted">Waiting for Drone to upload changed emulator configs. This view updates automatically every 30 seconds.</div>
-                            </div>
-                            <button class="btn btn-outline-primary btn-sm mutate-only" onclick="queueDeviceAction('refresh_emulator_list', {refreshActions:false})"><i class="bi bi-controller me-1"></i>Refresh Emulator List</button>
-                        </div>
-                    </div></div>`;
-                    applyRbacUI();
-                    return;
-                }
-                const rows = configs.map((item, index) => {
-                    const relPath = item.relative_path || item.path || `config-${index + 1}`;
-                    const label = item.name || relPath;
-                    const present = item.present !== false;
-                    const content = item.content || item.text || '';
-                    const versions = Array.isArray(item.versions) && item.versions.length
-                        ? item.versions
-                        : (present && content ? [{collected_at: item.collected_at || '', fingerprint: item.fingerprint || '', content}] : []);
-                    const versionCount = Number.isInteger(item.version_count) ? item.version_count : versions.length;
-                    return {label, relPath, root: item.root || '', content, present, versionCount, fingerprint: item.fingerprint || '', versions};
-                });
-                const previousIndex = Number.isInteger(window.overmindSelectedConfigIndex) ? window.overmindSelectedConfigIndex : 0;
-                container.innerHTML = `
-                    ${renderPassiveUpdateNotice('Emulator configs')}
-                    <div class="row">
-                        <div class="col-md-3 mb-3">
-                                <div class="card log-card">
-                                    <div class="card-header">Emulators</div>
-                                    <div class="config-filter-wrap p-2">
-                                        <input id="overmindConfigFilter" class="form-control form-control-sm" type="search" placeholder="Filter configs" autocomplete="off" oninput="filterOvermindConfigs(this.value)">
-                                    </div>
-                                    <div class="list-group list-group-flush source-selector config-source-scroll" id="overmindConfigSources">
-                                        ${rows.map((row, index) => `
-                                        <button type="button" class="list-group-item list-group-item-action text-start d-flex justify-content-between align-items-center gap-2" data-config-index="${index}" onclick="selectOvermindConfig(${index})">
-                                            <span class="text-truncate"><i class="bi ${row.present ? 'bi-check-circle-fill text-success' : 'bi-exclamation-triangle-fill text-warning'} me-2" title="${row.present ? 'Available on this drone' : 'Not available on this drone'}"></i>${escapeHtml(row.label)}</span>
-                                            <span class="badge ${row.versionCount ? 'text-bg-secondary' : 'text-bg-light text-muted'}" title="${row.versionCount} version(s) stored">v${row.versionCount}</span>
-                                        </button>
-                                    `).join('')}
-                                </div>
-                                <div id="overmindConfigFilterEmpty" class="small text-muted px-3 py-2" style="display:none;">No configs match.</div>
-                            </div>
-                        </div>
-                        <div class="col-md-9">
-                            <div class="card log-card">
-                                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                                    <span id="overmindConfigTitle">Select a config</span>
-                                    <div class="d-flex gap-2">
-                                        <button class="btn btn-sm btn-outline-primary mutate-only" onclick="queueDeviceAction('refresh_emulator_list', {refreshActions:false})"><i class="bi bi-controller me-1"></i>Refresh Emulator List</button>
-                                        <button class="btn btn-sm btn-outline-primary" onclick="loadDeviceConfigs()">Refresh View</button>
-                                    </div>
-                                </div>
-                                <div class="card-body">
-                                    <div class="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-2">
-                                        <div>
-                                            <div id="overmindConfigPath" class="small text-muted"></div>
-                                            <div id="overmindConfigFingerprint" class="small text-muted mono"></div>
-                                        </div>
-                                        <div class="d-flex flex-wrap align-items-end gap-2">
-                                            <div>
-                                                <label class="form-label small mb-1" for="overmindConfigVersion">Version</label>
-                                                <select id="overmindConfigVersion" class="form-select form-select-sm" onchange="selectOvermindConfigVersion(this.value)"></select>
-                                            </div>
-                                            <button class="btn btn-sm btn-outline-primary" onclick="downloadSelectedOvermindConfigVersion()">Download</button>
-                                        </div>
-                                    </div>
-                                    <pre id="overmindConfigContent" class="mono bg-dark text-light p-3" style="max-height:600px;overflow:auto;white-space:pre-wrap;">Select a config from the left panel to view its contents.</pre>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                window.overmindConfigRows = rows;
-                if (rows.length) {
-                    setTimeout(() => selectOvermindConfig(Math.min(previousIndex, rows.length - 1)), 0);
-                }
-                applyRbacUI();
-            }
-
-            function selectOvermindConfig(index) {
-                const rows = window.overmindConfigRows || [];
-                const row = rows[index];
-                if (!row) return;
-                window.overmindSelectedConfigIndex = index;
-                window.overmindSelectedConfigVersionIndex = 0;
-                document.querySelectorAll('#overmindConfigSources .list-group-item').forEach((node) => {
-                    node.classList.toggle('active', Number(node.dataset.configIndex) === index);
-                });
-                const title = document.getElementById('overmindConfigTitle');
-                const path = document.getElementById('overmindConfigPath');
-                const fingerprint = document.getElementById('overmindConfigFingerprint');
-                const versionSelect = document.getElementById('overmindConfigVersion');
-                const content = document.getElementById('overmindConfigContent');
-                if (title) title.textContent = `${row.label}${row.versionCount ? ` · ${row.versionCount} version${row.versionCount === 1 ? '' : 's'}` : ''}`;
-                if (path) path.textContent = (row.relPath || row.root || '') + (row.present ? '' : ' — not available on this drone');
-                if (versionSelect) {
-                    versionSelect.innerHTML = (row.versions || []).map((version, versionIndex) => {
-                        const stamp = version.collected_at ? new Date(version.collected_at).toLocaleString() : `Version ${versionIndex + 1}`;
-                        const hash = version.fingerprint ? ` ${String(version.fingerprint).slice(0, 8)}` : '';
-                        return `<option value="${versionIndex}">${escapeHtml(stamp + hash)}</option>`;
-                    }).join('');
-                    versionSelect.value = '0';
-                    versionSelect.disabled = !(row.versions || []).length;
-                }
-                const version = (row.versions || [])[0] || row;
-                if (fingerprint) fingerprint.textContent = version.fingerprint ? `fingerprint: ${version.fingerprint}` : '';
-                if (content) content.textContent = row.present ? (version.content || row.content || '') : 'This config does not exist on the drone yet.';
-            }
-
-            function filterOvermindConfigs(value) {
-                const query = String(value || '').trim().toLowerCase();
-                const buttons = Array.from(document.querySelectorAll('#overmindConfigSources .list-group-item'));
-                const visible = [];
-                buttons.forEach((button) => {
-                    const label = button.textContent.toLowerCase();
-                    const matched = !query || label.includes(query);
-                    button.style.display = matched ? '' : 'none';
-                    if (matched) visible.push(button);
-                });
-                const empty = document.getElementById('overmindConfigFilterEmpty');
-                if (empty) empty.style.display = visible.length ? 'none' : 'block';
-                const selectedIndex = Number(window.overmindSelectedConfigIndex);
-                const selectedVisible = visible.some((button) => Number(button.dataset.configIndex) === selectedIndex);
-                if (!selectedVisible && visible.length) {
-                    selectOvermindConfig(Number(visible[0].dataset.configIndex));
-                }
-            }
-
-            function selectOvermindConfigVersion(value) {
-                const rows = window.overmindConfigRows || [];
-                const row = rows[window.overmindSelectedConfigIndex || 0];
-                if (!row) return;
-                const versionIndex = Math.max(0, Math.min((row.versions || []).length - 1, Number(value) || 0));
-                window.overmindSelectedConfigVersionIndex = versionIndex;
-                const version = (row.versions || [])[versionIndex] || row;
-                const content = document.getElementById('overmindConfigContent');
-                const fingerprint = document.getElementById('overmindConfigFingerprint');
-                if (fingerprint) fingerprint.textContent = version.fingerprint ? `fingerprint: ${version.fingerprint}` : '';
-                if (content) content.textContent = version.content || row.content || '';
-            }
-
-            function downloadSelectedOvermindConfigVersion() {
-                const rows = window.overmindConfigRows || [];
-                const row = rows[window.overmindSelectedConfigIndex || 0];
-                if (!row) return;
-                const versionIndex = window.overmindSelectedConfigVersionIndex || 0;
-                const version = (row.versions || [])[versionIndex] || row;
-                const blob = new Blob([version.content || row.content || ''], {type: 'text/plain;charset=utf-8'});
-                const link = document.createElement('a');
-                const safeName = String(row.label || 'emulator-config').replace(/[^a-z0-9._-]+/gi, '_');
-                const suffix = version.fingerprint ? `.${String(version.fingerprint).slice(0, 8)}` : '';
-                link.href = URL.createObjectURL(blob);
-                link.download = `${safeName}${suffix}.txt`;
-                document.body.appendChild(link);
-                link.click();
-                URL.revokeObjectURL(link.href);
-                link.remove();
             }
 
             async function loadDeviceSystems() {
@@ -3035,105 +2665,6 @@
                 renderSystemRomPage(systemName);
             }
 
-            function normalizeRomAssetKey(value) {
-                return String(value || '')
-                    .replace(/\\/g, '/')
-                    .replace(/^\/userdata\/roms\//i, '')
-                    .replace(/^userdata\/roms\//i, '')
-                    .replace(/^\.\//, '')
-                    .replace(/^\/+/, '')
-                    .trim()
-                    .toLowerCase();
-            }
-
-            function romAssetKeyVariants(value, systemName) {
-                const normalized = normalizeRomAssetKey(value);
-                if (!normalized) return [];
-                const system = String(systemName || '').trim().toLowerCase();
-                const keys = new Set([normalized]);
-                if (system) {
-                    if (normalized.startsWith(`${system}/`)) keys.add(normalized.slice(system.length + 1));
-                    else keys.add(`${system}/${normalized}`);
-                }
-                const parts = normalized.split('/').filter(Boolean);
-                if (parts.length) keys.add(parts[parts.length - 1]);
-                return Array.from(keys).filter(Boolean);
-            }
-
-            function romArtworkKeys(row, systemName) {
-                const values = [
-                    row.file_path,
-                    row.relative_path,
-                    row.rom_path,
-                    row.rom_name,
-                    row.file_name,
-                ].filter(Boolean);
-                const keys = new Set();
-                values.forEach(value => {
-                    romAssetKeyVariants(value, systemName).forEach(key => keys.add(key));
-                });
-                return keys;
-            }
-
-            function buildArtworkLookup(rows, systemName) {
-                const lookup = new Map();
-                (rows || []).forEach(row => {
-                    const keys = new Set(romAssetKeyVariants(
-                        row.rom_path || row.file_path || row.relative_path || row.rom_name || '',
-                        row.system_name || row.system || systemName,
-                    ));
-                    keys.forEach(key => {
-                        if (!lookup.has(key)) lookup.set(key, []);
-                        lookup.get(key).push(row);
-                    });
-                });
-                return lookup;
-            }
-
-            function artworkIconClass(type) {
-                const value = String(type || '').toLowerCase();
-                if (value.includes('video')) return 'bi-play-btn';
-                if (value.includes('marquee')) return 'bi-aspect-ratio';
-                if (value.includes('thumb')) return 'bi-card-image';
-                if (value.includes('fanart')) return 'bi-image';
-                if (value.includes('manual')) return 'bi-file-earmark-text';
-                if (value.includes('wheel')) return 'bi-record-circle';
-                if (value.includes('box')) return 'bi-box';
-                return 'bi-image';
-            }
-
-            function artworkRowsForRom(rom, lookup, systemName) {
-                const seen = new Set();
-                const matches = [];
-                romArtworkKeys(rom, systemName).forEach(key => {
-                    (lookup.get(key) || []).forEach(row => {
-                        const id = [
-                            row.system_name || row.system || '',
-                            row.rom_path || row.file_path || row.rom_name || '',
-                            row.artwork_type || '',
-                        ].join('::').toLowerCase();
-                        if (seen.has(id)) return;
-                        seen.add(id);
-                        matches.push(row);
-                    });
-                });
-                matches.sort((a, b) => String(a.artwork_type || '').localeCompare(String(b.artwork_type || '')));
-                return matches;
-            }
-
-            function renderRomArtworkAssets(rows) {
-                if (!rows.length) return '<span class="text-muted">none</span>';
-                return `<div class="rom-artwork-assets">${rows.map(row => {
-                    const type = row.artwork_type || 'artwork';
-                    const present = !!row.present_on_selected;
-                    const sources = (row.devices || []).map(device => device.device_name || device.device_id).filter(Boolean).join(', ');
-                    const title = present ? `${type} present on this Drone` : `${type} available from ${sources || 'another Drone'}`;
-                    return `<span class="rom-artwork-chip ${present ? 'is-present' : 'is-available'}" title="${escapeHtml(title)}">
-                        <i class="bi ${artworkIconClass(type)}"></i>${escapeHtml(type)}
-                    </span>`;
-                }).join('')}</div>`;
-            }
-
             function renderRomDetailValue(label, value) {
                 const display = value === null || value === undefined || value === '' ? 'n/a' : String(value);
                 return `<div class="rom-detail-field">
@@ -3142,22 +2673,7 @@
                 </div>`;
             }
 
-            function renderRomArtworkDetails(rows) {
-                if (!rows.length) return '<div class="small text-muted">No artwork metadata is associated with this ROM yet.</div>';
-                return `<div class="rom-artwork-detail-list">${rows.map(row => {
-                    const type = row.artwork_type || 'artwork';
-                    const present = !!row.present_on_selected;
-                    const sources = (row.devices || []).map(device => device.device_name || device.device_id).filter(Boolean).join(', ');
-                    const path = row.rom_path || row.file_path || row.relative_path || row.rom_name || '';
-                    return `<div class="rom-artwork-detail-row">
-                        <span class="rom-artwork-chip ${present ? 'is-present' : 'is-available'}"><i class="bi ${artworkIconClass(type)}"></i>${escapeHtml(type)}</span>
-                        <span class="small text-muted">${escapeHtml(present ? 'Present here' : (sources ? `Available from ${sources}` : 'Available elsewhere'))}</span>
-                        ${path ? `<span class="small mono text-muted">${escapeHtml(path)}</span>` : ''}
-                    </div>`;
-                }).join('')}</div>`;
-            }
-
-            function renderRomDetailPanel(row, artworkRows, sizeText, sources, statusLabel) {
+            function renderRomDetailPanel(row, sizeText, sources, statusLabel) {
                 const fileName = row.file_path || row.rom_name || row.relative_path || row.rom_path || '';
                 const fields = [
                     ['System', row.system_name || row.system],
@@ -3175,10 +2691,6 @@
                 return `<div class="rom-detail-panel">
                     <div class="rom-detail-grid">
                         ${fields.map(([label, value]) => renderRomDetailValue(label, value)).join('')}
-                    </div>
-                    <div class="mt-2">
-                        <div class="small fw-semibold mb-1">Artwork</div>
-                        ${renderRomArtworkDetails(artworkRows)}
                     </div>
                     <details class="mt-2">
                         <summary class="small text-muted">Raw ROM metadata</summary>
@@ -3343,7 +2855,7 @@
 
             async function refreshSelectedDroneDetails() {
                 if (!selectedDeviceId) return null;
-                const response = await apiGet(`/api/devices/${selectedDeviceId}?include_inventory=false&include_configs=false&include_logs=false`, { showLoader: false });
+                const response = await apiGet(`/api/devices/${selectedDeviceId}?include_inventory=false&include_configs=false`, { showLoader: false });
                 if (!response.ok) throw new Error('Failed to load device details');
                 const device = await response.json();
                 const index = currentDevices.findIndex(item => item.device_id === device.device_id);
@@ -3674,18 +3186,9 @@
                     params.set('page', String(masterRomPage));
                     params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
                     const url = `/api/devices/${selectedDeviceId}/master-roms` + (params.toString() ? `?${params.toString()}` : '');
-                    const artworkParams = new URLSearchParams();
-                    if (q) artworkParams.set('q', q);
-                    if (system) artworkParams.set('system', system);
-                    artworkParams.set('page', '1');
-                    artworkParams.set('per_page', '100');
-                    const [response, artworkResponse] = await Promise.all([
-                        apiGet(url),
-                        apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`),
-                    ]);
+                    const response = await apiGet(url);
                     if (!response.ok) throw new Error('Failed to load swarm ROM availability');
                     const payload = await response.json();
-                    const artworkPayload = artworkResponse.ok ? await artworkResponse.json() : { artwork: [] };
                     const filtered = payload.roms || [];
                     const total = payload.total || filtered.length;
                     const page = payload.page || masterRomPage;
@@ -3709,8 +3212,6 @@
                         if (end < pageCount - 1) paginationButtons.push('<span class="px-2">&hellip;</span>');
                         if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
                     }
-                    const artworkLookup = buildArtworkLookup(artworkPayload.artwork || [], system || '');
-
                     container.innerHTML = `
                         <div class="card"><div class="card-body py-2">
                             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
@@ -3747,7 +3248,6 @@
                                     const statusLabel = present ? (row.present_label || 'Present') : (row.devices && row.devices.length ? 'Missing' : 'Unavailable');
                                     const showSync = !present && row.devices && row.devices.length;
                                     const rowData = Object.assign({}, row, { preferred_sync_source: row.preferred_source || preferred });
-                                    const artworkRows = artworkRowsForRom(row, artworkLookup, row.system_name || system || '');
                                     const rowKey = masterRomRowKey(row);
                                     const detailId = `master-rom-detail-${page}-${rowIndex}`;
                                     const expanded = rowKey && rowKey === selectedMasterRomKey;
@@ -3763,7 +3263,7 @@
                                                 ${showSync ? `<button class="btn btn-primary btn-sm" onclick='event.stopPropagation(); syncRom(${JSON.stringify(rowData).replace(/'/g, "'")})'>Sync</button>` : '<span class="small text-muted">Details</span>'}
                                             </td>
                                         </tr>
-                                        <tr id="${detailId}" class="rom-master-detail-row" style="display:${expanded ? 'table-row' : 'none'};"><td colspan="5">${renderRomDetailPanel(row, artworkRows, sizeText, sources || preferred, statusLabel)}</td></tr>
+                                        <tr id="${detailId}" class="rom-master-detail-row" style="display:${expanded ? 'table-row' : 'none'};"><td colspan="5">${renderRomDetailPanel(row, sizeText, sources || preferred, statusLabel)}</td></tr>
                                     `;
                                 }).join('')}
                             </tbody></table></div>
@@ -3984,44 +3484,6 @@
                 }
             }
 
-            function setMasterArtworkPage(page) {
-                masterArtworkPage = Math.max(1, page);
-                updateRouteQuery({ ap: masterArtworkPage });
-                loadDeviceArtworkPanel();
-                scrollAppToTop();
-            }
-
-            function submitArtworkSearch() {
-                const input = document.getElementById('device-artwork-search');
-                artworkSearchQuery = input ? input.value : '';
-                masterArtworkPage = 1;
-                updateRouteQuery({ aq: (artworkSearchQuery || '').trim(), ap: 1 });
-                loadDeviceArtworkPanel();
-                scrollAppToTop();
-            }
-
-            function handleArtworkSearchKeydown(event) {
-                if (event.key !== 'Enter') return;
-                event.preventDefault();
-                submitArtworkSearch();
-            }
-
-            function handleArtworkStatusFilter(event) {
-                artworkStatusFilter = event.target.value || '';
-                masterArtworkPage = 1;
-                updateRouteQuery({ ast: artworkStatusFilter, ap: 1 });
-                loadDeviceArtworkPanel();
-                scrollAppToTop();
-            }
-
-            function handleArtworkTypeFilter(event) {
-                artworkTypeFilter = event.target.value || '';
-                masterArtworkPage = 1;
-                updateRouteQuery({ atp: artworkTypeFilter, ap: 1 });
-                loadDeviceArtworkPanel();
-                scrollAppToTop();
-            }
-
             function normalizeArtworkSelection(values, allValue) {
                 const unique = [];
                 (values || []).forEach(value => {
@@ -4029,30 +3491,6 @@
                     if (text && text !== allValue && !unique.includes(text)) unique.push(text);
                 });
                 return unique;
-            }
-
-            function handleArtworkSourceFilter(event) {
-                const input = event.target;
-                if (!input) return;
-                if (input.value === 'any') {
-                    artworkSourceDeviceFilter = [];
-                } else {
-                    const checked = Array.from(document.querySelectorAll('.artwork-source-filter:checked')).map(el => el.value);
-                    artworkSourceDeviceFilter = normalizeArtworkSelection(checked, 'any');
-                }
-                loadDeviceArtworkPanel();
-            }
-
-            function handleArtworkSystemFilter(event) {
-                const input = event.target;
-                if (!input) return;
-                if (input.value === 'all') {
-                    artworkSystemFilter = [];
-                } else {
-                    const checked = Array.from(document.querySelectorAll('.artwork-system-filter:checked')).map(el => el.value);
-                    artworkSystemFilter = normalizeArtworkSelection(checked, 'all');
-                }
-                loadDeviceArtworkPanel();
             }
 
             function toggleArtworkDropdown(event, id) {
@@ -4111,196 +3549,6 @@
                         </div>
                     </div>
                 `;
-            }
-
-            function selectedArtworkSourceDevicesForRow(row) {
-                const sources = Array.isArray(row?.devices) ? row.devices : [];
-                if (!artworkSourceDeviceFilter.length) return sources;
-                return sources.filter(source => artworkSourceDeviceFilter.includes(source.device_id));
-            }
-
-            async function loadDeviceArtworkPanel() {
-                const container = document.getElementById('device-artwork-panel');
-                if (!container || !selectedDeviceId) return;
-                try {
-                    if (!currentDevices.length) await loadDevices();
-                    const params = new URLSearchParams();
-                    if ((artworkSearchQuery || '').trim()) params.set('q', artworkSearchQuery.trim());
-                    if (artworkStatusFilter) params.set('status', artworkStatusFilter);
-                    if (artworkTypeFilter) params.set('artwork_type', artworkTypeFilter);
-                    params.set('page', String(masterArtworkPage));
-                    params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${params.toString()}`);
-                    if (!response.ok) throw new Error('Failed to load artwork inventory');
-                    const payload = await response.json();
-                    const rows = payload.artwork || [];
-                    const total = payload.total || rows.length;
-                    const page = payload.page || masterArtworkPage;
-                    const perPage = payload.per_page || MASTER_ROM_PAGE_SIZE;
-                    const pageCount = Math.max(1, Math.ceil(total / perPage));
-                    masterArtworkPage = page;
-                    const missingCount = rows.filter(row => !row.present_on_selected).length;
-                    let systemOptions = Array.from(new Set(rows.map(row => row.system_name || row.system).filter(Boolean))).sort((a, b) => a.localeCompare(b));
-                    try {
-                        const systemsResponse = await apiGet('/api/systems');
-                        if (systemsResponse.ok) {
-                            const systemsPayload = await systemsResponse.json();
-                            systemOptions = Array.from(new Set((systemsPayload.systems || []).map(row => row.system_name).filter(Boolean))).sort((a, b) => a.localeCompare(b));
-                        }
-                    } catch (error) {
-                        // Keep page-derived system options when the global systems list is unavailable.
-                    }
-                    const sourceOptions = currentDevices
-                        .filter(device => device && device.device_id && device.device_id !== selectedDeviceId)
-                        .sort((a, b) => String(a.device_name || a.device_id).localeCompare(String(b.device_name || b.device_id)))
-                        .map(device => ({value: device.device_id, label: device.device_name || device.device_id}));
-                    const sourceDropdown = renderArtworkCheckboxDropdown({
-                        id: 'device-artwork-source-filter',
-                        label: 'Sync from',
-                        allLabel: 'Any source',
-                        allValue: 'any',
-                        items: sourceOptions,
-                        selectedValues: artworkSourceDeviceFilter,
-                        inputClass: 'artwork-source-filter',
-                        onChange: 'handleArtworkSourceFilter',
-                    });
-                    const systemDropdown = renderArtworkCheckboxDropdown({
-                        id: 'device-artwork-system-filter',
-                        label: 'Systems to sync',
-                        allLabel: 'All systems',
-                        allValue: 'all',
-                        items: systemOptions,
-                        selectedValues: artworkSystemFilter,
-                        inputClass: 'artwork-system-filter',
-                        onChange: 'handleArtworkSystemFilter',
-                    });
-                    const typeOptions = ['', 'image', 'thumbnail', 'marquee', 'fanart', 'boxart', 'video', 'wheel', 'manual'].map(value => {
-                        const label = value || 'All types';
-                        return `<option value="${escapeHtml(value)}" ${artworkTypeFilter === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
-                    }).join('');
-                    const pagination = `
-                        <div class="btn-group bff-segmented" role="group" aria-label="Artwork pagination">
-                            <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterArtworkPage(${Math.max(1, page - 1)})">Previous</button>
-                            <button class="btn btn-sm btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
-                            <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterArtworkPage(${Math.min(pageCount, page + 1)})">Next</button>
-                        </div>
-                    `;
-                    container.innerHTML = `
-                        <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
-                            <div style="flex:1;min-width:220px">
-                                <label class="form-label" for="device-artwork-search">Search artwork</label>
-                                <div class="input-group">
-                                    <input id="device-artwork-search" class="form-control" type="search" placeholder="Enter search terms" value="${escapeHtml(artworkSearchQuery)}" onkeydown="handleArtworkSearchKeydown(event)">
-                                    <button class="btn btn-primary" type="button" onclick="submitArtworkSearch()">Search</button>
-                                </div>
-                            </div>
-                            <div style="min-width:150px">
-                                <label class="form-label" for="device-artwork-type-filter">Type</label>
-                                <select id="device-artwork-type-filter" class="form-select" onchange="handleArtworkTypeFilter(event)">${typeOptions}</select>
-                            </div>
-                            <div style="min-width:160px">
-                                <label class="form-label" for="device-artwork-status-filter">Status</label>
-                                <select id="device-artwork-status-filter" class="form-select" onchange="handleArtworkStatusFilter(event)">
-                                    <option value="" ${!artworkStatusFilter ? 'selected' : ''}>All</option>
-                                    <option value="missing" ${artworkStatusFilter === 'missing' ? 'selected' : ''}>Missing</option>
-                                    <option value="present" ${artworkStatusFilter === 'present' ? 'selected' : ''}>Present</option>
-                                </select>
-                            </div>
-                            ${sourceDropdown}
-                            ${systemDropdown}
-                            <div style="min-width:170px">
-                                <label class="form-label d-block">&nbsp;</label>
-                                <button class="btn btn-primary w-100" onclick="syncAllArtwork()">Sync All ROMs</button>
-                            </div>
-                        </div>
-                        <div class="card"><div class="card-body py-2">
-                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <div class="d-flex gap-2 align-items-center">
-                                    <strong>Artwork (All Drones)</strong>
-                                    <div class="small text-muted">${total} assets · ${missingCount} missing here</div>
-                                </div>
-                                ${pagination}
-                            </div>
-                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
-                                <th>ROM</th>
-                                <th>Type</th>
-                                <th>Source</th>
-                                <th>Status</th>
-                                <th></th>
-                            </tr></thead><tbody>
-                                ${rows.map(row => {
-                                    const present = !!row.present_on_selected;
-                                    const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
-                                    const selectedSources = selectedArtworkSourceDevicesForRow(row);
-                                    const showSync = !present && selectedSources.length;
-                                    const rowData = Object.assign({}, row, { devices: selectedSources });
-                                    return `
-                                        <tr>
-                                            <td style="min-width:280px">
-                                                <div>${escapeHtml(row.system_name || row.system || '')} / ${escapeHtml(row.rom_path || row.file_path || row.rom_name || '')}</div>
-                                                ${row.title ? `<div class="small text-muted">${escapeHtml(row.title)}</div>` : ''}
-                                            </td>
-                                            <td><span class="badge text-bg-light">${escapeHtml(row.artwork_type || '')}</span></td>
-                                            <td class="text-muted">${escapeHtml(sources)}</td>
-                                            <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${present ? 'Present' : (row.devices && row.devices.length ? 'Missing' : 'Unavailable')}</span></td>
-                                            <td>${showSync ? `<button class="btn btn-primary btn-sm" onclick='syncArtwork(${JSON.stringify(rowData).replace(/'/g, "'")})'>Sync</button>` : ''}</td>
-                                        </tr>
-                                    `;
-                                }).join('')}
-                            </tbody></table></div>
-                            ${total ? '' : (
-                                (artworkSearchQuery || artworkStatusFilter || artworkTypeFilter || artworkSourceDeviceFilter.length || artworkSystemFilter.length)
-                                    ? '<div class="small text-muted">No artwork found for this filter.</div>'
-                                    : renderDroneMetadataWaitingState('artwork metadata')
-                            )}
-                        </div></div>
-                    `;
-                } catch (error) {
-                    console.error('Error loading artwork inventory:', error);
-                    container.innerHTML = '<div class="empty-state">Unable to load artwork.</div>';
-                }
-            }
-
-            async function syncAllArtwork() {
-                if (!selectedDeviceId) return;
-                try {
-                    const payload = {
-                        systems: artworkSystemFilter,
-                        devices: artworkSourceDeviceFilter,
-                    };
-                    if (artworkTypeFilter) payload.artwork_type = artworkTypeFilter;
-                    const response = await fetch(`/api/devices/${selectedDeviceId}/sync-artwork-bulk`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                        body: JSON.stringify(payload)
-                    });
-                    if (!response.ok) throw new Error('Failed to queue artwork sync');
-                    const result = await response.json();
-                    const count = Number(result.queued_artwork_count || result.action_count || 0);
-                    showMessage(count ? `Queued ${count} artwork sync${count === 1 ? '' : 's'}.` : 'No missing artwork matched those selections.', 'success');
-                    await loadDeviceArtworkPanel();
-                } catch (error) {
-                    console.error('Error queuing bulk artwork sync:', error);
-                    showMessage('Failed to queue bulk artwork sync.', 'error');
-                }
-            }
-
-            async function syncArtwork(row) {
-                try {
-                    const selectedSources = selectedArtworkSourceDevicesForRow(row);
-                    const payload = Object.assign({}, row, { devices: selectedSources });
-                    const response = await fetch(`/api/devices/${selectedDeviceId}/sync-artwork`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                        body: JSON.stringify(payload)
-                    });
-                    if (!response.ok) throw new Error('Failed to queue artwork sync');
-                    showMessage('Artwork sync queued. The Drone will choose the source peer automatically.', 'success');
-                    await loadDeviceArtworkPanel();
-                } catch (error) {
-                    console.error('Error queuing artwork sync:', error);
-                    showMessage('Failed to queue artwork sync.', 'error');
-                }
             }
 
             async function loadSyncActivityPanel() {
@@ -4398,22 +3646,13 @@
                     }, 8000);
                     return;
                 }
-                // Saves are near-static and paged/searchable, so they are NOT auto-refreshed
-                // (a periodic reload previously wiped the table mid-view). Use the Refresh button.
-                if (!['gamelogs', 'configs'].includes(viewName)) return;
-                selectedDeviceDataRefreshTimer = setInterval(() => {
-                    if (!selectedDeviceId || currentTab !== 'devices') {
-                        stopSelectedDeviceDataAutoRefresh();
-                        return;
-                    }
-                    if (currentDeviceView === 'gamelogs') loadGameLogs({showLoader: false});
-                    if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});
-                }, 30000);
+                // Only the Admin actions list auto-refreshes; every other device view is
+                // static or manually refreshed.
             }
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'admin'].includes(viewName) ? viewName : 'overview';
+                currentDeviceView = ['overview', 'systems', 'bios', 'admin'].includes(viewName) ? viewName : 'overview';
                 if (updateUrl) {
                     setRoute('devices', selectedDeviceId, currentDeviceView);
                     return;
@@ -4426,18 +3665,10 @@
                 const overviewPanel = document.getElementById('device-overview-panel');
                 const systemsPanel = document.getElementById('device-systems-panel');
                 const biosPanel = document.getElementById('device-bios-panel');
-                const savesPanel = document.getElementById('device-saves-panel');
-                const artworkPanel = document.getElementById('device-artwork-panel');
-                const gamelogsPanel = document.getElementById('device-gamelogs-panel');
-                const configsPanel = document.getElementById('device-configs-panel');
                 const adminPanel = document.getElementById('device-admin-panel');
                 if (overviewPanel) overviewPanel.style.display = currentDeviceView === 'overview' ? 'block' : 'none';
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
-                if (savesPanel) savesPanel.style.display = currentDeviceView === 'saves' ? 'block' : 'none';
-                if (artworkPanel) artworkPanel.style.display = 'none';
-                if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
-                if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
                 if (adminPanel) adminPanel.style.display = currentDeviceView === 'admin' ? 'block' : 'none';
 
                 if (currentDeviceView === 'overview') {
@@ -4449,9 +3680,6 @@
                     loadDeviceSystems();
                 }
                 if (currentDeviceView === 'bios') loadDeviceBiosPanel();
-                if (currentDeviceView === 'saves') loadDeviceSavesPanel();
-                if (currentDeviceView === 'gamelogs') loadGameLogs();
-                if (currentDeviceView === 'configs') loadDeviceConfigs();
                 if (currentDeviceView === 'admin') {
                     renderDeviceAdminPanel();
                     refreshSelectedDroneDetails()
@@ -4523,9 +3751,6 @@
             function hydrateNavStateFromHash() {
                 const q = getRouteQuery();
                 const intParam = (key) => Math.max(1, Number.parseInt(q.get(key) || '1', 10) || 1);
-                savesPage = intParam('sp');
-                savesSearchQuery = q.get('sq') || '';
-                selectedSaveKey = q.get('ss') || null;
                 deviceSystemsPage = intParam('dsp');
                 masterRomPage = intParam('rp');
                 deviceRomSearchQuery = q.get('rq') || '';
@@ -4534,10 +3759,6 @@
                 masterBiosPage = intParam('bp');
                 biosSearchQuery = q.get('bq') || '';
                 biosStatusFilter = q.get('bst') || '';
-                masterArtworkPage = intParam('ap');
-                artworkSearchQuery = q.get('aq') || '';
-                artworkStatusFilter = q.get('ast') || '';
-                artworkTypeFilter = q.get('atp') || '';
                 swarmMasterPage = intParam('mp');
                 notificationsPageOffset = Math.max(0, Number.parseInt(q.get('np') || '0', 10) || 0);
             }
@@ -4554,151 +3775,7 @@
 
             function normalizeDeviceView(viewName) {
                 if (viewName === 'actions' || viewName === 'metadata') return 'overview';
-                return ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'admin'].includes(viewName) ? viewName : 'overview';
-            }
-
-            function saveRowKey(row) {
-                return `${row.system_name || row.system || ''}:${row.file_path || row.relative_path || row.save_name || ''}`.toLowerCase();
-            }
-
-            async function loadDeviceSavesPanel() {
-                const container = document.getElementById('saves-list');
-                if (!selectedDeviceId || !container) return;
-                try {
-                    const params = new URLSearchParams();
-                    const q = (savesSearchQuery || '').trim();
-                    if (q) params.set('q', q);
-                    params.set('page', String(savesPage));
-                    params.set('per_page', String(SAVES_PAGE_SIZE));
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/saves?${params.toString()}`);
-                    if (!response.ok) throw new Error('Failed to load saves');
-                    const payload = await response.json();
-                    container.innerHTML = renderDeviceSavesTable(payload);
-                } catch (error) {
-                    console.error('Error loading saves:', error);
-                    container.innerHTML = '<div class="empty-state">Unable to load game saves.</div>';
-                }
-            }
-
-            function setSavesPage(page) {
-                savesPage = Math.max(1, page);
-                updateRouteQuery({ sp: savesPage });
-                loadDeviceSavesPanel();
-                scrollAppToTop();
-            }
-
-            function submitSavesSearch() {
-                const input = document.getElementById('device-saves-search');
-                savesSearchQuery = (input ? input.value : '').trim();
-                savesPage = 1;
-                selectedSaveKey = null;
-                updateRouteQuery({ sq: savesSearchQuery, sp: 1, ss: null });
-                loadDeviceSavesPanel();
-                scrollAppToTop();
-            }
-
-            function handleSavesSearchKeydown(event) {
-                if (event.key === 'Enter') {
-                    event.preventDefault();
-                    submitSavesSearch();
-                }
-            }
-
-            function toggleSaveDetail(rowId) {
-                const detail = document.getElementById(rowId);
-                if (!detail) return;
-                const isOpen = detail.style.display !== 'none';
-                const trigger = document.querySelector(`[data-save-detail-target="${rowId}"]`);
-                const key = trigger ? trigger.getAttribute('data-save-key') : '';
-                document.querySelectorAll('.save-detail-row').forEach(row => { row.style.display = 'none'; });
-                document.querySelectorAll('.save-row.is-expanded').forEach(row => row.classList.remove('is-expanded'));
-                if (isOpen) {
-                    selectedSaveKey = null;
-                } else {
-                    detail.style.display = 'table-row';
-                    if (trigger) trigger.classList.add('is-expanded');
-                    selectedSaveKey = key || null;
-                }
-                updateRouteQuery({ ss: selectedSaveKey });
-            }
-
-            function renderDeviceSavesTable(payload) {
-                const rows = (payload && Array.isArray(payload.saves)) ? payload.saves : [];
-                const total = Number(payload && payload.total != null ? payload.total : rows.length);
-                const page = Number(payload && payload.page ? payload.page : savesPage);
-                const perPage = Number(payload && payload.per_page ? payload.per_page : SAVES_PAGE_SIZE);
-                const pageCount = Math.max(1, Math.ceil(total / perPage));
-                savesPage = page;
-                const q = (savesSearchQuery || '').trim();
-
-                const renderPageButton = (n) => `<button class="btn btn-sm ${n === page ? 'btn-primary' : 'btn-outline-secondary'}" onclick="setSavesPage(${n})">${n}</button>`;
-                const pageButtons = [];
-                if (pageCount <= 7) {
-                    for (let i = 1; i <= pageCount; i += 1) pageButtons.push(renderPageButton(i));
-                } else {
-                    const start = Math.max(1, page - 2);
-                    const end = Math.min(pageCount, page + 2);
-                    if (start > 1) pageButtons.push(renderPageButton(1));
-                    if (start > 2) pageButtons.push('<span class="px-2">&hellip;</span>');
-                    for (let i = start; i <= end; i += 1) pageButtons.push(renderPageButton(i));
-                    if (end < pageCount - 1) pageButtons.push('<span class="px-2">&hellip;</span>');
-                    if (end < pageCount) pageButtons.push(renderPageButton(pageCount));
-                }
-
-                const body = rows.map((row, rowIndex) => {
-                    const system = row.system_name || row.system || '';
-                    const name = row.save_name || row.name || (row.file_path || '').split('/').pop() || 'save';
-                    const sizeFmt = (typeof formatBytes === 'function') ? formatBytes(row.file_size) : `${row.file_size || 0}`;
-                    const modified = row.modified_time ? new Date(Number(row.modified_time) * 1000).toLocaleString() : '—';
-                    const fp = row.fingerprint || row.saves_fingerprint || '';
-                    const key = saveRowKey(row);
-                    const detailId = `save-detail-${page}-${rowIndex}`;
-                    const expanded = key && key === selectedSaveKey;
-                    return `
-                        <tr class="save-row ${expanded ? 'is-expanded' : ''}" data-save-detail-target="${detailId}" data-save-key="${escapeHtml(key)}" role="button" onclick="toggleSaveDetail('${detailId}')">
-                            <td>${system ? `<span class="badge text-bg-secondary">${escapeHtml(system)}</span>` : '<span class="text-muted">—</span>'}</td>
-                            <td>${escapeHtml(name)}</td>
-                            <td class="small text-nowrap">${escapeHtml(String(sizeFmt))}</td>
-                        </tr>
-                        <tr id="${detailId}" class="save-detail-row" style="display:${expanded ? 'table-row' : 'none'};"><td colspan="3">
-                            <div class="row g-2 small">
-                                <div class="col-md-8"><span class="text-muted">Path:</span> <span class="mono">${escapeHtml(row.file_path || row.relative_path || '')}</span></div>
-                                <div class="col-md-4"><span class="text-muted">Modified:</span> ${escapeHtml(modified)}</div>
-                                <div class="col-md-8"><span class="text-muted">Fingerprint:</span> <span class="mono">${escapeHtml(fp || '—')}</span></div>
-                                <div class="col-md-4"><span class="text-muted">Size:</span> ${escapeHtml(String(sizeFmt))}</div>
-                            </div>
-                        </td></tr>`;
-                }).join('');
-
-                return `
-                    <div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                            <div class="d-flex gap-2 align-items-center">
-                                <strong><i class="bi bi-floppy me-1"></i>Game Saves</strong>
-                                <div class="small text-muted">${total} save${total === 1 ? '' : 's'}</div>
-                            </div>
-                            <button class="btn btn-outline-secondary btn-sm" onclick="loadDeviceSavesPanel()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-                        </div>
-                        <div class="input-group input-group-sm mb-2" style="max-width:420px">
-                            <input id="device-saves-search" class="form-control" type="search" placeholder="Search saves (system, name, path)" value="${escapeHtml(q)}" onkeydown="handleSavesSearchKeydown(event)">
-                            <button class="btn btn-primary" type="button" onclick="submitSavesSearch()">Search</button>
-                        </div>
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                            <div class="small text-muted">Page ${page} of ${pageCount} · ${perPage} per page</div>
-                            <div class="btn-group bff-segmented" role="group" aria-label="Saves pagination">
-                                <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setSavesPage(${Math.max(1, page - 1)})">Previous</button>
-                                ${pageButtons.join('')}
-                                <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setSavesPage(${Math.min(pageCount, page + 1)})">Next</button>
-                            </div>
-                        </div>
-                        <div class="table-responsive">
-                            <table class="table table-sm align-middle bff-stack">
-                                <thead><tr><th>System</th><th>Save</th><th>Size</th></tr></thead>
-                                <tbody>${body}</tbody>
-                            </table>
-                        </div>
-                        ${total ? '' : (q ? '<div class="small text-muted">No saves match this search.</div>' : '<div class="empty-state">No game saves reported yet.</div>')}
-                    </div></div>`;
+                return ['overview', 'systems', 'bios', 'admin'].includes(viewName) ? viewName : 'overview';
             }
 
             function parseRoute() {
@@ -4712,13 +3789,13 @@
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 if (tab === 'devices' && parts[1] === 'swarm') {
                     if (parts[3] === 'swarm') {
-                        const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
+                        const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'];
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[4]) ? parts[4] : 'drones' };
                     }
                     if (parts[3] === 'device') {
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: normalizeDeviceView(parts[5]), swarmView: 'drones' };
                     }
-                    const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list'];
+                    const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'];
                     return { tab, deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[2]) ? parts[2] : 'drones' };
                 }
                 if (tab === 'devices' && parts[1] === 'device') {
@@ -4750,6 +3827,7 @@
                     if (view === 'downloads') showSwarmDownloads(false);
                     else if (view === 'sync-activity') showSwarmSyncActivity(false);
                     else if (view === 'master-list') showSwarmMasterList(false);
+                    else if (view === 'gameplay') showSwarmGameplay(false);
                     else showSwarmHome(false);
                 }
                 updateSharedSwarmNavButton();

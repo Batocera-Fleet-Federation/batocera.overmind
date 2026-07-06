@@ -32,8 +32,8 @@ from overmind.models import (
     RomListUpdate, GamePlayLog, SocialAuthRequest,
     EmailVerificationRequest, EmailVerificationResendRequest, ForgotPasswordRequest, ResetPasswordRequest,
     SwarmCreateRequest, SwarmInviteRequest,
-    DroneActionCompleteRequest, DroneAssetMetadataUpload, DroneDownloadsReport, DroneEmulatorConfigsUpload,
-    DroneGameLogsUpload, DroneHeartbeatRequest, DroneLogSourcesUpload, DronePeerChecksUpload, DroneSpeedSampleUpload,
+    DroneActionCompleteRequest, DroneAssetMetadataUpload, DroneDownloadsReport,
+    DroneGameLogsUpload, DroneHeartbeatRequest, DronePeerChecksUpload, DroneSpeedSampleUpload,
     # Phase 1 request models
     NotificationIdsRequest, InvitationAcceptRequest, SwarmMemberUpdateRequest, SwarmRenameRequest,
     ProfileUpdateRequest,
@@ -47,7 +47,7 @@ from overmind.models import (
     # Phase 2-4 request models
     AdminAssignRequest, DroneClaimRequest, IntegrationTokenCreateRequest, SignCsrRequest,
     AutoSyncUpdateRequest, DeviceActionRequest, SyncRomRequest, SyncBiosRequest,
-    SyncArtworkRequest, SyncArtworkBulkRequest, SyncSystemRequest, BulkSyncRequest,
+    SyncSystemRequest, BulkSyncRequest,
     # Phase 2-4 response models
     DeviceModel, GenericObjectResponse, HealthResponse,
     AdminOverviewResponse, AdminSyncActionsResponse, AdminAuditLogResponse,
@@ -57,10 +57,10 @@ from overmind.models import (
     IntegrationTokensResponse, IntegrationTokenEnvelope, DroneConnectionsResponse,
     AutoSyncPolicyResponse, ActionsResponse, DeleteActionsResponse, DownloadsResponse,
     ActionEnvelope, ActionQueuedResponse, ClaimActionsResponse, SyncRomResponse,
-    SyncArtworkBulkResponse, BulkSyncResponse, HeartbeatResponse, AssetMetadataAck,
-    SpeedUploadResponse, SpeedSamplesResponse, LogStreamResponse,
+    BulkSyncResponse, HeartbeatResponse, AssetMetadataAck,
+    SpeedUploadResponse, SpeedSamplesResponse,
     DeviceRomsResponse, MasterRomsResponse, BiosListResponse, MasterBiosResponse,
-    MasterArtworkResponse, DeviceSavesResponse, RomUpdateResponse, SyncActivityResponse,
+    RomUpdateResponse, SyncActivityResponse,
     SystemsResponse, GameplayLogResponse, GamelogsResponse,
     TransferCreateRequest, TransferResponse,
 )
@@ -185,10 +185,6 @@ OWNER_ROLE = "overlord"
 READONLY_ROLE = "overseer"
 OVERMIND_LOG_CAPTURE_LINES = max(100, int(os.getenv("OVERMIND_LOG_CAPTURE_LINES", "1000")))
 _STREAM_LOG_CAPTURE: Optional["StreamLogCapture"] = None
-DRONE_LOG_STREAM_TTL_SECONDS = int(os.getenv("DRONE_LOG_STREAM_TTL_SECONDS", "75"))
-_DRONE_LOG_STREAM_REQUESTS: dict[str, float] = {}
-_DRONE_LOG_STREAM_PAYLOADS: dict[str, dict] = {}
-_DRONE_LOG_STREAM_LOCK = threading.RLock()
 
 admin_user_row = partial(_admin_user_row, data_store=db, super_admin_email=SUPER_ADMIN_EMAIL)
 admin_swarm_row = partial(_admin_swarm_row, data_store=db)
@@ -268,37 +264,6 @@ class StreamLogCapture:
             "captured_at": datetime.utcnow().isoformat() + "Z",
             "capture_active": True,
         }
-
-
-def _drone_log_stream_active(device_id: str) -> bool:
-    now = time.monotonic()
-    with _DRONE_LOG_STREAM_LOCK:
-        expires_at = _DRONE_LOG_STREAM_REQUESTS.get(device_id)
-        if not expires_at or expires_at <= now:
-            _DRONE_LOG_STREAM_REQUESTS.pop(device_id, None)
-            _DRONE_LOG_STREAM_PAYLOADS.pop(device_id, None)
-            return False
-        return True
-
-
-def _request_drone_log_stream(device_id: str) -> None:
-    with _DRONE_LOG_STREAM_LOCK:
-        _DRONE_LOG_STREAM_REQUESTS[device_id] = time.monotonic() + DRONE_LOG_STREAM_TTL_SECONDS
-
-
-def _store_drone_log_stream(device_id: str, payload: dict) -> None:
-    if not _drone_log_stream_active(device_id):
-        return
-    with _DRONE_LOG_STREAM_LOCK:
-        _DRONE_LOG_STREAM_PAYLOADS[device_id] = dict(payload)
-
-
-def _current_drone_log_stream(device_id: str) -> Optional[dict]:
-    if not _drone_log_stream_active(device_id):
-        return None
-    with _DRONE_LOG_STREAM_LOCK:
-        payload = _DRONE_LOG_STREAM_PAYLOADS.get(device_id)
-        return dict(payload) if isinstance(payload, dict) else None
 
 
 _LOG_TAIL_REENTRY = threading.local()
@@ -1059,11 +1024,9 @@ def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = No
     return eligible
 
 
-# NOTE: ROM sync intentionally does NOT pull associated artwork. The previous
-# "queue_associated_artwork_syncs" machinery (which queued sync_artwork actions tagged
-# triggered_by="sync_rom") has been removed so that triggering a ROM sync transfers only
-# the ROM. Artwork is synced solely through the explicit artwork-sync endpoints
-# (/api/devices/{id}/sync-artwork and /sync-artwork-bulk).
+# NOTE: ROM sync does not separately queue artwork. Overmind no longer stores an
+# artwork inventory (gamelist-source-of-truth refactor) -- the receiving Drone pulls
+# artwork itself from the source peer's gamelist right after the ROM lands.
 
 
 # ==================== Authentication ====================
@@ -2073,10 +2036,8 @@ async def list_devices(swarm_id: Optional[str] = None, authorization: Optional[s
 @app.get("/api/devices/{device_id}", response_model=DeviceModel)
 async def get_device(
     device_id: str,
-    log_limit: int = 10,
     include_inventory: bool = True,
     include_configs: bool = True,
-    include_logs: bool = True,
     authorization: Optional[str] = Header(default=None),
 ):
     """Get device details."""
@@ -2087,20 +2048,11 @@ async def get_device(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    response = device_response(
+    return device_response(
         device,
         include_inventory_counts=include_inventory,
         include_emulator_configs=include_configs,
     )
-    if include_logs:
-        stream_payload = _current_drone_log_stream(device_id)
-        if stream_payload is not None:
-            response["log_sources"] = stream_payload
-            response["log_stream_active"] = True
-        else:
-            response["log_sources"] = db.get_device_log_sources(device_id, line_limit=log_limit)
-            response["log_stream_active"] = False
-    return response
 
 
 @app.get("/api/devices/{device_id}/peer-certificate/{peer_id}", response_model=PeerCertificateResponse)
@@ -2487,7 +2439,6 @@ async def drone_heartbeat(device_id: str, payload: DroneHeartbeatRequest, author
     return {
         "actions": actions,
         "swarm": swarm,
-        "log_stream_requested": _drone_log_stream_active(device_id),
         # Echo the asset thumbprints Overmind last stored (verbatim from the Drone's last
         # upload). The Drone compares these against what it holds on disk and pushes a
         # resync only when they differ.
@@ -2804,29 +2755,6 @@ async def get_device_bios(device_id: str, authorization: Optional[str] = Header(
     return {"bios": db.get_device_bios(device_id)}
 
 
-@app.get("/api/devices/{device_id}/saves", response_model=DeviceSavesResponse)
-async def get_device_saves(
-    device_id: str,
-    q: Optional[str] = None,
-    page: int = 1,
-    per_page: int = 100,
-    authorization: Optional[str] = Header(default=None),
-):
-    """List the game-save files a Drone has reported, for the Saves tab.
-
-    Paginated + searchable, mirroring the master-ROM table contract
-    ({rows, total, page, per_page}) so the UI can use the same paging pattern.
-    """
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    per_page = max(1, min(int(per_page or 100), 500))
-    page = max(1, int(page or 1))
-    result = db.get_device_saves_page(device_id, query=q, page=page, per_page=per_page)
-    return {"saves": result["rows"], "total": result["total"], "page": page, "per_page": per_page}
-
-
 @app.get("/api/devices/{device_id}/master-bios", response_model=MasterBiosResponse)
 async def get_device_master_bios(
     device_id: str,
@@ -2866,37 +2794,6 @@ async def get_swarm_master_bios(
     return {"bios": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
 
 
-@app.get("/api/devices/{device_id}/master-artwork", response_model=MasterArtworkResponse)
-async def get_device_master_artwork(
-    device_id: str,
-    q: Optional[str] = None,
-    system: Optional[str] = None,
-    artwork_type: Optional[str] = None,
-    status: Optional[str] = None,
-    page: int = 1,
-    per_page: int = 100,
-    authorization: Optional[str] = Header(default=None),
-):
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    result = db.get_master_assets_page_for_device(
-        device["user_id"],
-        device_id,
-        "artwork",
-        query=q,
-        system_name=system,
-        artwork_type=artwork_type,
-        status=status,
-        page=page,
-        per_page=per_page,
-    )
-    if result is None:
-        raise HTTPException(status_code=404, detail="Device not found")
-    return {"artwork": result["rows"], "total": result["total"], "page": result["page"], "per_page": result["per_page"]}
-
-
 @app.post("/api/devices/{device_id}/sync-rom", response_model=SyncRomResponse)
 async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: Optional[str] = Header(default=None)):
     payload = body.model_dump(exclude_none=True)
@@ -2906,24 +2803,30 @@ async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: O
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     require_device_admin(user, device)
     system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
-    rom_path = str(payload.get("file_path") or payload.get("rom_name") or "").strip()
-    if not system_name or not rom_path:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name and rom path are required")
+    gamelist_id = str(payload.get("gamelist_id") or "").strip()
+    # gamelist_id is the ROM identity (the sender resolves it -> <path> in its
+    # own gamelist). rom_name is retained only for display / sync-activity.
+    rom_name = str(payload.get("rom_name") or payload.get("file_path") or "").strip()
+    if not system_name or not gamelist_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name and gamelist_id are required")
     source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
     if not source_devices:
         requested_fingerprint = str(payload.get("rom_fingerprint") or payload.get("fingerprint") or "").strip().lower()
-        requested_path = rom_path.replace("\\", "/").strip().lstrip("./").lower()
         for row in db.get_master_roms_for_device(device["user_id"], device_id) or []:
             row_system = str(row.get("system_name") or "").strip().lower()
-            row_path = str(row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+            row_gid = str(row.get("gamelist_id") or "").strip()
             row_fingerprint = str(row.get("rom_fingerprint") or "").strip().lower()
             if row_system != system_name.lower():
                 continue
             if requested_fingerprint and row_fingerprint == requested_fingerprint:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                if not rom_name:
+                    rom_name = row.get("rom_name") or ""
                 break
-            if not requested_fingerprint and row_path == requested_path:
+            if not requested_fingerprint and row_gid == gamelist_id:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                if not rom_name:
+                    rom_name = row.get("rom_name") or ""
                 break
     source_devices = resolvable_asset_sources(source_devices, device_id)
     if not source_devices:
@@ -2932,8 +2835,8 @@ async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: O
     action = db.create_device_action(device["user_id"], device_id, "sync_rom", {
         "sync_id": sync_id,
         "system_name": system_name,
-        "rom_name": payload.get("rom_name") or rom_path,
-        "file_path": rom_path,
+        "gamelist_id": gamelist_id,
+        "rom_name": rom_name or gamelist_id,
         "rom_fingerprint": payload.get("rom_fingerprint"),
         "file_size": payload.get("file_size"),
         "entry_type": payload.get("entry_type") or "file",
@@ -2945,14 +2848,15 @@ async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: O
         "sync_id": sync_id,
         "target_drone_id": device_id,
         "system": system_name,
-        "rom_name": rom_path,
+        "gamelist_id": gamelist_id,
+        "rom_name": rom_name or gamelist_id,
         "action": "download",
         "status": "pending",
         "file_size": payload.get("file_size"),
         "rom_fingerprint": payload.get("rom_fingerprint"),
         "entry_type": payload.get("entry_type") or "file",
     })
-    notify_sync_triggered(user, device, "ROM", f"ROM sync for {system_name}/{rom_path}", [device], source_devices, action)
+    notify_sync_triggered(user, device, "ROM", f"ROM sync for {system_name}/{rom_name or gamelist_id}", [device], source_devices, action)
     return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
 
 
@@ -3009,160 +2913,6 @@ async def sync_device_bios(device_id: str, body: SyncBiosRequest, authorization:
     return {"action": action}
 
 
-@app.post("/api/devices/{device_id}/sync-artwork", response_model=ActionEnvelope)
-async def sync_device_artwork(device_id: str, body: SyncArtworkRequest, authorization: Optional[str] = Header(default=None)):
-    payload = body.model_dump(exclude_none=True)
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    require_device_admin(user, device)
-    system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
-    rom_path = str(payload.get("rom_path") or payload.get("file_path") or payload.get("rom_name") or "").strip()
-    artwork_type = str(payload.get("artwork_type") or "").strip()
-    if not system_name or not rom_path or not artwork_type:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name, rom_path, and artwork_type are required")
-    source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
-    if not source_devices:
-        requested_path = rom_path.replace("\\", "/").strip().lstrip("./").lower()
-        requested_type = artwork_type.strip().lower()
-        for row in db.get_master_artwork_for_device(device["user_id"], device_id) or []:
-            row_system = str(row.get("system_name") or "").strip().lower()
-            row_path = str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-            row_type = str(row.get("artwork_type") or "").strip().lower()
-            if row_system == system_name.lower() and row_path == requested_path and row_type == requested_type:
-                source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
-                break
-    source_devices = resolvable_asset_sources(source_devices, device_id)
-    if not source_devices:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has this artwork")
-    action = db.create_device_action(device["user_id"], device_id, "sync_artwork", {
-        "asset_type": "artwork",
-        "system_name": system_name,
-        "system": system_name,
-        "rom_name": payload.get("rom_name") or rom_path,
-        "rom_path": rom_path,
-        "file_path": rom_path,
-        "artwork_type": artwork_type,
-        "devices": source_devices,
-    })
-    if not action:
-        raise HTTPException(status_code=404, detail="Device not found")
-    db.add_rom_sync_activity(device_id, {
-        "sync_id": action["id"],
-        "asset_type": "artwork",
-        "target_drone_id": device_id,
-        "system": system_name,
-        "rom_name": payload.get("rom_name") or rom_path,
-        "rom_path": rom_path,
-        "relative_path": rom_path,
-        "artwork_type": artwork_type,
-        "action": "download",
-        "status": "pending",
-    })
-    notify_sync_triggered(user, device, "Artwork", f"{artwork_type} artwork sync for {system_name}/{rom_path}", [device], source_devices, action)
-    return {"action": action}
-
-
-@app.post("/api/devices/{device_id}/sync-artwork-bulk", response_model=SyncArtworkBulkResponse)
-async def sync_device_artwork_bulk(device_id: str, body: SyncArtworkBulkRequest, authorization: Optional[str] = Header(default=None)):
-    payload = body.model_dump(exclude_none=True)
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    require_device_admin(user, device)
-
-    raw_systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
-    systems = {
-        str(item or "").strip().lower()
-        for item in raw_systems
-        if str(item or "").strip() and str(item or "").strip().lower() != "all"
-    }
-    raw_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
-    source_device_ids = {
-        str(item.get("device_id") if isinstance(item, dict) else item or "").strip()
-        for item in raw_devices
-        if str(item.get("device_id") if isinstance(item, dict) else item or "").strip()
-        and str(item.get("device_id") if isinstance(item, dict) else item or "").strip().lower() != "any"
-    }
-    artwork_type = str(payload.get("artwork_type") or "").strip().lower()
-
-    rows = db.get_master_artwork_for_device(device["user_id"], device_id) or []
-    actions = []
-    queued_assets = 0
-    skipped_assets = 0
-    for row in rows:
-        system_name = str(row.get("system_name") or row.get("system") or "").strip()
-        rom_path = str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").strip()
-        row_type = str(row.get("artwork_type") or "").strip()
-        if not system_name or not rom_path or not row_type:
-            skipped_assets += 1
-            continue
-        if systems and system_name.lower() not in systems:
-            continue
-        if artwork_type and row_type.lower() != artwork_type:
-            continue
-        if row.get("present_on_selected"):
-            continue
-
-        available_sources = row.get("devices") if isinstance(row.get("devices"), list) else []
-        source_devices = resolvable_asset_sources(available_sources, device_id)
-        if source_device_ids:
-            source_devices = [
-                source for source in source_devices
-                if source.get("device_id") in source_device_ids
-            ]
-        if not source_devices:
-            skipped_assets += 1
-            continue
-
-        action = db.create_device_action(device["user_id"], device_id, "sync_artwork", {
-            "asset_type": "artwork",
-            "system_name": system_name,
-            "system": system_name,
-            "rom_name": row.get("rom_name") or rom_path,
-            "rom_path": rom_path,
-            "file_path": rom_path,
-            "artwork_type": row_type,
-            "devices": source_devices,
-        })
-        if not action:
-            skipped_assets += 1
-            continue
-        actions.append(action)
-        queued_assets += 1
-        db.add_rom_sync_activity(device_id, {
-            "sync_id": action["id"],
-            "asset_type": "artwork",
-            "target_drone_id": device_id,
-            "system": system_name,
-            "rom_name": row.get("rom_name") or rom_path,
-            "rom_path": rom_path,
-            "relative_path": rom_path,
-            "artwork_type": row_type,
-            "action": "download",
-            "status": "pending",
-        })
-
-    if actions:
-        sources = []
-        for action in actions:
-            payload_devices = ((action.get("payload") or {}).get("devices") if isinstance(action.get("payload"), dict) else []) or []
-            sources.extend(payload_devices)
-        notify_sync_triggered(user, device, "Artwork", f"bulk artwork sync ({queued_assets} item(s))", [device], sources, actions[0])
-
-    return {
-        "status": "queued",
-        "systems": sorted(systems) if systems else ["all"],
-        "source_device_ids": sorted(source_device_ids) if source_device_ids else ["any"],
-        "action_count": len(actions),
-        "queued_artwork_count": queued_assets,
-        "skipped_artwork_count": skipped_assets,
-        "actions": actions,
-    }
-
-
 @app.post("/api/devices/{device_id}/sync-system", response_model=SyncRomResponse)
 async def sync_device_system(device_id: str, body: SyncSystemRequest, authorization: Optional[str] = Header(default=None)):
     payload = body.model_dump(exclude_none=True)
@@ -3196,8 +2946,8 @@ async def sync_device_system(device_id: str, body: SyncSystemRequest, authorizat
             "source_drone_id": source_devices[0].get("device_id") if source_devices else None,
             "target_drone_id": device_id,
             "system": system_name,
-            "rom_name": row.get("rom_name") or row.get("file_path"),
-            "relative_path": row.get("file_path"),
+            "gamelist_id": row.get("gamelist_id"),
+            "rom_name": row.get("rom_name") or row.get("gamelist_id"),
             "entry_type": row.get("entry_type") or "file",
             "action": "download",
             "status": "pending",
@@ -3250,8 +3000,8 @@ async def bulk_sync_drones(body: BulkSyncRequest, authorization: Optional[str] =
                 continue
             row = union.setdefault(key, {
                 "system_name": rom.get("system_name"),
-                "rom_name": rom.get("rom_name") or rom.get("file_path"),
-                "file_path": rom.get("file_path") or rom.get("rom_name"),
+                "gamelist_id": rom.get("gamelist_id") or rom.get("gamelist_game_id"),
+                "rom_name": rom.get("rom_name") or rom.get("name"),
                 "rom_fingerprint": rom.get("rom_fingerprint"),
                 "file_size": rom.get("file_size"),
                 "entry_type": rom.get("entry_type") or "file",
@@ -3304,8 +3054,8 @@ async def bulk_sync_drones(body: BulkSyncRequest, authorization: Optional[str] =
                         "source_drone_id": source_devices[0].get("device_id") if source_devices else None,
                         "target_drone_id": target_id,
                         "system": system_name,
-                        "rom_name": row.get("rom_name") or row.get("file_path"),
-                        "relative_path": row.get("file_path"),
+                        "gamelist_id": row.get("gamelist_id"),
+                        "rom_name": row.get("rom_name") or row.get("gamelist_id"),
                         "entry_type": row.get("entry_type") or "file",
                         "action": "download",
                         "status": "pending",
@@ -3446,40 +3196,6 @@ async def upload_device_game_logs(device_id: str, payload: DroneGameLogsUpload, 
     return {"status": "accepted"}
 
 
-@app.post("/api/devices/{device_id}/log-sources", response_model=StatusResponse)
-async def upload_device_log_sources(device_id: str, payload: DroneLogSourcesUpload, authorization: Optional[str] = Header(default=None)):
-    """Accept Drone log source content and persist it for selected Drone log views."""
-    device = get_current_drone(device_id, authorization)
-    db.update_device_last_seen(device["id"])
-    result = payload.model_dump(exclude_none=True)
-    result["type"] = "log_sources"
-    db.store_action_result(device, result)
-    _store_drone_log_stream(device_id, result)
-    return {"status": "accepted"}
-
-
-@app.post("/api/devices/{device_id}/log-stream/view", response_model=LogStreamResponse)
-async def request_device_log_stream(device_id: str, authorization: Optional[str] = Header(default=None)):
-    """Mark a Drone logs view as active so the next heartbeat requests live log streaming."""
-    user = get_current_user(authorization)
-    device = db.user_can_access_device(user["id"], device_id)
-    if not device:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    _request_drone_log_stream(device_id)
-    return {"status": "stream_requested", "ttl_seconds": DRONE_LOG_STREAM_TTL_SECONDS}
-
-
-@app.post("/api/devices/{device_id}/emulator-configs", response_model=StatusResponse)
-async def upload_device_emulator_configs(device_id: str, payload: DroneEmulatorConfigsUpload, authorization: Optional[str] = Header(default=None)):
-    """Accept changed emulator configs from a Drone."""
-    device = get_current_drone(device_id, authorization)
-    db.update_device_last_seen(device["id"])
-    result = payload.model_dump(exclude_none=True)
-    result["type"] = "emulator_configs"
-    db.store_action_result(device, result)
-    return {"status": "accepted"}
-
-
 @app.get("/api/devices/{device_id}/gamelogs", response_model=GamelogsResponse)
 async def get_device_gamelogs(
     device_id: str,
@@ -3499,8 +3215,19 @@ async def get_device_gamelogs(
         gamelogs = db.get_device_gamelogs_by_system(device_id, system_name)
     else:
         gamelogs = db.get_device_gamelogs(device_id)
-    
+
     return {"gamelogs": gamelogs}
+
+
+@app.get("/api/gameplay", response_model=GamelogsResponse)
+async def get_swarm_gameplay(
+    limit: int = 200,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Fleet-wide play history for the Drone-Swarm overview (all accessible Drones)."""
+    user = get_current_user(authorization)
+    limit = max(1, min(int(limit or 200), 500))
+    return {"gamelogs": db.get_swarm_gamelogs(user["id"], limit=limit)}
 
 
 @app.get("/api/systems", response_model=SystemsResponse)

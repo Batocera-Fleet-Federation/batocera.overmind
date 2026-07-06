@@ -700,21 +700,6 @@ class OvermindDatabase:
                         "devices": [],
                     })
                     row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
-            elif asset_type == "artwork":
-                for artwork in self._asset_rows_for_device_internal(internal_id, "artwork"):
-                    for artwork_type in artwork.get("artwork_types", []):
-                        key = self._artwork_key(artwork, artwork_type)
-                        if not key[0] or not key[1] or not key[2]:
-                            continue
-                        row = rows.setdefault(key, {
-                            "asset_type": "artwork",
-                            "system_name": artwork.get("system_name") or artwork.get("system"),
-                            "name": artwork.get("rom_name") or artwork.get("rom_path"),
-                            "path": artwork.get("rom_path") or artwork.get("file_path"),
-                            "artwork_type": artwork_type,
-                            "devices": [],
-                        })
-                        row["devices"].append({"device_id": device.get("device_id"), "device_name": self._device_label(device)})
         return rows
 
     def _asset_store_enabled(self) -> bool:
@@ -825,31 +810,6 @@ class OvermindDatabase:
         elif asset_type == "bios":
             keys = {self._bios_key(row) for row in rows if isinstance(row, dict)}
             self.bios[internal_id] = [row for row in self.bios.get(internal_id, []) if self._bios_key(row) not in keys]
-        elif asset_type == "artwork":
-            keys = {
-                (
-                    str(row.get("system_name") or row.get("system") or "").strip().lower(),
-                    str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
-                )
-                for row in rows if isinstance(row, dict)
-            }
-            self.artwork[internal_id] = [
-                row for row in self.artwork.get(internal_id, [])
-                if (
-                    str(row.get("system_name") or row.get("system") or "").strip().lower(),
-                    str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
-                ) not in keys
-            ]
-        elif asset_type == "saves":
-            keys = {self._saves_key(row) for row in rows if isinstance(row, dict)}
-            self.saves[internal_id] = [row for row in self.saves.get(internal_id, []) if self._saves_key(row) not in keys]
-
-    def _saves_key(self, row: dict) -> tuple:
-        return (
-            str(row.get("system_name") or row.get("system") or "").strip().lower(),
-            str(row.get("file_path") or row.get("relative_path") or row.get("save_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
-        )
-
     def _notify_master_list_changes(self, swarm_id: Optional[str], before: Dict[str, Dict[tuple, dict]], after: Dict[str, Dict[tuple, dict]]) -> None:
         if not swarm_id:
             return
@@ -2713,9 +2673,6 @@ class OvermindDatabase:
         if result_type == "emulator_configs":
             self.store_device_emulator_configs(device.get("device_id"), result)
             device["emulator_configs"] = merge_emulator_configs(device.get("emulator_configs"), result)
-        if result_type == "log_sources":
-            self.store_device_log_sources(device.get("device_id"), result)
-            return
         if result_type == "game_logs":
             device["game_logs"] = merge_game_logs(device.get("game_logs"), result)
             self._store_game_log_sessions(device.get("device_id"), result.get("sessions") if isinstance(result.get("sessions"), list) else [])
@@ -2769,16 +2726,18 @@ class OvermindDatabase:
             if not system_name:
                 continue
             rom_name = str(item.get("rom_name") or item.get("name") or item.get("title") or "").strip()
-            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("rom_path") or item.get("rom_file") or rom_name).strip()
+            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("rom_path") or item.get("rom_file") or "").strip()
+            # gamelist id is the identity; fall back to the ROM path then name (mirrors the
+            # drone's _gamelist_game_id fallback for unscraped games).
+            gamelist_id = str(item.get("gamelist_game_id") or item.get("gamelist_id") or file_path or rom_name or "").strip()
+            if not gamelist_id:
+                continue
             grouped.setdefault(system_name, []).append({
-                "rom_name": rom_name or file_path,
+                "gamelist_id": gamelist_id,
+                "name": item.get("name") or rom_name or gamelist_id,
+                "rom_name": rom_name or gamelist_id,
                 "rom_fingerprint": item.get("rom_fingerprint") or item.get("fingerprint") or item.get("hash"),
-                "file_path": file_path,
                 "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
-                "entry_type": item.get("entry_type") or "file",
-                "metadata_source": item.get("metadata_source"),
-                "source": item.get("source"),
-                "modified_time": item.get("modified_time") or item.get("mtime"),
             })
         replace_all = bool(row_metadata.get("replace_all"))
         if is_inventory_chunk and replace_all:
@@ -3107,18 +3066,23 @@ class OvermindDatabase:
         for rom in roms:
             if not isinstance(rom, dict):
                 continue
+            gamelist_id = str(rom.get("gamelist_id") or rom.get("gamelist_game_id") or rom.get("file_path") or rom.get("rom_name") or "").strip()
+            if not gamelist_id:
+                continue
+            name = rom.get("name") or rom.get("rom_name")
             cleaned.append({
-                "id": str(uuid.uuid4()),
+                "id": gamelist_id,
                 "device_id": device_id,
                 "system_name": system_name,
-                "rom_name": rom.get("rom_name"),
+                "gamelist_id": gamelist_id,
+                "gamelist_game_id": gamelist_id,
+                "name": name,
+                "rom_name": name,
+                # file_path mirrors the gamelist id for the in-memory read shape (for an
+                # unscraped game the id IS the ROM path). drone_games itself stores no path.
+                "file_path": rom.get("file_path") or gamelist_id,
                 "rom_fingerprint": rom.get("rom_fingerprint"),
-                "file_path": rom.get("file_path"),
                 "file_size": rom.get("file_size"),
-                "entry_type": rom.get("entry_type") or "file",
-                "metadata_source": rom.get("metadata_source"),
-                "source": rom.get("source"),
-                "modified_time": rom.get("modified_time"),
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             })
@@ -3177,8 +3141,8 @@ class OvermindDatabase:
         fingerprint = str(rom.get("rom_fingerprint") or "").strip().lower()
         if fingerprint:
             return ("fingerprint", fingerprint)
-        path = str(rom.get("file_path") or rom.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-        return (system, path)
+        gid = str(rom.get("gamelist_id") or rom.get("gamelist_game_id") or rom.get("file_path") or rom.get("rom_name") or "").strip().lower()
+        return (system, gid)
 
     def _clean_bios_rows(self, device_id: str, bios_entries: list) -> list:
         cleaned = []
@@ -3243,113 +3207,6 @@ class OvermindDatabase:
         if not internal_device:
             return []
         return self._asset_rows_for_device_internal(internal_device["id"], "bios")
-
-    def _clean_saves_rows(self, device_id: str, saves: list) -> list:
-        cleaned = []
-        for item in saves:
-            if not isinstance(item, dict):
-                continue
-            system_name = str(item.get("system") or item.get("system_name") or "").strip()
-            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("save_name") or "").replace("\\", "/").strip().lstrip("./")
-            if not file_path:
-                continue
-            cleaned.append({
-                "id": str(uuid.uuid4()),
-                "device_id": device_id,
-                "system_name": system_name,
-                "save_name": item.get("save_name") or item.get("name") or file_path.rsplit("/", 1)[-1],
-                "file_path": file_path,
-                "relative_path": file_path,
-                "fingerprint": item.get("fingerprint") or item.get("saves_fingerprint") or item.get("hash"),
-                "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
-                "modified_time": item.get("modified_time") or item.get("mtime"),
-                "added_at": datetime.utcnow(),
-                "last_seen": datetime.utcnow(),
-            })
-        return cleaned
-
-    def add_saves(self, device_id: str, saves: list, *, replace: bool = True) -> List[str]:
-        """Add/replace game-save rows for a device. Returns list of save row IDs."""
-        internal_device = self.get_device_by_device_id(device_id)
-        if not internal_device:
-            return []
-        internal_id = internal_device["id"]
-        cleaned = self._clean_saves_rows(device_id, saves)
-        if self._asset_store_enabled():
-            return postgres_store.upsert_device_assets(internal_id, device_id, "saves", cleaned, replace=replace)
-        if replace or internal_id not in self.saves:
-            self.saves[internal_id] = []
-        elif cleaned:
-            incoming_keys = {self._saves_key(entry) for entry in cleaned}
-            self.saves[internal_id] = [
-                row for row in self.saves[internal_id] if self._saves_key(row) not in incoming_keys
-            ]
-        row_ids = []
-        for entry in cleaned:
-            self.saves[internal_id].append(entry)
-            row_ids.append(entry["id"])
-        return row_ids
-
-    def get_device_saves(self, device_id: str) -> List[dict]:
-        internal_device = self.get_device_by_device_id(device_id)
-        if not internal_device:
-            return []
-        return self._asset_rows_for_device_internal(internal_device["id"], "saves")
-
-    def get_device_saves_page(
-        self,
-        device_id: str,
-        *,
-        query: Optional[str] = None,
-        page: int = 1,
-        per_page: int = 100,
-    ) -> dict:
-        internal_device = self.get_device_by_device_id(device_id)
-        page = max(1, int(page))
-        per_page = max(1, min(int(per_page), 500))
-        if not internal_device:
-            return {"rows": [], "total": 0, "page": page, "per_page": per_page}
-        if self._asset_store_enabled():
-            rows, total = postgres_store.page_device_assets(
-                internal_device["id"],
-                "saves",
-                query=query,
-                page=page,
-                per_page=per_page,
-            )
-            return {"rows": rows, "total": total, "page": page, "per_page": per_page}
-        rows = list(self.saves.get(internal_device["id"], []))
-        term = str(query or "").strip().lower()
-        if term:
-            def _haystack(row: dict) -> str:
-                return " ".join(
-                    str(row.get(key) or "")
-                    for key in (
-                        "system_name",
-                        "system",
-                        "save_name",
-                        "name",
-                        "file_path",
-                        "relative_path",
-                    )
-                ).lower()
-
-            rows = [row for row in rows if term in _haystack(row)]
-        rows.sort(
-            key=lambda row: (
-                str(row.get("system_name") or row.get("system") or "").lower(),
-                str(
-                    row.get("file_path") or row.get("relative_path") or row.get("save_name") or ""
-                ).lower(),
-            )
-        )
-        start = (page - 1) * per_page
-        return {
-            "rows": rows[start:start + per_page],
-            "total": len(rows),
-            "page": page,
-            "per_page": per_page,
-        }
 
     def get_master_bios_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)
@@ -3480,52 +3337,6 @@ class OvermindDatabase:
             row_ids.append(row["id"])
         return row_ids
 
-    def _artwork_key(self, row: dict, artwork_type: str) -> tuple:
-        return (
-            str(row.get("system_name") or row.get("system") or "").strip().lower(),
-            str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
-            str(artwork_type or "").strip().lower(),
-        )
-
-    def get_master_artwork_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
-        selected = self.get_device_by_device_id(selected_device_id)
-        if not selected or selected["user_id"] != user_id:
-            return None
-        devices = {device["device_id"]: device for device in self.get_user_devices(user_id)}
-        selected_keys = {
-            self._artwork_key(row, artwork_type)
-            for row in self._asset_rows_for_device_internal(selected["id"], "artwork")
-            for artwork_type in row.get("artwork_types", [])
-        }
-        master: Dict[tuple, dict] = {}
-        for item in self._asset_rows_for_devices(list(devices.values()), "artwork"):
-            device = devices.get(item.get("device_id")) or {}
-            if device:
-                for artwork_type in item.get("artwork_types", []):
-                    key = self._artwork_key(item, artwork_type)
-                    if not key[0] or not key[1] or not key[2]:
-                        continue
-                    row = master.setdefault(key, {
-                        "asset_type": "artwork",
-                        "system_name": item.get("system_name") or item.get("system"),
-                        "system": item.get("system_name") or item.get("system"),
-                        "rom_name": item.get("rom_name") or item.get("rom_path"),
-                        "rom_path": item.get("rom_path") or item.get("file_path"),
-                        "file_path": item.get("rom_path") or item.get("file_path"),
-                        "title": item.get("title"),
-                        "artwork_type": artwork_type,
-                        "devices": [],
-                        "present_on_selected": key in selected_keys,
-                    })
-                    info = device.get("system_info") or {}
-                    row["devices"].append({
-                        "device_id": device["device_id"],
-                        "device_name": device.get("device_name") or info.get("hostname") or device["device_id"],
-                    })
-        rows = list(master.values())
-        rows.sort(key=lambda row: (str(row.get("system_name") or "").lower(), str(row.get("rom_path") or "").lower(), str(row.get("artwork_type") or "").lower()))
-        return rows
-
     def get_master_roms_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)
         if not selected or selected["user_id"] != user_id:
@@ -3541,6 +3352,7 @@ class OvermindDatabase:
                     continue
                 row = master.setdefault(key, {
                     "system_name": rom.get("system_name"),
+                    "gamelist_id": rom.get("gamelist_id") or rom.get("gamelist_game_id"),
                     "rom_name": rom.get("rom_name") or rom.get("file_path"),
                     "file_path": rom.get("file_path") or rom.get("rom_name"),
                     "rom_fingerprint": rom.get("rom_fingerprint"),
@@ -3574,6 +3386,7 @@ class OvermindDatabase:
                     continue
                 row = master.setdefault(key, {
                     "system_name": rom.get("system_name"),
+                    "gamelist_id": rom.get("gamelist_id") or rom.get("gamelist_game_id"),
                     "rom_name": rom.get("rom_name") or rom.get("file_path"),
                     "file_path": rom.get("file_path") or rom.get("rom_name"),
                     "filenames": [],
@@ -3657,6 +3470,7 @@ class OvermindDatabase:
             if asset_type == "rom":
                 row = master.setdefault(key, {
                     "system_name": item.get("system_name"),
+                    "gamelist_id": item.get("gamelist_id") or item.get("gamelist_game_id"),
                     "rom_name": item.get("rom_name") or item.get("file_path"),
                     "file_path": item.get("file_path") or item.get("rom_name"),
                     "filenames": [],
@@ -3745,7 +3559,6 @@ class OvermindDatabase:
         loaders = {
             "rom": self.get_master_roms_for_device,
             "bios": self.get_master_bios_for_device,
-            "artwork": self.get_master_artwork_for_device,
         }
         rows = loaders[asset_type](user_id, selected_device_id) or []
         filtered = self._filter_master_rows(
@@ -4178,40 +3991,29 @@ class OvermindDatabase:
         all_logs = self.get_device_gamelogs(device_id)
         return [log for log in all_logs if log.get("system_name") == system_name]
 
-    def store_device_log_sources(self, device_id: str, payload: dict) -> None:
-        device = self.get_device_by_device_id(device_id)
-        if not device or not isinstance(payload, dict):
-            return
-        internal_id = device["id"]
-        postgres_store.store_device_log_sources(internal_id, payload)
-        existing = self.log_sources.get(internal_id)
-        merged = merge_log_sources(existing, payload, max_lines=1000)
-        self.log_sources[internal_id] = merged
-        device["log_sources"] = merged
+    def get_swarm_gamelogs(self, user_id: str, *, limit: int = 200) -> List[dict]:
+        """Fleet-wide play history across the user's Drones, newest first.
 
-    def get_device_log_sources(self, device_id: str, line_limit: int = 10) -> dict:
-        device = self.get_device_by_device_id(device_id)
-        if not device:
-            return {"type": "log_sources", "logs": []}
-        internal_id = device["id"]
-        if postgres_store.available():
-            payload = postgres_store.get_device_log_sources(internal_id, line_limit=line_limit)
-            if payload.get("logs"):
-                return payload
-        payload = self.log_sources.get(internal_id) or device.get("log_sources") or {"type": "log_sources", "logs": []}
-        line_limit = max(1, min(100, int(line_limit or 10)))
-        limited = {"type": "log_sources", "logs": []}
-        for source in payload.get("logs") if isinstance(payload.get("logs"), list) else []:
-            if not isinstance(source, dict):
+        Gameplay history moved from the (removed) per-device Logs tab to the
+        Drone-Swarm overview, so this aggregates every accessible Drone's sessions
+        and stamps each row with its Drone's name for the combined table.
+        """
+        devices = self.get_user_devices(user_id)
+        rows: List[dict] = []
+        for device in devices:
+            device_id = device.get("device_id")
+            if not device_id:
                 continue
-            entry = {**source, "files": []}
-            for file_row in source.get("files") if isinstance(source.get("files"), list) else []:
-                if not isinstance(file_row, dict):
-                    continue
-                lines = str(file_row.get("content") or "").splitlines()
-                entry["files"].append({**file_row, "content": "\n".join(lines[-line_limit:])})
-            limited["logs"].append(entry)
-        return limited
+            name = device.get("device_name") or (device.get("system_info") or {}).get("hostname") or device_id
+            for log in self.get_device_gamelogs(device_id) or []:
+                rows.append({**log, "device_id": device_id, "device_name": name})
+
+        def _played_key(row: dict):
+            value = row.get("played_at")
+            return str(value or "")
+
+        rows.sort(key=_played_key, reverse=True)
+        return rows[: max(1, int(limit))]
 
     def store_device_emulator_configs(self, device_id: str, payload: dict) -> None:
         device = self.get_device_by_device_id(device_id)
