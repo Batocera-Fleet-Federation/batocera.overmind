@@ -2983,30 +2983,38 @@ def test_devices_list_does_not_load_inventory_counts(client, monkeypatch):
     assert device["game_count"] is None
 
 
-def test_device_systems_ui_loads_roms_by_page():
+def test_device_systems_ui_uses_lazy_file_tree():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     assert "data-device-view=\"overview\"" in html
     assert "data-device-view=\"metadata\"" not in html
+    assert "data-device-view=\"bios\"" not in html
+    assert "device-bios-panel" not in html
     assert "currentDeviceView = 'overview';" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/systems?${params.toString()}`)" in js
-    assert "params.set('page', String(deviceSystemsPage));" in js
-    assert "params.set('per_page', String(SYSTEMS_PAGE_SIZE));" in js
+    assert "params.set('page', String(page));" in js
+    assert "params.set('per_page', String(SYSTEMS_FETCH_PAGE_SIZE));" in js
+    assert "while (page < 100)" in js
     assert "if (currentDeviceView === 'systems') {\n                    loadDeviceSystems();\n                }" in js
     assert "renderDroneNetworkPanel();\n                    renderDroneTokenPanel();\n                    renderDroneSpeedPanel();" in js
-    assert "const INITIAL_SYSTEM_ROM_LIMIT = 10;" in js
-    assert "const SYSTEM_ROM_LOAD_MORE_SIZE = 25;" in js
+    assert "const TREE_FILE_LOAD_SIZE = 10;" in js
+    assert "const BIOS_TREE_ROOT = '__bios__';" in js
     assert "function selectSystem(systemName)" in js
-    assert "function loadMoreSystemRoms()" in js
-    assert "const pageSize = reset ? INITIAL_SYSTEM_ROM_LIMIT : SYSTEM_ROM_LOAD_MORE_SIZE;" in js
+    assert "function selectBiosRoot()" in js
+    assert "function loadMoreSystemRoms(systemName = selectedSystemName)" in js
+    assert "function loadMoreBiosFiles()" in js
+    assert "const pageSize = TREE_FILE_LOAD_SIZE;" in js
     assert "romParams.set('offset', String(offset));" in js
     assert "romParams.set('per_page', String(pageSize));" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`)" in js
+    assert "apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`)" in js
+    assert "tree-grid" in js
+    assert "Show more" in js
     loader_start = js.index("async function loadSystemRomPage(systemName, options = {})")
     loader_end = js.index("function renderRomDetailValue", loader_start)
     loader_source = js[loader_start:loader_end]
     assert "master-artwork" not in loader_source
-    systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-bios-panel"')]
+    systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-admin-panel"')]
     assert "Rebuild Asset Metadata" not in systems_panel
     # Artwork is no longer stored in Overmind, so the ROM detail row/panel dropped
     # the per-ROM artwork chip rendering entirely (gamelist-source refactor).
@@ -4771,8 +4779,8 @@ def test_selected_drone_config_view_reads_relational_store(client, monkeypatch):
 def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     assert "Waiting for Drone to upload" in js
-    assert js.count("renderDroneMetadataWaitingState('System & Roms metadata')") >= 2
-    assert "renderDroneMetadataWaitingState('BIOS metadata')" in js
+    assert "renderDroneMetadataWaitingState('System, ROM, and BIOS metadata')" in js
+    assert "renderDroneMetadataWaitingState('BIOS metadata')" not in js
     assert "Request System & Rom Data" not in js
     assert "queueDeviceAction(\\'rebuild_asset_metadata\\')" not in js
     assert "Auto-sync ROM metadata from this Drone" not in js
@@ -5045,7 +5053,7 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "rebuild_asset_metadata" in js
     assert "refresh_emulator_list" in js
     assert "Rebuild Asset Metadata" in js
-    systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-bios-panel"')]
+    systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-admin-panel"')]
     assert "Rebuild Asset Metadata" not in systems_panel
     # Screen mode is an explicit three-value action in the Admin tab.
     assert "deviceKioskToggle" not in js
@@ -5167,7 +5175,8 @@ def test_metadata_panels_submit_searches_explicitly_and_show_loading_toast():
     assert "Loading notifications..." in js
     assert 'onclick="submitDeviceRomSearch()"' in html
     assert 'oninput="handleDeviceRomSearch(event)"' not in html
-    assert "function submitBiosSearch()" in js
+    assert "function submitBiosSearch()" not in js
+    assert "function loadBiosFilePage(options = {})" in js
     assert 'oninput="handleBiosSearch(event)"' not in js
     # The artwork search panel was removed with the gamelist-source refactor
     # (Overmind no longer stores artwork inventory to search).

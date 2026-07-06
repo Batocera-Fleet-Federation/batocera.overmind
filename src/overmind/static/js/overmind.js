@@ -118,17 +118,17 @@
             let currentDeviceView = 'overview';
             let routeSwarmId = null;
             let currentDeviceSystems = {};
-            let currentDeviceSystemsPage = { total: 0, page: 1, per_page: 25 };
+            let currentDeviceSystemsPage = { total: 0, page: 1, per_page: 100 };
             let currentSystemRomPages = {};
+            let currentBiosFilePage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+            let currentBiosSummary = { total: 0, loading: false, error: false };
             let selectedSystemName = null;
+            let selectedFileCategory = null;
             let deviceRomSearchQuery = '';
             let deviceSystemsPage = 1;
             let masterRomPage = 1;
             let swarmMasterPage = 1;
             let selectedMasterRomKey = null;
-            let biosSearchQuery = '';
-            let biosStatusFilter = '';
-            let masterBiosPage = 1;
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
             let selectedDeviceDataRefreshTimer = null;
@@ -166,9 +166,9 @@
             const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
             const SUPER_ADMIN_EMAIL = 'mr_jerrodh@hotmail.com';
             const MASTER_ROM_PAGE_SIZE = 100;
-            const SYSTEMS_PAGE_SIZE = 25;
-            const INITIAL_SYSTEM_ROM_LIMIT = 10;
-            const SYSTEM_ROM_LOAD_MORE_SIZE = 25;
+            const SYSTEMS_FETCH_PAGE_SIZE = 100;
+            const TREE_FILE_LOAD_SIZE = 10;
+            const BIOS_TREE_ROOT = '__bios__';
             const pageMeta = {
                 auth: ['Overlord Login', 'Access the Overmind'],
                 devices: ['My Swarm', 'Systems and ROMs'],
@@ -2405,9 +2405,12 @@
                 selectedDeviceId = deviceId;
                 currentDeviceView = 'overview';
                 currentDeviceSystems = {};
-                currentDeviceSystemsPage = { total: 0, page: 1, per_page: SYSTEMS_PAGE_SIZE };
+                currentDeviceSystemsPage = { total: 0, page: 1, per_page: SYSTEMS_FETCH_PAGE_SIZE };
                 currentSystemRomPages = {};
+                currentBiosFilePage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+                currentBiosSummary = { total: 0, loading: false, error: false };
                 selectedSystemName = null;
+                selectedFileCategory = null;
                 deviceRomSearchQuery = '';
                 deviceSystemsPage = 1;
                 selectedMasterRomKey = null;
@@ -2429,32 +2432,52 @@
                     return;
                 }
                 try {
-                    const params = new URLSearchParams();
                     const q = (deviceRomSearchQuery || '').trim();
-                    if (q) params.set('q', q);
-                    params.set('page', String(deviceSystemsPage));
-                    params.set('per_page', String(SYSTEMS_PAGE_SIZE));
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/systems?${params.toString()}`);
-                    if (!response.ok) throw new Error('Failed to load device systems');
-                    const data = await response.json();
+                    let page = 1;
+                    let total = 0;
+                    const systems = [];
+                    do {
+                        const params = new URLSearchParams();
+                        if (q) params.set('q', q);
+                        params.set('page', String(page));
+                        params.set('per_page', String(SYSTEMS_FETCH_PAGE_SIZE));
+                        const response = await apiGet(`/api/devices/${selectedDeviceId}/systems?${params.toString()}`);
+                        if (!response.ok) throw new Error('Failed to load device systems');
+                        const data = await response.json();
+                        const rows = data.systems || [];
+                        total = Number(data.total || rows.length || 0);
+                        systems.push(...rows);
+                        if (!rows.length || systems.length >= total) break;
+                        page += 1;
+                    } while (page < 100);
+                    await loadBiosSummary();
                     currentSystemRomPages = {};
-                    deviceSystemsPage = Number(data.page || deviceSystemsPage || 1);
+                    currentBiosFilePage = { bios: [], total: currentBiosSummary.total || 0, nextOffset: 0, loading: false, error: false };
+                    deviceSystemsPage = 1;
                     currentDeviceSystemsPage = {
-                        total: Number(data.total || 0),
-                        page: deviceSystemsPage,
-                        per_page: Number(data.per_page || SYSTEMS_PAGE_SIZE),
+                        total,
+                        page: 1,
+                        per_page: SYSTEMS_FETCH_PAGE_SIZE,
                     };
-                    currentDeviceSystems = (data.systems || []).reduce((systems, row) => {
+                    currentDeviceSystems = systems.reduce((acc, row) => {
                         const name = row.system_name || row.name || '';
-                        if (name) systems[name] = row;
-                        return systems;
+                        if (name) acc[name] = row;
+                        return acc;
                     }, {});
-                    if (selectedSystemName && !currentDeviceSystems[selectedSystemName]) {
+                    if (selectedSystemName && selectedSystemName !== BIOS_TREE_ROOT && !currentDeviceSystems[selectedSystemName]) {
                         selectedSystemName = null;
-                        updateRouteQuery({ syn: null, syp: null });
+                        selectedFileCategory = null;
+                        updateRouteQuery({ syn: null, fc: null });
+                    }
+                    if (selectedSystemName === BIOS_TREE_ROOT && currentBiosSummary.total <= 0) {
+                        selectedSystemName = null;
+                        selectedFileCategory = null;
+                        updateRouteQuery({ syn: null, fc: null });
                     }
                     displaySystemsTree();
-                    if (selectedSystemName && currentDeviceSystems[selectedSystemName]) {
+                    if (selectedSystemName === BIOS_TREE_ROOT) {
+                        await loadBiosFilePage({ reset: true });
+                    } else if (selectedSystemName && currentDeviceSystems[selectedSystemName]) {
                         await loadSystemRomPage(selectedSystemName, { reset: true });
                     }
                 } catch (error) {
@@ -2469,8 +2492,10 @@
                 deviceRomSearchQuery = (input ? input.value : '').trim();
                 deviceSystemsPage = 1;
                 selectedSystemName = null;
+                selectedFileCategory = null;
                 currentSystemRomPages = {};
-                updateRouteQuery({ rq: deviceRomSearchQuery, dsp: 1, syn: null, syp: null });
+                currentBiosFilePage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+                updateRouteQuery({ rq: deviceRomSearchQuery, dsp: null, syn: null, fc: null });
                 loadDeviceSystems();
                 scrollAppToTop();
             }
@@ -2488,15 +2513,6 @@
                 scrollAppToTop();
             }
 
-            function setDeviceSystemsPage(page) {
-                deviceSystemsPage = Math.max(1, page);
-                selectedSystemName = null;
-                currentSystemRomPages = {};
-                updateRouteQuery({ dsp: deviceSystemsPage, syn: null, syp: null });
-                loadDeviceSystems();
-                scrollAppToTop();
-            }
-
             function systemRomState(systemName) {
                 const key = String(systemName || '');
                 if (!currentSystemRomPages[key]) {
@@ -2508,15 +2524,37 @@
             function selectSystem(systemName) {
                 if (!systemName) return;
                 selectedSystemName = systemName;
+                selectedFileCategory = 'games';
                 currentSystemRomPages[systemName] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
-                updateRouteQuery({ syn: systemName, syp: null });
+                updateRouteQuery({ syn: systemName, fc: selectedFileCategory });
                 displaySystemsTree();
                 loadSystemRomPage(systemName, { reset: true });
             }
 
-            function loadMoreSystemRoms() {
-                if (!selectedSystemName) return;
-                loadSystemRomPage(selectedSystemName, { reset: false });
+            function selectBiosRoot() {
+                selectedSystemName = BIOS_TREE_ROOT;
+                selectedFileCategory = 'bios';
+                currentBiosFilePage = { bios: [], total: currentBiosSummary.total || 0, nextOffset: 0, loading: true, error: false };
+                updateRouteQuery({ syn: BIOS_TREE_ROOT, fc: selectedFileCategory });
+                displaySystemsTree();
+                loadBiosFilePage({ reset: true });
+            }
+
+            function selectFileCategory(rootName, category) {
+                if (rootName === BIOS_TREE_ROOT || category === 'bios') {
+                    selectBiosRoot();
+                    return;
+                }
+                selectSystem(rootName);
+            }
+
+            function loadMoreSystemRoms(systemName = selectedSystemName) {
+                if (!systemName || systemName === BIOS_TREE_ROOT) return;
+                loadSystemRomPage(systemName, { reset: false });
+            }
+
+            function loadMoreBiosFiles() {
+                loadBiosFilePage({ reset: false });
             }
 
             function handleDeviceRomFilterChange() {
@@ -2622,7 +2660,7 @@
                 const requestDeviceId = selectedDeviceId;
                 const existingRows = reset ? [] : (state.roms || []);
                 const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
-                const pageSize = reset ? INITIAL_SYSTEM_ROM_LIMIT : SYSTEM_ROM_LOAD_MORE_SIZE;
+                const pageSize = TREE_FILE_LOAD_SIZE;
                 currentSystemRomPages[systemName] = {
                     ...state,
                     roms: existingRows,
@@ -2730,13 +2768,85 @@
                 updateRouteQuery({ rs: selectedMasterRomKey });
             }
 
+            async function loadBiosSummary() {
+                if (!selectedDeviceId) return;
+                currentBiosSummary = { ...currentBiosSummary, loading: true, error: false };
+                try {
+                    const params = new URLSearchParams();
+                    const q = (deviceRomSearchQuery || '').trim();
+                    if (q) params.set('q', q);
+                    params.set('page', '1');
+                    params.set('per_page', '1');
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
+                    if (!response.ok) throw new Error('Failed to load BIOS summary');
+                    const payload = await response.json();
+                    currentBiosSummary = { total: Number(payload.total || 0), loading: false, error: false };
+                } catch (error) {
+                    console.error('Error loading BIOS summary:', error);
+                    currentBiosSummary = { total: 0, loading: false, error: true };
+                }
+            }
+
+            async function loadBiosFilePage(options = {}) {
+                if (!selectedDeviceId) return;
+                const reset = options.reset === true;
+                const state = reset
+                    ? { bios: [], total: Number(currentBiosSummary.total || 0), nextOffset: 0, loading: false, error: false }
+                    : currentBiosFilePage;
+                if (!reset && state.loading) return;
+                const requestDeviceId = selectedDeviceId;
+                const existingRows = reset ? [] : (state.bios || []);
+                const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
+                const page = Math.floor(offset / TREE_FILE_LOAD_SIZE) + 1;
+                currentBiosFilePage = {
+                    ...state,
+                    bios: existingRows,
+                    loading: true,
+                    error: false,
+                };
+                renderBiosFilePage();
+                try {
+                    const params = new URLSearchParams();
+                    const q = (deviceRomSearchQuery || '').trim();
+                    if (q) params.set('q', q);
+                    params.set('page', String(page));
+                    params.set('per_page', String(TREE_FILE_LOAD_SIZE));
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
+                    if (!response.ok) throw new Error('Failed to load BIOS files');
+                    const payload = await response.json();
+                    if (selectedDeviceId !== requestDeviceId || selectedSystemName !== BIOS_TREE_ROOT) return;
+                    const rows = payload.bios || [];
+                    const loadedRows = reset ? rows : [...(currentBiosFilePage.bios || []), ...rows];
+                    currentBiosFilePage = {
+                        bios: loadedRows,
+                        total: Number(payload.total ?? currentBiosSummary.total ?? loadedRows.length),
+                        nextOffset: offset + rows.length,
+                        per_page: Number(payload.per_page || TREE_FILE_LOAD_SIZE),
+                        loading: false,
+                        error: false,
+                    };
+                    currentBiosSummary = { total: currentBiosFilePage.total, loading: false, error: false };
+                } catch (error) {
+                    console.error('Error loading BIOS files:', error);
+                    currentBiosFilePage = {
+                        ...state,
+                        bios: existingRows,
+                        total: Number(state.total || currentBiosSummary.total || 0),
+                        nextOffset: offset,
+                        loading: false,
+                        error: true,
+                    };
+                }
+                renderBiosFilePage();
+            }
+
             function renderSystemRomPage(systemName) {
-                const target = document.getElementById('selected-system-roms');
+                const target = document.getElementById(`tree-files-${cssSafeId(systemName)}`);
                 if (!target) return;
                 const payload = currentSystemRomPages[systemName];
                 const summary = currentDeviceSystems[systemName] || {};
                 if (!payload) {
-                    target.innerHTML = '<div class="small text-muted">Select a system to load ROMs.</div>';
+                    target.innerHTML = '<div class="small text-muted tree-grid-empty">Select Games to load files.</div>';
                     return;
                 }
                 const roms = payload.roms || [];
@@ -2744,45 +2854,85 @@
                 const loaded = roms.length;
                 const hasMore = loaded < total;
                 const firstLoad = payload.loading && !loaded;
-                target.innerHTML = `
-                    <div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                            <div>
-                                <strong>${escapeHtml(systemName)}</strong>
-                                <div class="small text-muted">${loaded.toLocaleString()} of ${total.toLocaleString()} ROM files loaded</div>
-                            </div>
-                            ${payload.loading ? '<span class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></span>' : ''}
+                target.innerHTML = firstLoad
+                    ? '<div class="tree-grid-empty small text-muted">Loading first 10 games...</div>'
+                    : `
+                        ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load games for this system.</div>' : ''}
+                        <div class="tree-leaf-list">
+                            ${roms.map(rom => {
+                                const path = rom.file_path || rom.relative_path || rom.rom_name || '';
+                                const size = rom.file_size ? formatBytes(rom.file_size) : 'n/a';
+                                return `
+                                    <div class="tree-grid-row tree-leaf-row">
+                                        <div class="tree-grid-main">
+                                            <i class="bi bi-file-earmark-binary tree-grid-icon"></i>
+                                            <div class="tree-grid-label">
+                                                <div class="fw-semibold">${escapeHtml(rom.rom_name || path)}</div>
+                                                <div class="text-muted small">${escapeHtml(path)}${rom.rom_fingerprint ? ` <span class="mono">fingerprint: ${escapeHtml(rom.rom_fingerprint)}</span>` : ''}</div>
+                                            </div>
+                                        </div>
+                                        <div class="tree-grid-meta">${escapeHtml(size)}</div>
+                                    </div>
+                                `;
+                            }).join('') || '<div class="tree-grid-empty small text-muted">No games reported for this system.</div>'}
                         </div>
-                        ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load ROMs for this system.</div>' : ''}
-                        ${firstLoad ? '<div class="small text-muted py-2">Loading first 10 ROMs...</div>' : `
-                            <div class="table-responsive">
-                            <table class="table table-sm align-middle bff-stack">
-                                <thead><tr><th>ROM</th><th class="text-nowrap">Size</th></tr></thead>
-                                <tbody>
-                                ${roms.map(rom => {
-                                    const path = rom.file_path || rom.relative_path || rom.rom_name || '';
-                                    const size = rom.file_size ? formatBytes(rom.file_size) : 'n/a';
-                                    return `<tr>
-                                        <td>
-                                            <div class="fw-semibold">${escapeHtml(rom.rom_name || path)}</div>
-                                            <div class="text-muted small">${escapeHtml(path)}${rom.rom_fingerprint ? ` <span class="mono">fingerprint: ${escapeHtml(rom.rom_fingerprint)}</span>` : ''}</div>
-                                        </td>
-                                        <td class="small text-muted text-nowrap">${escapeHtml(size)}</td>
-                                    </tr>`;
-                                }).join('') || '<tr><td colspan="2" class="small text-muted py-2">No ROMs reported for this system.</td></tr>'}
-                                </tbody>
-                            </table>
-                            </div>
-                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
-                                <div class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : 'No ROMs reported'}</div>
-                                <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? 'disabled' : ''} onclick="loadMoreSystemRoms()">
-                                    ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
-                                    Load next 25
-                                </button>
-                            </div>
-                        `}
-                    </div></div>
-                `;
+                        <div class="tree-grid-more">
+                            <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : 'No games reported'}</span>
+                            <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? 'disabled' : ''} onclick="loadMoreSystemRoms(${JSON.stringify(systemName)})">
+                                ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+                                Show more
+                            </button>
+                        </div>
+                    `;
+            }
+
+            function renderBiosFilePage() {
+                const target = document.getElementById(`tree-files-${cssSafeId(BIOS_TREE_ROOT)}`);
+                if (!target) return;
+                const payload = currentBiosFilePage;
+                const rows = payload.bios || [];
+                const total = Number(payload.total || currentBiosSummary.total || rows.length);
+                const loaded = rows.length;
+                const hasMore = loaded < total;
+                const firstLoad = payload.loading && !loaded;
+                target.innerHTML = firstLoad
+                    ? '<div class="tree-grid-empty small text-muted">Loading first 10 BIOS files...</div>'
+                    : `
+                        ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load BIOS files.</div>' : ''}
+                        <div class="tree-leaf-list">
+                            ${rows.map(row => {
+                                const present = !!row.present_on_selected;
+                                const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
+                                const path = row.file_path || row.bios_name || row.relative_path || '';
+                                const sizeText = row.file_size ? formatBytes(row.file_size) : 'n/a';
+                                const showSync = !present && row.devices && row.devices.length;
+                                const rowPayload = encodeURIComponent(JSON.stringify(Object.assign({}, row)));
+                                return `
+                                    <div class="tree-grid-row tree-leaf-row">
+                                        <div class="tree-grid-main">
+                                            <i class="bi bi-cpu tree-grid-icon"></i>
+                                            <div class="tree-grid-label">
+                                                <div class="fw-semibold">${escapeHtml(path)}</div>
+                                                <div class="text-muted small">${row.bios_md5 ? `<span class="mono">${escapeHtml(row.bios_md5)}</span>` : 'No MD5 reported'}${sources ? ` · ${escapeHtml(sources)}` : ''}</div>
+                                            </div>
+                                        </div>
+                                        <div class="tree-grid-meta">${escapeHtml(sizeText)}</div>
+                                        <div class="tree-grid-action">
+                                            <span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${present ? 'Present' : (row.devices && row.devices.length ? 'Missing' : 'Unavailable')}</span>
+                                            ${showSync ? `<button class="btn btn-primary btn-sm" onclick="syncBiosEncoded('${rowPayload}')">Sync</button>` : ''}
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('') || '<div class="tree-grid-empty small text-muted">No BIOS files found for this filter.</div>'}
+                        </div>
+                        <div class="tree-grid-more">
+                            <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : 'No BIOS files reported'}</span>
+                            <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? 'disabled' : ''} onclick="loadMoreBiosFiles()">
+                                ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+                                Show more
+                            </button>
+                        </div>
+                    `;
             }
 
             function cssSafeId(value) {
@@ -2795,47 +2945,90 @@
                     return;
                 }
                 const entries = filteredSystemEntries();
-                if (!entries.length) {
+                const showBiosRoot = Number(currentBiosSummary.total || 0) > 0 || selectedSystemName === BIOS_TREE_ROOT;
+                if (!entries.length && !showBiosRoot) {
                     container.innerHTML = deviceRomSearchQuery
-                        ? '<div class="empty-state">No systems matched your search.</div>'
-                        : renderDroneMetadataWaitingState('System & Roms metadata');
+                        ? '<div class="empty-state">No systems, games, or BIOS files matched your search.</div>'
+                        : renderDroneMetadataWaitingState('System, ROM, and BIOS metadata');
                     return;
                 }
                 entries.sort((a, b) => a[0].localeCompare(b[0]));
-                const total = Number(currentDeviceSystemsPage.total || entries.length);
-                const page = Number(currentDeviceSystemsPage.page || deviceSystemsPage || 1);
-                const perPage = Number(currentDeviceSystemsPage.per_page || SYSTEMS_PAGE_SIZE);
-                const pageCount = Math.max(1, Math.ceil(total / perPage));
+                const systemsTotal = Number(currentDeviceSystemsPage.total || entries.length);
+                const biosTotal = Number(currentBiosSummary.total || 0);
                 container.innerHTML = `
                     <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 small text-muted">
-                        <span>Systems ${total ? ((page - 1) * perPage) + 1 : 0}-${Math.min(page * perPage, total)} of ${total}</span>
-                        <div class="btn-group btn-group-sm bff-segmented" role="group" aria-label="System pages">
-                            <button class="btn btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setDeviceSystemsPage(${page - 1})">Previous</button>
-                            <button class="btn btn-outline-secondary" disabled>Page ${page} of ${pageCount}</button>
-                            <button class="btn btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setDeviceSystemsPage(${page + 1})">Next</button>
-                        </div>
+                        <span>${systemsTotal.toLocaleString()} systems · ${biosTotal.toLocaleString()} BIOS files</span>
                     </div>
-                    <div class="list-group system-select-list">
+                    <div class="tree-grid">
                         ${entries.map(([systemName, summary]) => {
                             const count = Number(summary.rom_count || 0);
                             const games = Number(summary.game_count ?? count);
                             const active = selectedSystemName === systemName;
                             return `
-                                <button type="button" class="list-group-item list-group-item-action d-flex flex-wrap align-items-center justify-content-between gap-2 ${active ? 'active' : ''}"
+                                <div class="tree-root ${active ? 'is-expanded' : ''}">
+                                    <button type="button" class="tree-grid-row tree-root-row ${active ? 'is-active' : ''}"
                                     onclick="selectSystem(${JSON.stringify(systemName)})">
-                                    <span class="fw-semibold">${escapeHtml(systemName)}</span>
-                                    <span class="small ${active ? '' : 'text-muted'}">${games.toLocaleString()} games &middot; ${count.toLocaleString()} ROM files</span>
-                                </button>
+                                        <div class="tree-grid-main">
+                                            <i class="bi ${active ? 'bi-chevron-down' : 'bi-chevron-right'} tree-grid-caret"></i>
+                                            <i class="bi bi-folder2${active ? '-open' : ''} tree-grid-icon"></i>
+                                            <div class="tree-grid-label">
+                                                <div class="fw-semibold">${escapeHtml(systemName)}</div>
+                                                <div class="small text-muted">${games.toLocaleString()} games · ${count.toLocaleString()} ROM files</div>
+                                            </div>
+                                        </div>
+                                    </button>
+                                    ${active ? `
+                                        <div class="tree-branch">
+                                            <button type="button" class="tree-grid-row tree-category-row ${selectedFileCategory === 'games' ? 'is-active' : ''}" onclick="selectFileCategory(${JSON.stringify(systemName)}, 'games')">
+                                                <div class="tree-grid-main">
+                                                    <i class="bi bi-controller tree-grid-icon"></i>
+                                                    <div class="tree-grid-label">
+                                                        <div class="fw-semibold">Games</div>
+                                                        <div class="small text-muted">Loads 10 files at a time</div>
+                                                    </div>
+                                                </div>
+                                                <div class="tree-grid-meta">${count.toLocaleString()} files</div>
+                                            </button>
+                                            <div id="tree-files-${cssSafeId(systemName)}" class="tree-files"></div>
+                                        </div>
+                                    ` : ''}
+                                </div>
                             `;
                         }).join('')}
+                        ${showBiosRoot ? `
+                            <div class="tree-root ${selectedSystemName === BIOS_TREE_ROOT ? 'is-expanded' : ''}">
+                                <button type="button" class="tree-grid-row tree-root-row ${selectedSystemName === BIOS_TREE_ROOT ? 'is-active' : ''}" onclick="selectBiosRoot()">
+                                    <div class="tree-grid-main">
+                                        <i class="bi ${selectedSystemName === BIOS_TREE_ROOT ? 'bi-chevron-down' : 'bi-chevron-right'} tree-grid-caret"></i>
+                                        <i class="bi bi-folder2${selectedSystemName === BIOS_TREE_ROOT ? '-open' : ''} tree-grid-icon"></i>
+                                        <div class="tree-grid-label">
+                                            <div class="fw-semibold">BIOS</div>
+                                            <div class="small text-muted">${biosTotal.toLocaleString()} files across the swarm</div>
+                                        </div>
+                                    </div>
+                                </button>
+                                ${selectedSystemName === BIOS_TREE_ROOT ? `
+                                    <div class="tree-branch">
+                                        <button type="button" class="tree-grid-row tree-category-row ${selectedFileCategory === 'bios' ? 'is-active' : ''}" onclick="selectFileCategory(${JSON.stringify(BIOS_TREE_ROOT)}, 'bios')">
+                                            <div class="tree-grid-main">
+                                                <i class="bi bi-cpu tree-grid-icon"></i>
+                                                <div class="tree-grid-label">
+                                                    <div class="fw-semibold">BIOS files</div>
+                                                    <div class="small text-muted">Loads 10 files at a time</div>
+                                                </div>
+                                            </div>
+                                            <div class="tree-grid-meta">${biosTotal.toLocaleString()} files</div>
+                                        </button>
+                                        <div id="tree-files-${cssSafeId(BIOS_TREE_ROOT)}" class="tree-files"></div>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        ` : ''}
                     </div>
-                    ${selectedSystemName ? `
-                        <div class="mt-3">
-                            <div id="selected-system-roms"></div>
-                        </div>
-                    ` : ''}
                 `;
-                if (selectedSystemName) {
+                if (selectedSystemName === BIOS_TREE_ROOT) {
+                    renderBiosFilePage();
+                } else if (selectedSystemName) {
                     renderSystemRomPage(selectedSystemName);
                 }
             }
@@ -3332,139 +3525,12 @@
                 showMessage('System sync queued. The Drone will choose source peers automatically.', 'success');
             }
 
-            function setMasterBiosPage(page) {
-                masterBiosPage = Math.max(1, page);
-                updateRouteQuery({ bp: masterBiosPage });
-                loadDeviceBiosPanel();
-                scrollAppToTop();
-            }
-
-            function submitBiosSearch() {
-                const input = document.getElementById('device-bios-search');
-                biosSearchQuery = input ? input.value : '';
-                masterBiosPage = 1;
-                updateRouteQuery({ bq: (biosSearchQuery || '').trim(), bp: 1 });
-                loadDeviceBiosPanel();
-                scrollAppToTop();
-            }
-
-            function handleBiosSearchKeydown(event) {
-                if (event.key !== 'Enter') return;
-                event.preventDefault();
-                submitBiosSearch();
-            }
-
-            function handleBiosStatusFilter(event) {
-                biosStatusFilter = event.target.value || '';
-                masterBiosPage = 1;
-                updateRouteQuery({ bst: biosStatusFilter, bp: 1 });
-                loadDeviceBiosPanel();
-                scrollAppToTop();
-            }
-
-            async function loadDeviceBiosPanel() {
-                const container = document.getElementById('device-bios-panel');
-                if (!container || !selectedDeviceId) return;
+            function syncBiosEncoded(encodedPayload) {
                 try {
-                    const params = new URLSearchParams();
-                    if ((biosSearchQuery || '').trim()) params.set('q', biosSearchQuery.trim());
-                    if (biosStatusFilter) params.set('status', biosStatusFilter);
-                    params.set('page', String(masterBiosPage));
-                    params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
-                    if (!response.ok) throw new Error('Failed to load BIOS inventory');
-                    const payload = await response.json();
-                    const rows = payload.bios || [];
-                    const total = payload.total || rows.length;
-                    const page = payload.page || masterBiosPage;
-                    const perPage = payload.per_page || MASTER_ROM_PAGE_SIZE;
-                    const pageCount = Math.max(1, Math.ceil(total / perPage));
-                    masterBiosPage = page;
-                    const missingCount = rows.filter(row => !row.present_on_selected).length;
-                    const renderPageButton = pageNumber => `<button class="btn btn-sm ${pageNumber === page ? 'btn-primary' : 'btn-outline-secondary'}" onclick="setMasterBiosPage(${pageNumber})">${pageNumber}</button>`;
-                    const paginationButtons = [];
-                    if (pageCount <= 7) {
-                        for (let i = 1; i <= pageCount; i += 1) paginationButtons.push(renderPageButton(i));
-                    } else {
-                        const start = Math.max(1, page - 2);
-                        const end = Math.min(pageCount, page + 2);
-                        if (start > 1) paginationButtons.push(renderPageButton(1));
-                        if (start > 2) paginationButtons.push('<span class="px-2">&hellip;</span>');
-                        for (let i = start; i <= end; i += 1) paginationButtons.push(renderPageButton(i));
-                        if (end < pageCount - 1) paginationButtons.push('<span class="px-2">&hellip;</span>');
-                        if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
-                    }
-                    const pagination = `
-                        <div class="btn-group bff-segmented" role="group" aria-label="BIOS pagination">
-                            <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterBiosPage(${Math.max(1, page - 1)})">Previous</button>
-                            ${paginationButtons.join('')}
-                            <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterBiosPage(${Math.min(pageCount, page + 1)})">Next</button>
-                        </div>
-                    `;
-                    container.innerHTML = `
-                        <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-center gap-2">
-                            <div style="flex:1;min-width:220px">
-                                <label class="form-label" for="device-bios-search">Search BIOS files</label>
-                                <div class="input-group">
-                                    <input id="device-bios-search" class="form-control" type="search" placeholder="Enter search terms" value="${escapeHtml(biosSearchQuery)}" onkeydown="handleBiosSearchKeydown(event)">
-                                    <button class="btn btn-primary" type="button" onclick="submitBiosSearch()">Search</button>
-                                </div>
-                            </div>
-                            <div style="min-width:160px">
-                                <label class="form-label" for="device-bios-status-filter">Status</label>
-                                <select id="device-bios-status-filter" class="form-select" onchange="handleBiosStatusFilter(event)">
-                                    <option value="" ${!biosStatusFilter ? 'selected' : ''}>All</option>
-                                    <option value="missing" ${biosStatusFilter === 'missing' ? 'selected' : ''}>Missing</option>
-                                    <option value="present" ${biosStatusFilter === 'present' ? 'selected' : ''}>Present</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="card"><div class="card-body py-2">
-                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <div class="d-flex gap-2 align-items-center">
-                                    <strong>BIOS (All Drones)</strong>
-                                    <div class="small text-muted">${total} files · ${missingCount} missing here · Page ${page} of ${pageCount}</div>
-                                </div>
-                                ${pagination}
-                            </div>
-                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
-                                <th>BIOS</th>
-                                <th>MD5</th>
-                                <th>Size</th>
-                                <th>Source</th>
-                                <th>Status</th>
-                                <th></th>
-                            </tr></thead><tbody>
-                                ${rows.map(row => {
-                                    const present = !!row.present_on_selected;
-                                    const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
-                                    const sizeText = row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '';
-                                    const showSync = !present && row.devices && row.devices.length;
-                                    const rowData = Object.assign({}, row);
-                                    return `
-                                        <tr>
-                                            <td style="min-width:260px">
-                                                <div>${escapeHtml(row.file_path || row.bios_name || '')}</div>
-                                            </td>
-                                            <td class="small text-muted mono">${escapeHtml(row.bios_md5 || '')}</td>
-                                            <td class="text-muted">${escapeHtml(sizeText)}</td>
-                                            <td class="text-muted">${escapeHtml(sources)}</td>
-                                            <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${present ? 'Present' : (row.devices && row.devices.length ? 'Missing' : 'Unavailable')}</span></td>
-                                            <td>${showSync ? `<button class="btn btn-primary btn-sm" onclick='syncBios(${JSON.stringify(rowData).replace(/'/g, "'")})'>Sync</button>` : ''}</td>
-                                        </tr>
-                                    `;
-                                }).join('')}
-                            </tbody></table></div>
-                            ${total ? '' : (
-                                (biosSearchQuery || biosStatusFilter)
-                                    ? '<div class="small text-muted">No BIOS files found for this filter.</div>'
-                                    : renderDroneMetadataWaitingState('BIOS metadata')
-                            )}
-                        </div></div>
-                    `;
+                    syncBios(JSON.parse(decodeURIComponent(encodedPayload || '')));
                 } catch (error) {
-                    console.error('Error loading BIOS inventory:', error);
-                    container.innerHTML = '<div class="empty-state">Unable to load BIOS files.</div>';
+                    console.error('Error parsing BIOS sync payload:', error);
+                    showMessage('Failed to queue BIOS sync.', 'error');
                 }
             }
 
@@ -3477,7 +3543,12 @@
                     });
                     if (!response.ok) throw new Error('Failed to queue BIOS sync');
                     showMessage('BIOS sync queued. The Drone will choose the source peer automatically.', 'success');
-                    await loadDeviceBiosPanel();
+                    await loadBiosSummary();
+                    if (selectedSystemName === BIOS_TREE_ROOT) {
+                        await loadBiosFilePage({ reset: true });
+                    } else {
+                        displaySystemsTree();
+                    }
                 } catch (error) {
                     console.error('Error queuing BIOS sync:', error);
                     showMessage('Failed to queue BIOS sync.', 'error');
@@ -3652,7 +3723,7 @@
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['overview', 'systems', 'bios', 'admin'].includes(viewName) ? viewName : 'overview';
+                currentDeviceView = ['overview', 'systems', 'admin'].includes(viewName) ? viewName : (viewName === 'bios' ? 'systems' : 'overview');
                 if (updateUrl) {
                     setRoute('devices', selectedDeviceId, currentDeviceView);
                     return;
@@ -3664,11 +3735,9 @@
 
                 const overviewPanel = document.getElementById('device-overview-panel');
                 const systemsPanel = document.getElementById('device-systems-panel');
-                const biosPanel = document.getElementById('device-bios-panel');
                 const adminPanel = document.getElementById('device-admin-panel');
                 if (overviewPanel) overviewPanel.style.display = currentDeviceView === 'overview' ? 'block' : 'none';
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
-                if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
                 if (adminPanel) adminPanel.style.display = currentDeviceView === 'admin' ? 'block' : 'none';
 
                 if (currentDeviceView === 'overview') {
@@ -3679,7 +3748,6 @@
                 if (currentDeviceView === 'systems') {
                     loadDeviceSystems();
                 }
-                if (currentDeviceView === 'bios') loadDeviceBiosPanel();
                 if (currentDeviceView === 'admin') {
                     renderDeviceAdminPanel();
                     refreshSelectedDroneDetails()
@@ -3707,7 +3775,7 @@
             // Page-number params are omitted from the URL when they equal 1 so a
             // first page produces a clean hash; non-page params (searches, filters,
             // selections) are only dropped when blank.
-            const ROUTE_PAGE_KEYS = new Set(['sp', 'dsp', 'rp', 'syp', 'bp', 'ap', 'mp']);
+            const ROUTE_PAGE_KEYS = new Set(['sp', 'dsp', 'rp', 'ap', 'mp']);
             function updateRouteQuery(updates, options = {}) {
                 const raw = window.location.hash || '#/devices';
                 const qIndex = raw.indexOf('?');
@@ -3756,9 +3824,7 @@
                 deviceRomSearchQuery = q.get('rq') || '';
                 selectedMasterRomKey = q.get('rs') || null;
                 selectedSystemName = q.get('syn') || null;
-                masterBiosPage = intParam('bp');
-                biosSearchQuery = q.get('bq') || '';
-                biosStatusFilter = q.get('bst') || '';
+                selectedFileCategory = q.get('fc') || (selectedSystemName === BIOS_TREE_ROOT ? 'bios' : (selectedSystemName ? 'games' : null));
                 swarmMasterPage = intParam('mp');
                 notificationsPageOffset = Math.max(0, Number.parseInt(q.get('np') || '0', 10) || 0);
             }
@@ -3775,7 +3841,8 @@
 
             function normalizeDeviceView(viewName) {
                 if (viewName === 'actions' || viewName === 'metadata') return 'overview';
-                return ['overview', 'systems', 'bios', 'admin'].includes(viewName) ? viewName : 'overview';
+                if (viewName === 'bios') return 'systems';
+                return ['overview', 'systems', 'admin'].includes(viewName) ? viewName : 'overview';
             }
 
             function parseRoute() {
