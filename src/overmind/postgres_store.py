@@ -686,63 +686,6 @@ class PostgresMetadataStore:
                     (device_id, action_id, result.get("type"), json.dumps(result, default=str)),
                 )
 
-    def store_device_log_sources(self, internal_device_id: str, payload: dict, max_lines: int = 1000) -> None:
-        if not self.url or not internal_device_id or not isinstance(payload, dict):
-            return
-        self.ensure_schema()
-        conn = self._connect()
-        if conn is None:
-            return
-        logs = payload.get("logs") if isinstance(payload.get("logs"), list) else []
-        append = bool(payload.get("append", True))
-        with conn:
-            with conn.cursor() as cur:
-                for source in logs:
-                    if not isinstance(source, dict):
-                        continue
-                    source_name = str(source.get("source") or "").strip()
-                    if not source_name:
-                        continue
-                    cur.execute(
-                        """
-                        INSERT INTO drone_log_sources (drone_id, source, updated_at)
-                        VALUES (%s, %s, now())
-                        ON CONFLICT (drone_id, source) DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING id
-                        """,
-                        (internal_device_id, source_name),
-                    )
-                    source_id = cur.fetchone()[0]
-                    for file_row in source.get("files") if isinstance(source.get("files"), list) else []:
-                        if not isinstance(file_row, dict):
-                            continue
-                        content = str(file_row.get("content") or "")
-                        if not content and not file_row.get("error"):
-                            continue
-                        if file_row.get("error"):
-                            content = f"[Log read error] {file_row.get('error')}"
-                        path = str(file_row.get("path") or source_name)
-                        modified_at = self._dt(file_row.get("modified_at"))
-                        cur.execute(
-                            "SELECT content FROM drone_log_files WHERE source_id = %s AND path = %s",
-                            (source_id, path),
-                        )
-                        existing_row = cur.fetchone()
-                        existing = existing_row[0] if existing_row else ""
-                        combined = f"{existing}{'' if existing.endswith(chr(10)) or not existing else chr(10)}{content}" if append and existing else content
-                        combined = self._tail_text(combined, max_lines=max_lines)
-                        cur.execute(
-                            """
-                            INSERT INTO drone_log_files (source_id, path, content, modified_at, received_at)
-                            VALUES (%s, %s, %s, %s, now())
-                            ON CONFLICT (source_id, path) DO UPDATE SET
-                                content = EXCLUDED.content,
-                                modified_at = EXCLUDED.modified_at,
-                                received_at = EXCLUDED.received_at
-                            """,
-                            (source_id, path, combined, modified_at),
-                        )
-
     def store_device_emulator_configs(self, internal_device_id: str, payload: dict, max_versions: int = 1) -> None:
         if not self.url or not internal_device_id or not isinstance(payload, dict):
             return
@@ -827,39 +770,6 @@ class PostgresMetadataStore:
                         """,
                         (config_id, config_id, max(1, int(max_versions or 1))),
                     )
-
-    def get_device_log_sources(self, internal_device_id: str, line_limit: int = 10) -> dict:
-        payload = {"type": "log_sources", "logs": []}
-        if not self.url or not internal_device_id:
-            return payload
-        self.ensure_schema()
-        conn = self._connect()
-        if conn is None:
-            return payload
-        line_limit = max(1, min(100, int(line_limit or 10)))
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT s.source, f.path, f.content, f.modified_at, f.received_at
-                    FROM drone_log_sources s
-                    JOIN drone_log_files f ON f.source_id = s.id
-                    WHERE s.drone_id = %s
-                    ORDER BY s.source, f.received_at DESC, f.id DESC
-                    """,
-                    (internal_device_id,),
-                )
-                by_source = {}
-                for source, path, content, modified_at, received_at in cur.fetchall():
-                    entry = by_source.setdefault(str(source), {"source": str(source), "files": []})
-                    entry["files"].append({
-                        "path": path,
-                        "content": self._tail_text(content or "", max_lines=line_limit),
-                        "modified_at": modified_at,
-                        "received_at": received_at,
-                    })
-                payload["logs"] = list(by_source.values())
-        return payload
 
     def get_device_gameplay_sessions(self, internal_device_id: str, system_name: Optional[str] = None) -> list[dict]:
         if not self.url or not internal_device_id:

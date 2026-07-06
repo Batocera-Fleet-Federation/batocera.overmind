@@ -810,31 +810,6 @@ class OvermindDatabase:
         elif asset_type == "bios":
             keys = {self._bios_key(row) for row in rows if isinstance(row, dict)}
             self.bios[internal_id] = [row for row in self.bios.get(internal_id, []) if self._bios_key(row) not in keys]
-        elif asset_type == "artwork":
-            keys = {
-                (
-                    str(row.get("system_name") or row.get("system") or "").strip().lower(),
-                    str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
-                )
-                for row in rows if isinstance(row, dict)
-            }
-            self.artwork[internal_id] = [
-                row for row in self.artwork.get(internal_id, [])
-                if (
-                    str(row.get("system_name") or row.get("system") or "").strip().lower(),
-                    str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
-                ) not in keys
-            ]
-        elif asset_type == "saves":
-            keys = {self._saves_key(row) for row in rows if isinstance(row, dict)}
-            self.saves[internal_id] = [row for row in self.saves.get(internal_id, []) if self._saves_key(row) not in keys]
-
-    def _saves_key(self, row: dict) -> tuple:
-        return (
-            str(row.get("system_name") or row.get("system") or "").strip().lower(),
-            str(row.get("file_path") or row.get("relative_path") or row.get("save_name") or "").replace("\\", "/").strip().lstrip("./").lower(),
-        )
-
     def _notify_master_list_changes(self, swarm_id: Optional[str], before: Dict[str, Dict[tuple, dict]], after: Dict[str, Dict[tuple, dict]]) -> None:
         if not swarm_id:
             return
@@ -2698,9 +2673,6 @@ class OvermindDatabase:
         if result_type == "emulator_configs":
             self.store_device_emulator_configs(device.get("device_id"), result)
             device["emulator_configs"] = merge_emulator_configs(device.get("emulator_configs"), result)
-        if result_type == "log_sources":
-            self.store_device_log_sources(device.get("device_id"), result)
-            return
         if result_type == "game_logs":
             device["game_logs"] = merge_game_logs(device.get("game_logs"), result)
             self._store_game_log_sessions(device.get("device_id"), result.get("sessions") if isinstance(result.get("sessions"), list) else [])
@@ -3235,113 +3207,6 @@ class OvermindDatabase:
         if not internal_device:
             return []
         return self._asset_rows_for_device_internal(internal_device["id"], "bios")
-
-    def _clean_saves_rows(self, device_id: str, saves: list) -> list:
-        cleaned = []
-        for item in saves:
-            if not isinstance(item, dict):
-                continue
-            system_name = str(item.get("system") or item.get("system_name") or "").strip()
-            file_path = str(item.get("file_path") or item.get("relative_path") or item.get("save_name") or "").replace("\\", "/").strip().lstrip("./")
-            if not file_path:
-                continue
-            cleaned.append({
-                "id": str(uuid.uuid4()),
-                "device_id": device_id,
-                "system_name": system_name,
-                "save_name": item.get("save_name") or item.get("name") or file_path.rsplit("/", 1)[-1],
-                "file_path": file_path,
-                "relative_path": file_path,
-                "fingerprint": item.get("fingerprint") or item.get("saves_fingerprint") or item.get("hash"),
-                "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
-                "modified_time": item.get("modified_time") or item.get("mtime"),
-                "added_at": datetime.utcnow(),
-                "last_seen": datetime.utcnow(),
-            })
-        return cleaned
-
-    def add_saves(self, device_id: str, saves: list, *, replace: bool = True) -> List[str]:
-        """Add/replace game-save rows for a device. Returns list of save row IDs."""
-        internal_device = self.get_device_by_device_id(device_id)
-        if not internal_device:
-            return []
-        internal_id = internal_device["id"]
-        cleaned = self._clean_saves_rows(device_id, saves)
-        if self._asset_store_enabled():
-            return postgres_store.upsert_device_assets(internal_id, device_id, "saves", cleaned, replace=replace)
-        if replace or internal_id not in self.saves:
-            self.saves[internal_id] = []
-        elif cleaned:
-            incoming_keys = {self._saves_key(entry) for entry in cleaned}
-            self.saves[internal_id] = [
-                row for row in self.saves[internal_id] if self._saves_key(row) not in incoming_keys
-            ]
-        row_ids = []
-        for entry in cleaned:
-            self.saves[internal_id].append(entry)
-            row_ids.append(entry["id"])
-        return row_ids
-
-    def get_device_saves(self, device_id: str) -> List[dict]:
-        internal_device = self.get_device_by_device_id(device_id)
-        if not internal_device:
-            return []
-        return self._asset_rows_for_device_internal(internal_device["id"], "saves")
-
-    def get_device_saves_page(
-        self,
-        device_id: str,
-        *,
-        query: Optional[str] = None,
-        page: int = 1,
-        per_page: int = 100,
-    ) -> dict:
-        internal_device = self.get_device_by_device_id(device_id)
-        page = max(1, int(page))
-        per_page = max(1, min(int(per_page), 500))
-        if not internal_device:
-            return {"rows": [], "total": 0, "page": page, "per_page": per_page}
-        if self._asset_store_enabled():
-            rows, total = postgres_store.page_device_assets(
-                internal_device["id"],
-                "saves",
-                query=query,
-                page=page,
-                per_page=per_page,
-            )
-            return {"rows": rows, "total": total, "page": page, "per_page": per_page}
-        rows = list(self.saves.get(internal_device["id"], []))
-        term = str(query or "").strip().lower()
-        if term:
-            def _haystack(row: dict) -> str:
-                return " ".join(
-                    str(row.get(key) or "")
-                    for key in (
-                        "system_name",
-                        "system",
-                        "save_name",
-                        "name",
-                        "file_path",
-                        "relative_path",
-                    )
-                ).lower()
-
-            rows = [row for row in rows if term in _haystack(row)]
-        rows.sort(
-            key=lambda row: (
-                str(row.get("system_name") or row.get("system") or "").lower(),
-                str(
-                    row.get("file_path") or row.get("relative_path") or row.get("save_name") or ""
-                ).lower(),
-            )
-        )
-        start = (page - 1) * per_page
-        return {
-            "rows": rows[start:start + per_page],
-            "total": len(rows),
-            "page": page,
-            "per_page": per_page,
-        }
 
     def get_master_bios_for_device(self, user_id: str, selected_device_id: str) -> Optional[List[dict]]:
         selected = self.get_device_by_device_id(selected_device_id)
@@ -4149,41 +4014,6 @@ class OvermindDatabase:
 
         rows.sort(key=_played_key, reverse=True)
         return rows[: max(1, int(limit))]
-
-    def store_device_log_sources(self, device_id: str, payload: dict) -> None:
-        device = self.get_device_by_device_id(device_id)
-        if not device or not isinstance(payload, dict):
-            return
-        internal_id = device["id"]
-        postgres_store.store_device_log_sources(internal_id, payload)
-        existing = self.log_sources.get(internal_id)
-        merged = merge_log_sources(existing, payload, max_lines=1000)
-        self.log_sources[internal_id] = merged
-        device["log_sources"] = merged
-
-    def get_device_log_sources(self, device_id: str, line_limit: int = 10) -> dict:
-        device = self.get_device_by_device_id(device_id)
-        if not device:
-            return {"type": "log_sources", "logs": []}
-        internal_id = device["id"]
-        if postgres_store.available():
-            payload = postgres_store.get_device_log_sources(internal_id, line_limit=line_limit)
-            if payload.get("logs"):
-                return payload
-        payload = self.log_sources.get(internal_id) or device.get("log_sources") or {"type": "log_sources", "logs": []}
-        line_limit = max(1, min(100, int(line_limit or 10)))
-        limited = {"type": "log_sources", "logs": []}
-        for source in payload.get("logs") if isinstance(payload.get("logs"), list) else []:
-            if not isinstance(source, dict):
-                continue
-            entry = {**source, "files": []}
-            for file_row in source.get("files") if isinstance(source.get("files"), list) else []:
-                if not isinstance(file_row, dict):
-                    continue
-                lines = str(file_row.get("content") or "").splitlines()
-                entry["files"].append({**file_row, "content": "\n".join(lines[-line_limit:])})
-            limited["logs"].append(entry)
-        return limited
 
     def store_device_emulator_configs(self, device_id: str, payload: dict) -> None:
         device = self.get_device_by_device_id(device_id)

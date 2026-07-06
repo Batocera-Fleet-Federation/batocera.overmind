@@ -4518,26 +4518,9 @@ def test_sync_action_completion_does_not_create_per_artwork_notifications(client
     )
 
 
-def test_action_results_store_raw_logs_for_selected_drone_view(client):
-    user_id = db.create_user("logs@example.com", "hash")
-    internal_id = db.create_device(user_id, "log-drone", "Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
-    device = db.get_device(internal_id)
-
-    db.store_action_result(device, {
-        "type": "log_sources",
-            "logs": [{"source": "drone_stderr", "files": [{"path": "/tmp/drone.err", "content": "line-1\nline-2"}]}],
-        })
-    db.store_action_result(device, {
-        "type": "log_sources",
-        "logs": [{"source": "drone_stderr", "files": [{"path": "/tmp/drone.err", "content": "line-3"}]}],
-    })
-
-    logs = db.get_device_log_sources("log-drone", line_limit=2)
-    assert logs["logs"][0]["source"] == "drone_stderr"
-    assert logs["logs"][0]["files"][0]["content"] == "line-2\nline-3"
-
-
-def test_game_log_result_does_not_store_raw_logs(client):
+def test_game_log_result_stores_sessions_not_raw_logs(client):
+    # Overmind never stores raw drone/ES logs (gamelist-source-of-truth refactor) --
+    # a "game_logs" action result only persists the parsed gameplay sessions.
     user_id = db.create_user("es-logs@example.com", "hash")
     internal_id = db.create_device(user_id, "es-log-drone", "ES Log Drone", {"ip_address": "10.0.0.2"}, raw_token="token")
     device = db.get_device(internal_id)
@@ -4548,8 +4531,8 @@ def test_game_log_result_does_not_store_raw_logs(client):
         "logs": [{"source": "drone_stdout", "files": [{"path": "/tmp/drone.log", "content": "raw\n"}]}],
     })
 
-    assert not db.get_device_log_sources("es-log-drone")["logs"]
     assert device["game_logs"]["sessions"][0]["game_name"] == "Game.sfc"
+    assert "log_sources" not in device or not device.get("log_sources")
 
 
 def test_action_results_merge_configs_and_exclude_bak_files(client):
