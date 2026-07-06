@@ -32,8 +32,8 @@ from overmind.models import (
     RomListUpdate, GamePlayLog, SocialAuthRequest,
     EmailVerificationRequest, EmailVerificationResendRequest, ForgotPasswordRequest, ResetPasswordRequest,
     SwarmCreateRequest, SwarmInviteRequest,
-    DroneActionCompleteRequest, DroneAssetMetadataUpload, DroneDownloadsReport, DroneEmulatorConfigsUpload,
-    DroneGameLogsUpload, DroneHeartbeatRequest, DroneLogSourcesUpload, DronePeerChecksUpload, DroneSpeedSampleUpload,
+    DroneActionCompleteRequest, DroneAssetMetadataUpload, DroneDownloadsReport,
+    DroneGameLogsUpload, DroneHeartbeatRequest, DronePeerChecksUpload, DroneSpeedSampleUpload,
     # Phase 1 request models
     NotificationIdsRequest, InvitationAcceptRequest, SwarmMemberUpdateRequest, SwarmRenameRequest,
     ProfileUpdateRequest,

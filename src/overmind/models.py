@@ -266,6 +266,9 @@ class DroneHeartbeatRequest(StrictContractModel):
     rom_inventory_fingerprint_algorithm: Optional[str] = None
     romset_files_thumbprint: Optional[str] = None
     bios_files_thumbprint: Optional[str] = None
+    # Tolerance field, not read: a strict model missing this once made every heartbeat
+    # from a Drone still sending it 422 (drone showed permanently offline). Accept and
+    # ignore rather than re-earn that incident. See heartbeat-422-saves-thumbprint memory.
     saves_files_thumbprint: Optional[str] = None
     rom_metadata: Optional[dict[str, Any]] = None
     rom_systems: list[dict[str, Any]] = Field(default_factory=list)
@@ -353,6 +356,8 @@ class DroneAssetMetadataUpload(StrictContractModel):
     rom_inventory_fingerprint_algorithm: Optional[str] = None
     romset_files_thumbprint: Optional[str] = None
     bios_files_thumbprint: Optional[str] = None
+    # Accepted-but-ignored for the same reason artwork/saves rows below are: a Drone
+    # mid-rollout may still send it; strict-model rejection must not 422 the upload.
     saves_files_thumbprint: Optional[str] = None
     collected_at: Optional[str] = None
     roms_root: Optional[str] = None
@@ -411,39 +416,6 @@ class DroneGameLogsUpload(StrictContractModel):
     type: Optional[Literal["game_logs"]] = "game_logs"
     collected_at: Optional[str] = None
     sessions: list[DroneGameSession] = Field(default_factory=list)
-
-
-class DroneLogFile(ExtensibleContractModel):
-    path: Optional[str] = None
-    content: str = ""
-    modified_at: Optional[str] = None
-
-
-class DroneLogSource(ExtensibleContractModel):
-    source: str
-    files: list[DroneLogFile] = Field(default_factory=list)
-
-
-class DroneLogSourcesUpload(StrictContractModel):
-    type: Optional[Literal["log_sources"]] = "log_sources"
-    collected_at: Optional[str] = None
-    append: bool = True
-    logs: list[DroneLogSource] = Field(default_factory=list)
-
-
-class DroneEmulatorConfigFile(ExtensibleContractModel):
-    root: Optional[str] = None
-    relative_path: str
-    content: str = ""
-    modified_at: Optional[str] = None
-    md5: Optional[str] = None
-    fingerprint: Optional[str] = None
-
-
-class DroneEmulatorConfigsUpload(StrictContractModel):
-    type: Optional[Literal["emulator_configs"]] = "emulator_configs"
-    incremental: bool = True
-    configs: list[DroneEmulatorConfigFile] = Field(default_factory=list)
 
 
 # ==================== Phase 1 request models ====================
@@ -910,11 +882,6 @@ class SpeedSamplesResponse(ExtensibleContractModel):
     samples: list[Any] = Field(default_factory=list)
 
 
-class LogStreamResponse(ExtensibleContractModel):
-    status: str
-    ttl_seconds: int = 0
-
-
 class DeviceRomsResponse(ExtensibleContractModel):
     """get_device_roms returns one of three shapes; route uses response_model_exclude_none."""
     roms: Optional[list[Any]] = None
@@ -938,20 +905,6 @@ class BiosListResponse(ExtensibleContractModel):
 
 class MasterBiosResponse(ExtensibleContractModel):
     bios: list[Any] = Field(default_factory=list)
-    total: int = 0
-    page: int = 1
-    per_page: int = 100
-
-
-class MasterArtworkResponse(ExtensibleContractModel):
-    artwork: list[Any] = Field(default_factory=list)
-    total: int = 0
-    page: int = 1
-    per_page: int = 100
-
-
-class DeviceSavesResponse(ExtensibleContractModel):
-    saves: list[Any] = Field(default_factory=list)
     total: int = 0
     page: int = 1
     per_page: int = 100

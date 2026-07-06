@@ -19,26 +19,6 @@ except Exception:
     _cache = None  # type: ignore[assignment]
 
 
-def _compute_asset_keys(asset_type: str, payload: dict, system_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Return (master_key, sort_key) for a ROM or BIOS asset row, or (None, None) for artwork."""
-    if asset_type == "rom":
-        fingerprint = str(payload.get("rom_fingerprint") or "").strip().lower()
-        sys = str(system_name or "").strip().lower()
-        path = str(payload.get("file_path") or payload.get("rom_name") or "").strip().lower()
-        mk = f"fingerprint:{fingerprint}" if fingerprint else f"path:{sys}:{path}"
-        return mk, f"{sys}:{path}"
-    if asset_type == "bios":
-        fingerprint = str(payload.get("bios_md5") or payload.get("md5") or "").strip().lower()
-        path = str(payload.get("file_path") or payload.get("relative_path") or payload.get("bios_name") or "").strip().lower()
-        mk = f"fingerprint:{fingerprint}" if fingerprint else f"path:{path}"
-        return mk, path
-    if asset_type == "saves":
-        sys = str(system_name or "").strip().lower()
-        path = str(payload.get("file_path") or payload.get("relative_path") or payload.get("save_name") or "").strip().lower()
-        return f"saves:{sys}:{path}", f"{sys}:{path}"
-    return None, None
-
-
 def _is_excluded_emulator_config_path(value: str) -> bool:
     label = str(value or "").replace("\\", "/").strip("/")
     lowered = label.lower()
@@ -5828,28 +5808,6 @@ def _strip_json_only_device_status(state: dict) -> None:
         device.pop("last_status_checked_at", None)
 
 
-def _asset_key(asset_type: str, row: dict) -> str:
-    if asset_type == "rom":
-        system = str(row.get("system_name") or row.get("system") or "").strip().lower()
-        path = str(row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_file") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-        return f"{system}:{path}" if system and path else ""
-    if asset_type == "bios":
-        fingerprint = str(row.get("bios_md5") or row.get("md5") or row.get("hash") or "").strip().lower()
-        path = str(row.get("file_path") or row.get("relative_path") or row.get("path") or row.get("bios_name") or row.get("name") or "").replace("\\", "/").strip().lstrip("./").lower()
-        return f"fingerprint:{fingerprint}" if fingerprint else f"path:{path}" if path else ""
-    if asset_type == "artwork":
-        system = str(row.get("system_name") or row.get("system") or "").strip().lower()
-        path = str(row.get("rom_path") or row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-        types = row.get("artwork_types") if isinstance(row.get("artwork_types"), list) else []
-        type_key = ",".join(sorted(str(value).strip().lower() for value in types if str(value).strip()))
-        return f"{system}:{path}:{type_key}" if system and path and type_key else ""
-    if asset_type == "saves":
-        system = str(row.get("system_name") or row.get("system") or "").strip().lower()
-        path = str(row.get("file_path") or row.get("relative_path") or row.get("save_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-        return f"{system}:{path}" if path else ""
-    return ""
-
-
 def _domain_path(row: dict, asset_type: str) -> str:
     if asset_type == "rom":
         value = row.get("file_path") or row.get("relative_path") or row.get("rom_path") or row.get("rom_file") or row.get("rom_name")
@@ -5860,16 +5818,6 @@ def _domain_path(row: dict, asset_type: str) -> str:
     else:
         value = row.get("rom_path") or row.get("file_path") or row.get("rom_name")
     return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
-
-
-def _artwork_types(row: dict) -> list[str]:
-    if isinstance(row.get("artwork_types"), list):
-        values = row["artwork_types"]
-    elif row.get("artwork_type"):
-        values = [row.get("artwork_type")]
-    else:
-        values = []
-    return sorted({str(value).strip() for value in values if str(value).strip()})
 
 
 postgres_store = PostgresMetadataStore()
