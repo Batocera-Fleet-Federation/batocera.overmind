@@ -3664,6 +3664,7 @@ class OvermindDatabase:
             if asset_type == "rom":
                 row = master.setdefault(key, {
                     "system_name": item.get("system_name"),
+                    "gamelist_id": item.get("gamelist_id") or item.get("gamelist_game_id"),
                     "rom_name": item.get("rom_name") or item.get("file_path"),
                     "file_path": item.get("file_path") or item.get("rom_name"),
                     "filenames": [],

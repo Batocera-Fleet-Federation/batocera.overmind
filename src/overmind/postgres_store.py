@@ -5515,155 +5515,114 @@ class PostgresMetadataStore:
         if conn is None:
             return [], 0
         offset = (page - 1) * per_page
-        if asset_type in ("rom", "bios"):
-            # Fast path: use stored master_key/sort_key columns + covering index.
-            clauses: list[str] = [
-                "device_internal_id = ANY(%s)",
-                "asset_type = %s",
-                "master_key IS NOT NULL",
-                "master_key <> ''",
-            ]
-            base_params: list[object] = [ids, asset_type]
-            clean_query = str(query or "").strip().lower()
-            if clean_query:
-                # Pushed to base table so the GIN trgm index can be used.
-                clauses.append("lower(payload::text) LIKE %s")
-                base_params.append(f"%{clean_query}%")
-            clean_system = str(system_name or "").strip().lower()
-            if clean_system:
-                clauses.append("lower(coalesce(system_name, '')) = %s")
-                base_params.append(clean_system)
-            clean_status = str(status or "").strip().lower()
-            if selected_internal_id and clean_status in {"missing", "present"}:
-                presence = "EXISTS" if clean_status == "present" else "NOT EXISTS"
-                clauses.append(
-                    f"{presence} (SELECT 1 FROM overmind_device_assets x"
-                    f" WHERE x.device_internal_id = %s AND x.asset_type = %s AND x.master_key = overmind_device_assets.master_key)"
-                )
-                base_params.extend([str(selected_internal_id), asset_type])
-            selected_param = str(selected_internal_id) if selected_internal_id else None
-            where = " AND ".join(clauses)
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        WITH filtered AS (
-                            SELECT master_key, MIN(sort_key) AS sort_key
-                            FROM overmind_device_assets
-                            WHERE {where}
-                            GROUP BY master_key
-                        ),
-                        counted AS (
-                            SELECT master_key, sort_key, COUNT(*) OVER () AS total_count
-                            FROM filtered
-                        ),
-                        paged AS (
-                            SELECT master_key, total_count
-                            FROM counted
-                            ORDER BY sort_key, master_key
-                            LIMIT %s OFFSET %s
-                        )
-                        SELECT a.device_internal_id, a.payload, a.master_key, NULL::text AS artwork_type,
-                               CASE WHEN %s::text IS NULL THEN false ELSE EXISTS (
-                                   SELECT 1 FROM overmind_device_assets s
-                                   WHERE s.device_internal_id = %s AND s.asset_type = %s
-                                     AND s.master_key = a.master_key
-                               ) END AS present_on_selected,
-                               p.total_count
-                        FROM overmind_device_assets a
-                        JOIN paged p ON p.master_key = a.master_key
-                        WHERE a.device_internal_id = ANY(%s) AND a.asset_type = %s
-                        ORDER BY a.sort_key, a.master_key, a.device_internal_id
-                        """,
-                        [*base_params, per_page, offset, selected_param, selected_param, asset_type, ids, asset_type],
-                    )
-                    rows = cur.fetchall()
-        elif asset_type == "artwork":
-            master_key_expr = """
-                'artwork:' || lower(coalesce(system_name, payload->>'system', '')) || ':' ||
-                lower(coalesce(payload->>'rom_path', payload->>'file_path', payload->>'rom_name', '')) || ':' ||
-                lower(artwork_type.value)
-            """
-            sort_key_expr = """
-                lower(coalesce(system_name, payload->>'system', '')) || ':' ||
-                lower(coalesce(payload->>'rom_path', payload->>'file_path', payload->>'rom_name', '')) || ':' ||
-                lower(artwork_type.value)
-            """
-            source = """
-                overmind_device_assets
-                CROSS JOIN LATERAL jsonb_array_elements_text(coalesce(payload->'artwork_types', '[]'::jsonb)) AS artwork_type(value)
-            """
-            normalized_sql = f"""
-                SELECT device_internal_id, device_id, payload, system_name, artwork_type.value AS artwork_type,
-                       {master_key_expr} AS master_key,
-                       {sort_key_expr} AS sort_key
-                FROM {source}
-                WHERE device_internal_id = ANY(%s) AND asset_type = %s
-            """
-            clauses_aw = ["n.master_key <> ''"]
-            filters_aw: list[object] = []
-            clean_query = str(query or "").strip().lower()
-            if clean_query:
-                clauses_aw.append("lower(n.payload::text) LIKE %s")
-                filters_aw.append(f"%{clean_query}%")
-            clean_system = str(system_name or "").strip().lower()
-            if clean_system:
-                clauses_aw.append("lower(coalesce(n.system_name, n.payload->>'system', '')) = %s")
-                filters_aw.append(clean_system)
-            clean_artwork_type = str(artwork_type or "").strip().lower()
-            if clean_artwork_type:
-                clauses_aw.append("lower(coalesce(n.artwork_type, '')) = %s")
-                filters_aw.append(clean_artwork_type)
-            selected_param = str(selected_internal_id) if selected_internal_id else None
-            base_params_aw = [ids, asset_type, *filters_aw]
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        WITH normalized AS ({normalized_sql}),
-                        filtered_keys AS (
-                            SELECT n.master_key, min(n.sort_key) AS sort_key
-                            FROM normalized n
-                            WHERE {" AND ".join(clauses_aw)}
-                            GROUP BY n.master_key
-                        ),
-                        counted_keys AS (
-                            SELECT master_key, sort_key, COUNT(*) OVER () AS total_count
-                            FROM filtered_keys
-                        ),
-                        paged_keys AS (
-                            SELECT master_key, total_count
-                            FROM counted_keys
-                            ORDER BY sort_key, master_key
-                            LIMIT %s OFFSET %s
-                        )
-                        SELECT n.device_internal_id, n.payload, n.master_key, n.artwork_type,
-                               CASE WHEN %s::text IS NULL THEN false ELSE EXISTS (
-                                   SELECT 1 FROM normalized selected
-                                   WHERE selected.master_key = n.master_key AND selected.device_internal_id = %s
-                               ) END AS present_on_selected,
-                               p.total_count
-                        FROM normalized n
-                        JOIN paged_keys p ON p.master_key = n.master_key
-                        ORDER BY n.sort_key, n.master_key, n.device_internal_id
-                        """,
-                        [*base_params_aw, per_page, offset, selected_param, selected_param],
-                    )
-                    rows = cur.fetchall()
-        else:
+        if asset_type not in ("rom", "bios"):
+            # Artwork is no longer stored in Overmind (gamelist-only refactor);
+            # any other asset type has no master list.
             return [], 0
+        payload_columns = self._DOMAIN_ASSET_SOURCE[asset_type][1]
+        master_cfg = {
+            "rom": {
+                "table": "drone_games",
+                # Content identity is the sampled fingerprint; fall back to the
+                # gamelist id (per system) when a game has not been fingerprinted.
+                "master_key": (
+                    "CASE WHEN rom_fingerprint IS NOT NULL AND rom_fingerprint <> ''"
+                    " THEN 'fingerprint:' || rom_fingerprint"
+                    " ELSE 'gid:' || lower(coalesce(system_name, '')) || ':' || coalesce(gamelist_id, '') END"
+                ),
+                "sort_key": "lower(coalesce(system_name, '')) || ':' || lower(coalesce(name, ''))",
+                "name_col": "name",
+                "has_system": True,
+            },
+            "bios": {
+                "table": "drone_bios",
+                "master_key": (
+                    "CASE WHEN bios_md5 IS NOT NULL AND bios_md5 <> ''"
+                    " THEN 'bios:' || bios_md5"
+                    " ELSE 'path:' || lower(coalesce(normalized_path, '')) END"
+                ),
+                "sort_key": "lower(coalesce(normalized_path, ''))",
+                "name_col": "bios_name",
+                "has_system": False,
+            },
+        }[asset_type]
+        table = master_cfg["table"]
+        where = ["drone_id = ANY(%s)"]
+        params: list[object] = [ids]
+        clean_query = str(query or "").strip().lower()
+        if clean_query:
+            where.append(f"lower(coalesce({master_cfg['name_col']}, '')) LIKE %s")
+            params.append(f"%{clean_query}%")
+        clean_system = str(system_name or "").strip().lower()
+        if clean_system and master_cfg["has_system"]:
+            where.append("lower(coalesce(system_name, '')) = %s")
+            params.append(clean_system)
+        where_sql = " AND ".join(where)
+        selected_param = str(selected_internal_id) if selected_internal_id else None
+        clean_status = str(status or "").strip().lower()
+        status_clause = ""
+        status_params: list[object] = []
+        if selected_param and clean_status in {"missing", "present"}:
+            op = "IN" if clean_status == "present" else "NOT IN"
+            status_clause = (
+                f" AND n.master_key {op} (SELECT master_key FROM normalized"
+                " WHERE device_internal_id = %s)"
+            )
+            status_params.append(selected_param)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH normalized AS (
+                        SELECT drone_id AS device_internal_id,
+                               {master_cfg['master_key']} AS master_key,
+                               {master_cfg['sort_key']} AS sort_key,
+                               {payload_columns}
+                        FROM {table}
+                        WHERE {where_sql}
+                    ),
+                    filtered AS (
+                        SELECT n.* FROM normalized n
+                        WHERE n.master_key <> ''{status_clause}
+                    ),
+                    keys AS (
+                        SELECT master_key, min(sort_key) AS sort_key
+                        FROM filtered
+                        GROUP BY master_key
+                    ),
+                    counted AS (
+                        SELECT master_key, sort_key, COUNT(*) OVER () AS total_count
+                        FROM keys
+                    ),
+                    paged AS (
+                        SELECT master_key, total_count
+                        FROM counted
+                        ORDER BY sort_key, master_key
+                        LIMIT %s OFFSET %s
+                    )
+                    SELECT f.device_internal_id, {payload_columns}, f.master_key,
+                           CASE WHEN %s::text IS NULL THEN false ELSE f.master_key IN (
+                               SELECT master_key FROM normalized WHERE device_internal_id = %s
+                           ) END AS present_on_selected,
+                           p.total_count
+                    FROM filtered f
+                    JOIN paged p ON p.master_key = f.master_key
+                    ORDER BY f.sort_key, f.master_key, f.device_internal_id
+                    """,
+                    [*params, *status_params, per_page, offset, selected_param, selected_param],
+                )
+                rows = cur.fetchall()
         if not rows:
             return [], 0
-        total = int(rows[0][5] or 0)
+        total = int(rows[0][-1] or 0)
         output = []
-        for internal_id, payload, group_key, row_artwork_type, present_on_selected, _ in rows:
-            decoded = _decode_state(payload)
-            if isinstance(decoded, dict):
-                decoded["_device_internal_id"] = internal_id
-                decoded["_master_key"] = group_key
-                decoded["_artwork_type"] = row_artwork_type
-                decoded["_present_on_selected"] = bool(present_on_selected)
-                output.append(decoded)
+        for row in rows:
+            payload = self._domain_asset_payload(asset_type, row[1:6])
+            payload["_device_internal_id"] = row[0]
+            payload["_master_key"] = row[6]
+            payload["_artwork_type"] = None
+            payload["_present_on_selected"] = bool(row[7])
+            output.append(payload)
         if _cache:
             _cache.set(cache_key, {"rows": output, "total": total}, ttl=30)
         return output, total
