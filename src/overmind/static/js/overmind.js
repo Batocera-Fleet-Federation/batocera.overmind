@@ -3674,18 +3674,9 @@
                     params.set('page', String(masterRomPage));
                     params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
                     const url = `/api/devices/${selectedDeviceId}/master-roms` + (params.toString() ? `?${params.toString()}` : '');
-                    const artworkParams = new URLSearchParams();
-                    if (q) artworkParams.set('q', q);
-                    if (system) artworkParams.set('system', system);
-                    artworkParams.set('page', '1');
-                    artworkParams.set('per_page', '100');
-                    const [response, artworkResponse] = await Promise.all([
-                        apiGet(url),
-                        apiGet(`/api/devices/${selectedDeviceId}/master-artwork?${artworkParams.toString()}`),
-                    ]);
+                    const response = await apiGet(url);
                     if (!response.ok) throw new Error('Failed to load swarm ROM availability');
                     const payload = await response.json();
-                    const artworkPayload = artworkResponse.ok ? await artworkResponse.json() : { artwork: [] };
                     const filtered = payload.roms || [];
                     const total = payload.total || filtered.length;
                     const page = payload.page || masterRomPage;
@@ -3709,7 +3700,7 @@
                         if (end < pageCount - 1) paginationButtons.push('<span class="px-2">&hellip;</span>');
                         if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
                     }
-                    const artworkLookup = buildArtworkLookup(artworkPayload.artwork || [], system || '');
+                    const artworkLookup = new Map();
 
                     container.innerHTML = `
                         <div class="card"><div class="card-body py-2">
@@ -4398,22 +4389,13 @@
                     }, 8000);
                     return;
                 }
-                // Saves are near-static and paged/searchable, so they are NOT auto-refreshed
-                // (a periodic reload previously wiped the table mid-view). Use the Refresh button.
-                if (!['gamelogs', 'configs'].includes(viewName)) return;
-                selectedDeviceDataRefreshTimer = setInterval(() => {
-                    if (!selectedDeviceId || currentTab !== 'devices') {
-                        stopSelectedDeviceDataAutoRefresh();
-                        return;
-                    }
-                    if (currentDeviceView === 'gamelogs') loadGameLogs({showLoader: false});
-                    if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});
-                }, 30000);
+                // Only the Admin actions list auto-refreshes; every other device view is
+                // static or manually refreshed.
             }
 
             function switchDeviceView(viewName, buttonEl = null, updateUrl = true) {
                 if (!selectedDeviceId) return;
-                currentDeviceView = ['overview', 'systems', 'bios', 'saves', 'gamelogs', 'configs', 'admin'].includes(viewName) ? viewName : 'overview';
+                currentDeviceView = ['overview', 'systems', 'bios', 'admin'].includes(viewName) ? viewName : 'overview';
                 if (updateUrl) {
                     setRoute('devices', selectedDeviceId, currentDeviceView);
                     return;
@@ -4426,18 +4408,10 @@
                 const overviewPanel = document.getElementById('device-overview-panel');
                 const systemsPanel = document.getElementById('device-systems-panel');
                 const biosPanel = document.getElementById('device-bios-panel');
-                const savesPanel = document.getElementById('device-saves-panel');
-                const artworkPanel = document.getElementById('device-artwork-panel');
-                const gamelogsPanel = document.getElementById('device-gamelogs-panel');
-                const configsPanel = document.getElementById('device-configs-panel');
                 const adminPanel = document.getElementById('device-admin-panel');
                 if (overviewPanel) overviewPanel.style.display = currentDeviceView === 'overview' ? 'block' : 'none';
                 if (systemsPanel) systemsPanel.style.display = currentDeviceView === 'systems' ? 'block' : 'none';
                 if (biosPanel) biosPanel.style.display = currentDeviceView === 'bios' ? 'block' : 'none';
-                if (savesPanel) savesPanel.style.display = currentDeviceView === 'saves' ? 'block' : 'none';
-                if (artworkPanel) artworkPanel.style.display = 'none';
-                if (gamelogsPanel) gamelogsPanel.style.display = currentDeviceView === 'gamelogs' ? 'block' : 'none';
-                if (configsPanel) configsPanel.style.display = currentDeviceView === 'configs' ? 'block' : 'none';
                 if (adminPanel) adminPanel.style.display = currentDeviceView === 'admin' ? 'block' : 'none';
 
                 if (currentDeviceView === 'overview') {
@@ -4449,9 +4423,6 @@
                     loadDeviceSystems();
                 }
                 if (currentDeviceView === 'bios') loadDeviceBiosPanel();
-                if (currentDeviceView === 'saves') loadDeviceSavesPanel();
-                if (currentDeviceView === 'gamelogs') loadGameLogs();
-                if (currentDeviceView === 'configs') loadDeviceConfigs();
                 if (currentDeviceView === 'admin') {
                     renderDeviceAdminPanel();
                     refreshSelectedDroneDetails()

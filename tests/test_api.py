@@ -5127,8 +5127,12 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "Auto-sync ROM metadata from this Drone" not in js
     assert "loadGameLogs({queue:" not in js
     assert "loadDeviceConfigs({queue:" not in js
-    assert "if (currentDeviceView === 'gamelogs') loadGameLogs({showLoader: false});" in js
-    assert "if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});" in js
+    # Saves/Logs/Configs device tabs were removed in the gamelist-source refactor.
+    assert "data-device-view=\"saves\"" not in html
+    assert "data-device-view=\"gamelogs\"" not in html
+    assert "data-device-view=\"configs\"" not in html
+    assert "if (currentDeviceView === 'gamelogs') loadGameLogs({showLoader: false});" not in js
+    assert "if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});" not in js
 
 
 def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
@@ -5201,9 +5205,9 @@ def test_periodic_download_and_config_refreshes_preserve_rendered_ui():
     assert "function updateSwarmDownloadsInPlace(rows)" in js
     assert "if (options.quiet && updateSwarmDownloadsInPlace(rows)) {" in js
     assert 'data-download-field="progress-bar"' in js
-    assert "async function loadDeviceConfigs(options = {})" in js
-    assert "if (container.dataset.configSignature === signature) return;" in js
-    assert "loadDeviceConfigs({showLoader: false})" in js
+    # The Configs device tab was removed in the gamelist-source refactor, so its
+    # periodic in-place refresh no longer runs.
+    assert "loadDeviceConfigs({showLoader: false})" not in js
 
 
 def test_metadata_panels_submit_searches_explicitly_and_show_loading_toast():
