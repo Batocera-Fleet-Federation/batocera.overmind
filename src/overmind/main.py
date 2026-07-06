@@ -2852,24 +2852,30 @@ async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: O
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     require_device_admin(user, device)
     system_name = str(payload.get("system_name") or payload.get("system") or "").strip()
-    rom_path = str(payload.get("file_path") or payload.get("rom_name") or "").strip()
-    if not system_name or not rom_path:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name and rom path are required")
+    gamelist_id = str(payload.get("gamelist_id") or "").strip()
+    # gamelist_id is the ROM identity (the sender resolves it -> <path> in its
+    # own gamelist). rom_name is retained only for display / sync-activity.
+    rom_name = str(payload.get("rom_name") or payload.get("file_path") or "").strip()
+    if not system_name or not gamelist_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name and gamelist_id are required")
     source_devices = payload.get("devices") if isinstance(payload.get("devices"), list) else []
     if not source_devices:
         requested_fingerprint = str(payload.get("rom_fingerprint") or payload.get("fingerprint") or "").strip().lower()
-        requested_path = rom_path.replace("\\", "/").strip().lstrip("./").lower()
         for row in db.get_master_roms_for_device(device["user_id"], device_id) or []:
             row_system = str(row.get("system_name") or "").strip().lower()
-            row_path = str(row.get("file_path") or row.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
+            row_gid = str(row.get("gamelist_id") or "").strip()
             row_fingerprint = str(row.get("rom_fingerprint") or "").strip().lower()
             if row_system != system_name.lower():
                 continue
             if requested_fingerprint and row_fingerprint == requested_fingerprint:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                if not rom_name:
+                    rom_name = row.get("rom_name") or ""
                 break
-            if not requested_fingerprint and row_path == requested_path:
+            if not requested_fingerprint and row_gid == gamelist_id:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
+                if not rom_name:
+                    rom_name = row.get("rom_name") or ""
                 break
     source_devices = resolvable_asset_sources(source_devices, device_id)
     if not source_devices:
@@ -2878,8 +2884,8 @@ async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: O
     action = db.create_device_action(device["user_id"], device_id, "sync_rom", {
         "sync_id": sync_id,
         "system_name": system_name,
-        "rom_name": payload.get("rom_name") or rom_path,
-        "file_path": rom_path,
+        "gamelist_id": gamelist_id,
+        "rom_name": rom_name or gamelist_id,
         "rom_fingerprint": payload.get("rom_fingerprint"),
         "file_size": payload.get("file_size"),
         "entry_type": payload.get("entry_type") or "file",
@@ -2891,14 +2897,15 @@ async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: O
         "sync_id": sync_id,
         "target_drone_id": device_id,
         "system": system_name,
-        "rom_name": rom_path,
+        "gamelist_id": gamelist_id,
+        "rom_name": rom_name or gamelist_id,
         "action": "download",
         "status": "pending",
         "file_size": payload.get("file_size"),
         "rom_fingerprint": payload.get("rom_fingerprint"),
         "entry_type": payload.get("entry_type") or "file",
     })
-    notify_sync_triggered(user, device, "ROM", f"ROM sync for {system_name}/{rom_path}", [device], source_devices, action)
+    notify_sync_triggered(user, device, "ROM", f"ROM sync for {system_name}/{rom_name or gamelist_id}", [device], source_devices, action)
     return {"action": action, "artwork_actions": [], "artwork_action_count": 0}
 
 
@@ -3142,8 +3149,8 @@ async def sync_device_system(device_id: str, body: SyncSystemRequest, authorizat
             "source_drone_id": source_devices[0].get("device_id") if source_devices else None,
             "target_drone_id": device_id,
             "system": system_name,
-            "rom_name": row.get("rom_name") or row.get("file_path"),
-            "relative_path": row.get("file_path"),
+            "gamelist_id": row.get("gamelist_id"),
+            "rom_name": row.get("rom_name") or row.get("gamelist_id"),
             "entry_type": row.get("entry_type") or "file",
             "action": "download",
             "status": "pending",
@@ -3196,8 +3203,8 @@ async def bulk_sync_drones(body: BulkSyncRequest, authorization: Optional[str] =
                 continue
             row = union.setdefault(key, {
                 "system_name": rom.get("system_name"),
-                "rom_name": rom.get("rom_name") or rom.get("file_path"),
-                "file_path": rom.get("file_path") or rom.get("rom_name"),
+                "gamelist_id": rom.get("gamelist_id") or rom.get("gamelist_game_id"),
+                "rom_name": rom.get("rom_name") or rom.get("name"),
                 "rom_fingerprint": rom.get("rom_fingerprint"),
                 "file_size": rom.get("file_size"),
                 "entry_type": rom.get("entry_type") or "file",
@@ -3250,8 +3257,8 @@ async def bulk_sync_drones(body: BulkSyncRequest, authorization: Optional[str] =
                         "source_drone_id": source_devices[0].get("device_id") if source_devices else None,
                         "target_drone_id": target_id,
                         "system": system_name,
-                        "rom_name": row.get("rom_name") or row.get("file_path"),
-                        "relative_path": row.get("file_path"),
+                        "gamelist_id": row.get("gamelist_id"),
+                        "rom_name": row.get("rom_name") or row.get("gamelist_id"),
                         "entry_type": row.get("entry_type") or "file",
                         "action": "download",
                         "status": "pending",

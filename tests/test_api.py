@@ -369,7 +369,7 @@ def test_notifications_capture_drone_status_transition_and_sync_trigger(client):
     sync = client.post(
         "/api/devices/target-drone/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
     )
     assert sync.status_code == 200
     notifications = client.get("/api/notifications", headers={"Authorization": f"Bearer {token}"}).json()["notifications"]
@@ -3296,7 +3296,7 @@ def test_sync_rom_action_payload_includes_only_source_devices_with_rom(client):
     response = client.post(
         "/api/devices/target-c/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc", "file_size": 8},
     )
     assert response.status_code == 200
 
@@ -3331,7 +3331,7 @@ def test_sync_rom_does_not_queue_associated_artwork_by_default(client):
     response = client.post(
         "/api/devices/target-without-assets/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc"},
     )
 
     assert response.status_code == 200
@@ -3363,7 +3363,7 @@ def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):
     response = client.post(
         "/api/devices/blocked-target/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc"},
     )
 
     assert response.status_code == 400
@@ -3386,7 +3386,7 @@ def test_sync_folder_rom_payload_matches_by_path_without_fingerprint(client):
     response = client.post(
         "/api/devices/target-folder/sync-rom",
         headers={"Authorization": f"Bearer {token}"},
-        json={"system_name": "ps3", "file_path": "Game.ps3", "entry_type": "folder", "file_size": 10},
+        json={"system_name": "ps3", "gamelist_id": "Game.ps3", "entry_type": "folder", "file_size": 10},
     )
     assert response.status_code == 200
 
@@ -4249,10 +4249,10 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     assert claim_b.status_code == 200
     claim_a_actions = claim_a.json()["actions"]
     assert [action["action"] for action in claim_a_actions] == ["sync_system"]
-    assert claim_a_actions[0]["payload"]["roms"][0]["file_path"] == "B.zip"
+    assert claim_a_actions[0]["payload"]["roms"][0]["gamelist_id"] == "B.zip"
     assert claim_a_actions[0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-b", "device_name": "Drone B"}]
     assert claim_a_actions[0]["payload"]["roms"][0]["sync_id"]
-    assert claim_b.json()["actions"][0]["payload"]["roms"][0]["file_path"] == "A.zip"
+    assert claim_b.json()["actions"][0]["payload"]["roms"][0]["gamelist_id"] == "A.zip"
     assert claim_b.json()["actions"][0]["payload"]["roms"][0]["devices"] == [{"device_id": "drone-a", "device_name": "Drone A"}]
     activity_a = client.get("/api/devices/drone-a/sync-activity", headers={"Authorization": f"Bearer {token}"}).json()["activity"]
     target_activity = next(row for row in activity_a if row["target_drone_id"] == "drone-a")

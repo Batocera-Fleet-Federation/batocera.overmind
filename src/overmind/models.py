@@ -671,6 +671,7 @@ class DeviceActionRequest(ExtensibleContractModel):
 class SyncRomRequest(ExtensibleContractModel):
     system_name: Optional[str] = None
     system: Optional[str] = None
+    gamelist_id: Optional[str] = None
     rom_name: Optional[str] = None
     file_path: Optional[str] = None
     file_size: Optional[int] = None
@@ -985,6 +986,7 @@ class TransferAssetRef(ExtensibleContractModel):
     kind: str  # "rom" | "bios" | "save" | "artwork"
     relative_path: str
     system: Optional[str] = None
+    gamelist_id: Optional[str] = None
     expected_size: Optional[int] = None
     expected_hash: Optional[str] = None
 

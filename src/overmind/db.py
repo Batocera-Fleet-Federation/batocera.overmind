@@ -3184,8 +3184,8 @@ class OvermindDatabase:
         fingerprint = str(rom.get("rom_fingerprint") or "").strip().lower()
         if fingerprint:
             return ("fingerprint", fingerprint)
-        path = str(rom.get("file_path") or rom.get("rom_name") or "").replace("\\", "/").strip().lstrip("./").lower()
-        return (system, path)
+        gid = str(rom.get("gamelist_id") or rom.get("gamelist_game_id") or rom.get("file_path") or rom.get("rom_name") or "").strip().lower()
+        return (system, gid)
 
     def _clean_bios_rows(self, device_id: str, bios_entries: list) -> list:
         cleaned = []
@@ -3548,6 +3548,7 @@ class OvermindDatabase:
                     continue
                 row = master.setdefault(key, {
                     "system_name": rom.get("system_name"),
+                    "gamelist_id": rom.get("gamelist_id") or rom.get("gamelist_game_id"),
                     "rom_name": rom.get("rom_name") or rom.get("file_path"),
                     "file_path": rom.get("file_path") or rom.get("rom_name"),
                     "rom_fingerprint": rom.get("rom_fingerprint"),
@@ -3581,6 +3582,7 @@ class OvermindDatabase:
                     continue
                 row = master.setdefault(key, {
                     "system_name": rom.get("system_name"),
+                    "gamelist_id": rom.get("gamelist_id") or rom.get("gamelist_game_id"),
                     "rom_name": rom.get("rom_name") or rom.get("file_path"),
                     "file_path": rom.get("file_path") or rom.get("rom_name"),
                     "filenames": [],
