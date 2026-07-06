@@ -3003,14 +3003,17 @@ def test_device_systems_ui_loads_roms_by_page():
     assert "romParams.set('per_page', String(pageSize));" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`)" in js
     loader_start = js.index("async function loadSystemRomPage(systemName, options = {})")
-    loader_end = js.index("function normalizeRomAssetKey", loader_start)
+    loader_end = js.index("function renderRomDetailValue", loader_start)
     loader_source = js[loader_start:loader_end]
     assert "master-artwork" not in loader_source
     systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-bios-panel"')]
     assert "Rebuild Asset Metadata" not in systems_panel
-    assert "const artworkRows = artworkRowsForRom(row, artworkLookup, row.system_name || system || '')" in js
+    # Artwork is no longer stored in Overmind, so the ROM detail row/panel dropped
+    # the per-ROM artwork chip rendering entirely (gamelist-source refactor).
+    assert "artworkRowsForRom" not in js
+    assert "renderRomArtworkDetails" not in js
     assert "toggleMasterRomDetail" in js
-    assert "renderRomDetailPanel(row, artworkRows, sizeText, sources || preferred, statusLabel)" in js
+    assert "renderRomDetailPanel(row, sizeText, sources || preferred, statusLabel)" in js
     assert "document.querySelectorAll('.rom-master-detail-row').forEach" in js
 
 
@@ -4852,23 +4855,19 @@ def test_selected_drone_config_view_reads_relational_store(client, monkeypatch):
 
 def test_selected_drone_empty_metadata_states_explain_waiting_for_drone():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
-    css = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/css/overmind.css").read_text(encoding="utf-8")
     assert "Waiting for Drone to upload" in js
-    assert "Waiting for Drone to upload artwork metadata" in js
     assert js.count("renderDroneMetadataWaitingState('System & Roms metadata')") >= 2
     assert "renderDroneMetadataWaitingState('BIOS metadata')" in js
-    assert "renderDroneMetadataWaitingState('artwork metadata')" in js
     assert "Request System & Rom Data" not in js
     assert "queueDeviceAction(\\'rebuild_asset_metadata\\')" not in js
     assert "Auto-sync ROM metadata from this Drone" not in js
-    assert "overmindConfigVersion" in js
-    assert "downloadSelectedOvermindConfigVersion" in js
-    assert "overmindConfigFilter" in js
-    assert "filterOvermindConfigs" in js
-    assert "config-source-scroll" in js
-    assert ".config-source-scroll" in css
-    assert "max-height: 520px" in css
-    assert "update automatically every 30 seconds" in js
+    # Artwork/emulator-config metadata is no longer stored or shown by Overmind
+    # (gamelist-source refactor); their waiting-state + config viewer are gone.
+    assert "renderDroneMetadataWaitingState('artwork metadata')" not in js
+    assert "overmindConfigVersion" not in js
+    assert "downloadSelectedOvermindConfigVersion" not in js
+    assert "overmindConfigFilter" not in js
+    assert "filterOvermindConfigs" not in js
     assert "Collect Configs" not in js
 
 
@@ -5165,22 +5164,18 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "if (currentDeviceView === 'configs') loadDeviceConfigs({showLoader: false});" not in js
 
 
-def test_selected_drone_logs_auto_refresh_updates_existing_view_in_place():
+def test_combined_logs_viewer_removed_with_logs_tab():
+    # The whole per-device Logs tab (emulator log/gameplay combined viewer) was
+    # removed in the gamelist-source refactor; gameplay lives on the swarm overview.
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
 
-    assert "function renderCombinedLogsShell()" in js
-    assert "const shellExists = Boolean(document.getElementById('overmindLogContent'));" in js
-    assert "if (!shellExists) {" in js
-    assert "selectOvermindLogSource(selectedIndex, shellExists);" in js
-    assert "[10, 20, 50, 100]" in js
-    assert "log_limit=${encodeURIComponent(logLimit)}" in js
-    assert "if (content.textContent !== nextContent) {" in js
-    assert "newestLogLinesFirst(source.content, getOvermindLogLineLimit())" in js
-    assert "async function loadGameLogs(options = {})" in js
-    assert "apiGet(`/api/devices/${deviceId}/gamelogs`, { showLoader: options.showLoader !== false })" in js
-    assert "file.content || file.path" not in js
-    assert "No log output reported yet." in js
-    assert "join('\\\\n\\\\n')" not in js
+    assert "function renderCombinedLogsShell()" not in js
+    assert "function displayCombinedLogs(" not in js
+    assert "function selectOvermindLogSource(" not in js
+    assert "async function loadGameLogs(" not in js
+    assert "function buildCombinedLogSources(" not in js
+    # formatGameplayDuration survives — reused by the swarm-overview Play History table.
+    assert "function formatGameplayDuration(seconds)" in js
 
 
 def test_background_device_refresh_updates_ui_without_rebuilding_current_view():
@@ -5203,7 +5198,7 @@ def test_navigation_renders_once_through_hash_route():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
 
     select_start = js.index("function selectDevice(deviceId)")
-    select_source = js[select_start:js.index("async function loadGameLogs", select_start)]
+    select_source = js[select_start:js.index("function formatGameplayDuration", select_start)]
     assert "setRoute('devices', deviceId, 'overview');" in select_source
     assert "updateSelectedDeviceWorkspace();" not in select_source
     assert "switchDeviceView('systems'" not in select_source
@@ -5260,9 +5255,10 @@ def test_metadata_panels_submit_searches_explicitly_and_show_loading_toast():
     assert 'onclick="submitDeviceRomSearch()"' in html
     assert 'oninput="handleDeviceRomSearch(event)"' not in html
     assert "function submitBiosSearch()" in js
-    assert "function submitArtworkSearch()" in js
     assert 'oninput="handleBiosSearch(event)"' not in js
-    assert 'oninput="handleArtworkSearch(event)"' not in js
+    # The artwork search panel was removed with the gamelist-source refactor
+    # (Overmind no longer stores artwork inventory to search).
+    assert "function submitArtworkSearch" not in js
 
 
 def test_swarm_drone_tile_shows_batocera_version_instead_of_drone_id_label():
