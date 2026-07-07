@@ -120,6 +120,7 @@
             let currentDeviceSystems = {};
             let currentDeviceSystemsPage = { total: 0, page: 1, per_page: 100 };
             let currentSystemRomPages = {};
+            let systemRomRequestSeq = {};
             let currentBiosFilePage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
             let currentBiosSummary = { total: 0, loading: false, error: false };
             let selectedSystemName = null;
@@ -2523,6 +2524,13 @@
 
             function selectSystem(systemName) {
                 if (!systemName) return;
+                if (selectedSystemName === systemName) {
+                    selectedSystemName = null;
+                    selectedFileCategory = null;
+                    updateRouteQuery({ syn: null, fc: null });
+                    displaySystemsTree();
+                    return;
+                }
                 selectedSystemName = systemName;
                 selectedFileCategory = 'games';
                 currentSystemRomPages[systemName] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
@@ -2532,6 +2540,13 @@
             }
 
             function selectBiosRoot() {
+                if (selectedSystemName === BIOS_TREE_ROOT) {
+                    selectedSystemName = null;
+                    selectedFileCategory = null;
+                    updateRouteQuery({ syn: null, fc: null });
+                    displaySystemsTree();
+                    return;
+                }
                 selectedSystemName = BIOS_TREE_ROOT;
                 selectedFileCategory = 'bios';
                 currentBiosFilePage = { bios: [], total: currentBiosSummary.total || 0, nextOffset: 0, loading: true, error: false };
@@ -2542,10 +2557,22 @@
 
             function selectFileCategory(rootName, category) {
                 if (rootName === BIOS_TREE_ROOT || category === 'bios') {
-                    selectBiosRoot();
+                    if (selectedSystemName !== BIOS_TREE_ROOT) {
+                        selectBiosRoot();
+                        return;
+                    }
+                    selectedFileCategory = 'bios';
+                    updateRouteQuery({ syn: BIOS_TREE_ROOT, fc: selectedFileCategory });
+                    displaySystemsTree();
                     return;
                 }
-                selectSystem(rootName);
+                if (selectedSystemName !== rootName) {
+                    selectSystem(rootName);
+                    return;
+                }
+                selectedFileCategory = 'games';
+                updateRouteQuery({ syn: rootName, fc: selectedFileCategory });
+                displaySystemsTree();
             }
 
             function loadMoreSystemRoms(systemName = selectedSystemName) {
@@ -2658,6 +2685,7 @@
                     : systemRomState(systemName);
                 if (!reset && state.loading) return;
                 const requestDeviceId = selectedDeviceId;
+                const requestGen = (systemRomRequestSeq[systemName] = (systemRomRequestSeq[systemName] || 0) + 1);
                 const existingRows = reset ? [] : (state.roms || []);
                 const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
                 const pageSize = TREE_FILE_LOAD_SIZE;
@@ -2676,7 +2704,7 @@
                     const romResponse = await apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`);
                     if (!romResponse.ok) throw new Error('Failed to load system ROMs');
                     const payload = await romResponse.json();
-                    if (selectedDeviceId !== requestDeviceId || selectedSystemName !== systemName) return;
+                    if (selectedDeviceId !== requestDeviceId || systemRomRequestSeq[systemName] !== requestGen) return;
                     const rows = payload.roms || [];
                     const loadedRows = reset ? rows : [...(currentSystemRomPages[systemName]?.roms || []), ...rows];
                     const summary = currentDeviceSystems[systemName] || {};
@@ -2690,6 +2718,7 @@
                     };
                 } catch (error) {
                     console.error('Error loading system ROMs:', error);
+                    if (systemRomRequestSeq[systemName] !== requestGen) return;
                     const summary = currentDeviceSystems[systemName] || {};
                     currentSystemRomPages[systemName] = {
                         ...state,
@@ -2700,7 +2729,7 @@
                         error: true,
                     };
                 }
-                renderSystemRomPage(systemName);
+                if (selectedSystemName === systemName) renderSystemRomPage(systemName);
             }
 
             function renderRomDetailValue(label, value) {
@@ -2861,14 +2890,15 @@
                         <div class="tree-leaf-list">
                             ${roms.map(rom => {
                                 const path = rom.file_path || rom.relative_path || rom.rom_name || '';
+                                const label = rom.rom_name || path;
+                                const tooltip = rom.rom_fingerprint ? `${path} · fingerprint: ${rom.rom_fingerprint}` : path;
                                 const size = rom.file_size ? formatBytes(rom.file_size) : 'n/a';
                                 return `
                                     <div class="tree-grid-row tree-leaf-row">
                                         <div class="tree-grid-main">
                                             <i class="bi bi-file-earmark-binary tree-grid-icon"></i>
-                                            <div class="tree-grid-label">
-                                                <div class="fw-semibold">${escapeHtml(rom.rom_name || path)}</div>
-                                                <div class="text-muted small">${escapeHtml(path)}${rom.rom_fingerprint ? ` <span class="mono">fingerprint: ${escapeHtml(rom.rom_fingerprint)}</span>` : ''}</div>
+                                            <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltip)}">
+                                                <span class="fw-semibold">${escapeHtml(label)}</span>
                                             </div>
                                         </div>
                                         <div class="tree-grid-meta">${escapeHtml(size)}</div>
@@ -2878,7 +2908,7 @@
                         </div>
                         <div class="tree-grid-more">
                             <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : 'No games reported'}</span>
-                            <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? 'disabled' : ''} onclick="loadMoreSystemRoms(${JSON.stringify(systemName)})">
+                            <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? 'disabled' : ''} onclick="loadMoreSystemRoms(${jsAttr(systemName)})">
                                 ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
                                 Show more
                             </button>
@@ -2907,13 +2937,14 @@
                                 const sizeText = row.file_size ? formatBytes(row.file_size) : 'n/a';
                                 const showSync = !present && row.devices && row.devices.length;
                                 const rowPayload = encodeURIComponent(JSON.stringify(Object.assign({}, row)));
+                                const tooltipParts = [row.bios_md5 ? `md5: ${row.bios_md5}` : 'no MD5 reported'];
+                                if (sources) tooltipParts.push(sources);
                                 return `
                                     <div class="tree-grid-row tree-leaf-row">
                                         <div class="tree-grid-main">
                                             <i class="bi bi-cpu tree-grid-icon"></i>
-                                            <div class="tree-grid-label">
-                                                <div class="fw-semibold">${escapeHtml(path)}</div>
-                                                <div class="text-muted small">${row.bios_md5 ? `<span class="mono">${escapeHtml(row.bios_md5)}</span>` : 'No MD5 reported'}${sources ? ` · ${escapeHtml(sources)}` : ''}</div>
+                                            <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltipParts.join(' · '))}">
+                                                <span class="fw-semibold">${escapeHtml(path)}</span>
                                             </div>
                                         </div>
                                         <div class="tree-grid-meta">${escapeHtml(sizeText)}</div>
@@ -2962,30 +2993,24 @@
                     <div class="tree-grid">
                         ${entries.map(([systemName, summary]) => {
                             const count = Number(summary.rom_count || 0);
-                            const games = Number(summary.game_count ?? count);
                             const active = selectedSystemName === systemName;
                             return `
                                 <div class="tree-root ${active ? 'is-expanded' : ''}">
                                     <button type="button" class="tree-grid-row tree-root-row ${active ? 'is-active' : ''}"
-                                    onclick="selectSystem(${JSON.stringify(systemName)})">
+                                    onclick="selectSystem(${jsAttr(systemName)})">
                                         <div class="tree-grid-main">
                                             <i class="bi ${active ? 'bi-chevron-down' : 'bi-chevron-right'} tree-grid-caret"></i>
                                             <i class="bi bi-folder2${active ? '-open' : ''} tree-grid-icon"></i>
-                                            <div class="tree-grid-label">
-                                                <div class="fw-semibold">${escapeHtml(systemName)}</div>
-                                                <div class="small text-muted">${games.toLocaleString()} games · ${count.toLocaleString()} ROM files</div>
-                                            </div>
+                                            <div class="tree-grid-label"><span class="fw-semibold">${escapeHtml(systemName)}</span></div>
                                         </div>
+                                        <div class="tree-grid-meta">${count.toLocaleString()} files</div>
                                     </button>
                                     ${active ? `
                                         <div class="tree-branch">
-                                            <button type="button" class="tree-grid-row tree-category-row ${selectedFileCategory === 'games' ? 'is-active' : ''}" onclick="selectFileCategory(${JSON.stringify(systemName)}, 'games')">
+                                            <button type="button" class="tree-grid-row tree-category-row ${selectedFileCategory === 'games' ? 'is-active' : ''}" onclick="selectFileCategory(${jsAttr(systemName)}, 'games')">
                                                 <div class="tree-grid-main">
                                                     <i class="bi bi-controller tree-grid-icon"></i>
-                                                    <div class="tree-grid-label">
-                                                        <div class="fw-semibold">Games</div>
-                                                        <div class="small text-muted">Loads 10 files at a time</div>
-                                                    </div>
+                                                    <div class="tree-grid-label"><span class="fw-semibold">Games</span></div>
                                                 </div>
                                                 <div class="tree-grid-meta">${count.toLocaleString()} files</div>
                                             </button>
@@ -3001,21 +3026,16 @@
                                     <div class="tree-grid-main">
                                         <i class="bi ${selectedSystemName === BIOS_TREE_ROOT ? 'bi-chevron-down' : 'bi-chevron-right'} tree-grid-caret"></i>
                                         <i class="bi bi-folder2${selectedSystemName === BIOS_TREE_ROOT ? '-open' : ''} tree-grid-icon"></i>
-                                        <div class="tree-grid-label">
-                                            <div class="fw-semibold">BIOS</div>
-                                            <div class="small text-muted">${biosTotal.toLocaleString()} files across the swarm</div>
-                                        </div>
+                                        <div class="tree-grid-label"><span class="fw-semibold">BIOS</span></div>
                                     </div>
+                                    <div class="tree-grid-meta">${biosTotal.toLocaleString()} files</div>
                                 </button>
                                 ${selectedSystemName === BIOS_TREE_ROOT ? `
                                     <div class="tree-branch">
-                                        <button type="button" class="tree-grid-row tree-category-row ${selectedFileCategory === 'bios' ? 'is-active' : ''}" onclick="selectFileCategory(${JSON.stringify(BIOS_TREE_ROOT)}, 'bios')">
+                                        <button type="button" class="tree-grid-row tree-category-row ${selectedFileCategory === 'bios' ? 'is-active' : ''}" onclick="selectFileCategory(${jsAttr(BIOS_TREE_ROOT)}, 'bios')">
                                             <div class="tree-grid-main">
                                                 <i class="bi bi-cpu tree-grid-icon"></i>
-                                                <div class="tree-grid-label">
-                                                    <div class="fw-semibold">BIOS files</div>
-                                                    <div class="small text-muted">Loads 10 files at a time</div>
-                                                </div>
+                                                <div class="tree-grid-label"><span class="fw-semibold">BIOS files</span></div>
                                             </div>
                                             <div class="tree-grid-meta">${biosTotal.toLocaleString()} files</div>
                                         </button>
@@ -4063,11 +4083,15 @@
 
             function escapeHtml(value) {
                 return String(value ?? '')
-                    .replace(/&/g, '&')
-                    .replace(/</g, '<')
-                    .replace(/>/g, '>')
-                    .replace(/"/g, '"')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
                     .replace(/'/g, '&#39;');
+            }
+
+            function jsAttr(value) {
+                return escapeHtml(JSON.stringify(value));
             }
 
             function formatAdminDate(value) {

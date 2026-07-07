@@ -913,6 +913,7 @@
                 border-radius: 8px;
                 overflow: hidden;
                 background: rgba(15, 23, 42, 0.22);
+                font-size: 0.9rem;
             }
 
             .tree-root + .tree-root {
@@ -921,36 +922,35 @@
 
             .tree-grid-row {
                 align-items: center;
-                background: transparent;
+                background: transparent !important;
                 border: 0;
-                color: var(--admin-text);
+                color: var(--admin-text) !important;
                 display: grid;
-                gap: 0.75rem;
+                gap: 0.5rem;
                 grid-template-columns: minmax(0, 1fr) auto auto;
-                min-height: 3rem;
-                padding: 0.65rem 0.85rem;
+                min-height: 2.1rem;
+                padding: 0.3rem 0.75rem;
                 text-align: left;
                 width: 100%;
             }
 
             .tree-grid-row:hover,
             .tree-grid-row.is-active {
-                background: rgba(0, 194, 255, 0.08);
+                background: rgba(0, 194, 255, 0.08) !important;
             }
 
-            .tree-root-row {
-                min-height: 3.35rem;
+            .tree-category-row {
+                padding-left: 1.75rem;
             }
 
-            .tree-category-row,
             .tree-leaf-row {
-                padding-left: 2.35rem;
+                padding-left: 2.75rem;
             }
 
             .tree-grid-main {
                 align-items: center;
                 display: flex;
-                gap: 0.65rem;
+                gap: 0.45rem;
                 min-width: 0;
             }
 
@@ -958,16 +958,12 @@
                 min-width: 0;
             }
 
-            .tree-grid-label .fw-semibold,
-            .tree-grid-label .small {
-                overflow-wrap: anywhere;
-            }
-
             .tree-grid-caret,
             .tree-grid-icon {
                 color: var(--admin-muted);
                 flex: 0 0 auto;
-                width: 1rem;
+                font-size: 0.85rem;
+                width: 0.9rem;
             }
 
             .tree-branch {
@@ -990,15 +986,20 @@
 
             .tree-grid-meta {
                 color: var(--admin-muted);
-                font-size: 0.875rem;
+                font-size: 0.8rem;
                 white-space: nowrap;
             }
 
             .tree-grid-action {
                 align-items: center;
                 display: flex;
-                gap: 0.5rem;
+                gap: 0.3rem;
                 justify-content: flex-end;
+            }
+
+            .tree-grid-action .btn {
+                line-height: 1;
+                padding: 0.25rem 0.5rem;
             }
 
             .tree-grid-more {
@@ -1007,11 +1008,11 @@
                 display: flex;
                 gap: 0.75rem;
                 justify-content: space-between;
-                padding: 0.75rem 0.85rem 0.75rem 2.35rem;
+                padding: 0.5rem 0.75rem 0.5rem 2.75rem;
             }
 
             .tree-grid-empty {
-                padding: 0.85rem 0.85rem 0.85rem 2.35rem;
+                padding: 0.6rem 0.75rem 0.6rem 2.75rem;
             }
 
             .dashboard-layout {
