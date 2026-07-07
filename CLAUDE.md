@@ -127,5 +127,6 @@ Full flow + wire protocol: see the Drone repo's `app/transport/` and the
 
 ## Skills (`.claude/skills/`, auto-surfaced)
 
-`overmind-db-management`, `overmind-edge-networking`, `bff-ui-theme-functionality`.
-Consult the matching skill before non-trivial work in that area.
+`overmind-db-management`, `overmind-edge-networking`, `overmind-architecture`,
+`overmind-aws-deployment`, `bff-ui-theme-functionality`. Consult the matching
+skill before non-trivial work in that area.
