@@ -3152,6 +3152,7 @@ class OvermindDatabase:
             file_path = str(item.get("file_path") or item.get("relative_path") or item.get("path") or item.get("name") or "").strip()
             if not file_path:
                 continue
+            systems = item.get("systems")
             cleaned.append({
                 "id": str(uuid.uuid4()),
                 "device_id": device_id,
@@ -3164,6 +3165,7 @@ class OvermindDatabase:
                 "byte_count": item.get("byte_count") or item.get("file_size") or item.get("size"),
                 "unique_id": item.get("unique_id"),
                 "modified_time": item.get("modified_time") or item.get("mtime"),
+                "systems": [str(value) for value in systems if str(value or "").strip()] if isinstance(systems, list) else [],
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             })
@@ -3529,6 +3531,7 @@ class OvermindDatabase:
         system_name: Optional[str] = None,
         status: Optional[str] = None,
         artwork_type: Optional[str] = None,
+        bios_unassigned: bool = False,
         page: int = 1,
         per_page: int = 100,
     ) -> Optional[dict]:
@@ -3547,6 +3550,7 @@ class OvermindDatabase:
                 system_name=system_name,
                 status=status,
                 artwork_type=artwork_type,
+                bios_unassigned=bios_unassigned,
                 page=page,
                 per_page=per_page,
             )

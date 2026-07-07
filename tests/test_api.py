@@ -2999,10 +2999,15 @@ def test_device_systems_ui_uses_lazy_file_tree():
     assert "renderDroneNetworkPanel();\n                    renderDroneTokenPanel();\n                    renderDroneSpeedPanel();" in js
     assert "const TREE_FILE_LOAD_SIZE = 10;" in js
     assert "const BIOS_TREE_ROOT = '__bios__';" in js
-    assert "function selectSystem(systemName)" in js
+    assert "function selectSystem(systemName, category = 'games')" in js
     assert "function selectBiosRoot()" in js
     assert "function loadMoreSystemRoms(systemName = selectedSystemName)" in js
     assert "function loadMoreBiosFiles()" in js
+    # Each system's branch also gets its own BIOS category (filtered to that system's
+    # known BIOS files), alongside the top-level Shared/Unassigned BIOS bucket.
+    assert "async function loadSystemBiosFilePage(systemName, options = {})" in js
+    assert "function renderSystemBiosFilePage(systemName)" in js
+    assert "function loadMoreSystemBiosFiles(systemName = selectedSystemName)" in js
     assert "const pageSize = TREE_FILE_LOAD_SIZE;" in js
     assert "romParams.set('offset', String(offset));" in js
     assert "romParams.set('per_page', String(pageSize));" in js

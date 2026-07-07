@@ -123,6 +123,10 @@
             let systemRomRequestSeq = {};
             let currentBiosFilePage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
             let currentBiosSummary = { total: 0, loading: false, error: false };
+            // Per-system BIOS pagination (the "BIOS" category under each system, filtered to
+            // that system's known BIOS files) -- distinct from currentBiosFilePage, which
+            // backs the top-level "Shared / Unassigned BIOS" root.
+            let currentSystemBiosPages = {};
             let selectedSystemName = null;
             let selectedFileCategory = null;
             let deviceRomSearchQuery = '';
@@ -2408,6 +2412,7 @@
                 currentDeviceSystems = {};
                 currentDeviceSystemsPage = { total: 0, page: 1, per_page: SYSTEMS_FETCH_PAGE_SIZE };
                 currentSystemRomPages = {};
+                currentSystemBiosPages = {};
                 currentBiosFilePage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
                 currentBiosSummary = { total: 0, loading: false, error: false };
                 selectedSystemName = null;
@@ -2453,6 +2458,7 @@
                     } while (page < 100);
                     await loadBiosSummary();
                     currentSystemRomPages = {};
+                    currentSystemBiosPages = {};
                     currentBiosFilePage = { bios: [], total: currentBiosSummary.total || 0, nextOffset: 0, loading: false, error: false };
                     deviceSystemsPage = 1;
                     currentDeviceSystemsPage = {
@@ -2478,6 +2484,8 @@
                     displaySystemsTree();
                     if (selectedSystemName === BIOS_TREE_ROOT) {
                         await loadBiosFilePage({ reset: true });
+                    } else if (selectedSystemName && currentDeviceSystems[selectedSystemName] && selectedFileCategory === 'bios') {
+                        await loadSystemBiosFilePage(selectedSystemName, { reset: true });
                     } else if (selectedSystemName && currentDeviceSystems[selectedSystemName]) {
                         await loadSystemRomPage(selectedSystemName, { reset: true });
                     }
@@ -2495,6 +2503,7 @@
                 selectedSystemName = null;
                 selectedFileCategory = null;
                 currentSystemRomPages = {};
+                currentSystemBiosPages = {};
                 currentBiosFilePage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
                 updateRouteQuery({ rq: deviceRomSearchQuery, dsp: null, syn: null, fc: null });
                 loadDeviceSystems();
@@ -2522,7 +2531,7 @@
                 return currentSystemRomPages[key];
             }
 
-            function selectSystem(systemName) {
+            function selectSystem(systemName, category = 'games') {
                 if (!systemName) return;
                 if (selectedSystemName === systemName) {
                     selectedSystemName = null;
@@ -2532,11 +2541,15 @@
                     return;
                 }
                 selectedSystemName = systemName;
-                selectedFileCategory = 'games';
-                currentSystemRomPages[systemName] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
+                selectedFileCategory = category;
                 updateRouteQuery({ syn: systemName, fc: selectedFileCategory });
                 displaySystemsTree();
-                loadSystemRomPage(systemName, { reset: true });
+                if (category === 'bios') {
+                    loadSystemBiosFilePage(systemName, { reset: true });
+                } else {
+                    currentSystemRomPages[systemName] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
+                    loadSystemRomPage(systemName, { reset: true });
+                }
             }
 
             function selectBiosRoot() {
@@ -2556,7 +2569,7 @@
             }
 
             function selectFileCategory(rootName, category) {
-                if (rootName === BIOS_TREE_ROOT || category === 'bios') {
+                if (rootName === BIOS_TREE_ROOT) {
                     if (selectedSystemName !== BIOS_TREE_ROOT) {
                         selectBiosRoot();
                         return;
@@ -2567,12 +2580,21 @@
                     return;
                 }
                 if (selectedSystemName !== rootName) {
-                    selectSystem(rootName);
+                    selectSystem(rootName, category);
                     return;
                 }
-                selectedFileCategory = 'games';
+                if (selectedFileCategory === category) {
+                    return;
+                }
+                selectedFileCategory = category;
                 updateRouteQuery({ syn: rootName, fc: selectedFileCategory });
                 displaySystemsTree();
+                if (category === 'bios' && !Object.prototype.hasOwnProperty.call(currentSystemBiosPages, rootName)) {
+                    loadSystemBiosFilePage(rootName, { reset: true });
+                } else if (category === 'games' && !Object.prototype.hasOwnProperty.call(currentSystemRomPages, rootName)) {
+                    currentSystemRomPages[rootName] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
+                    loadSystemRomPage(rootName, { reset: true });
+                }
             }
 
             function loadMoreSystemRoms(systemName = selectedSystemName) {
@@ -2582,6 +2604,11 @@
 
             function loadMoreBiosFiles() {
                 loadBiosFilePage({ reset: false });
+            }
+
+            function loadMoreSystemBiosFiles(systemName = selectedSystemName) {
+                if (!systemName || systemName === BIOS_TREE_ROOT) return;
+                loadSystemBiosFilePage(systemName, { reset: false });
             }
 
             function handleDeviceRomFilterChange() {
@@ -2806,6 +2833,7 @@
                     if (q) params.set('q', q);
                     params.set('page', '1');
                     params.set('per_page', '1');
+                    params.set('unassigned', 'true');
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
                     if (!response.ok) throw new Error('Failed to load BIOS summary');
                     const payload = await response.json();
@@ -2840,6 +2868,7 @@
                     if (q) params.set('q', q);
                     params.set('page', String(page));
                     params.set('per_page', String(TREE_FILE_LOAD_SIZE));
+                    params.set('unassigned', 'true');
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
                     if (!response.ok) throw new Error('Failed to load BIOS files');
                     const payload = await response.json();
@@ -2966,6 +2995,111 @@
                     `;
             }
 
+            async function loadSystemBiosFilePage(systemName, options = {}) {
+                if (!selectedDeviceId || !systemName) return;
+                const reset = options.reset === true;
+                const state = reset
+                    ? { bios: [], total: 0, nextOffset: 0, loading: false, error: false }
+                    : (currentSystemBiosPages[systemName] || { bios: [], total: 0, nextOffset: 0, loading: false, error: false });
+                if (!reset && state.loading) return;
+                const requestDeviceId = selectedDeviceId;
+                const existingRows = reset ? [] : (state.bios || []);
+                const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
+                const page = Math.floor(offset / TREE_FILE_LOAD_SIZE) + 1;
+                currentSystemBiosPages[systemName] = { ...state, bios: existingRows, loading: true, error: false };
+                renderSystemBiosFilePage(systemName);
+                try {
+                    const params = new URLSearchParams();
+                    const q = (deviceRomSearchQuery || '').trim();
+                    if (q) params.set('q', q);
+                    params.set('page', String(page));
+                    params.set('per_page', String(TREE_FILE_LOAD_SIZE));
+                    params.set('system_name', systemName);
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
+                    if (!response.ok) throw new Error('Failed to load BIOS files');
+                    const payload = await response.json();
+                    if (selectedDeviceId !== requestDeviceId || selectedSystemName !== systemName || selectedFileCategory !== 'bios') {
+                        if (currentSystemBiosPages[systemName]) currentSystemBiosPages[systemName] = { ...currentSystemBiosPages[systemName], loading: false };
+                        return;
+                    }
+                    const rows = payload.bios || [];
+                    const loadedRows = reset ? rows : [...(currentSystemBiosPages[systemName]?.bios || []), ...rows];
+                    currentSystemBiosPages[systemName] = {
+                        bios: loadedRows,
+                        total: Number(payload.total ?? loadedRows.length),
+                        nextOffset: offset + rows.length,
+                        per_page: Number(payload.per_page || TREE_FILE_LOAD_SIZE),
+                        loading: false,
+                        error: false,
+                    };
+                } catch (error) {
+                    console.error('Error loading system BIOS files:', error);
+                    currentSystemBiosPages[systemName] = {
+                        ...state,
+                        bios: existingRows,
+                        total: Number(state.total || 0),
+                        nextOffset: offset,
+                        loading: false,
+                        error: true,
+                    };
+                }
+                renderSystemBiosFilePage(systemName);
+            }
+
+            function renderSystemBiosFilePage(systemName) {
+                const target = document.getElementById(`tree-system-bios-files-${cssSafeId(systemName)}`);
+                if (!target) return;
+                const payload = currentSystemBiosPages[systemName];
+                if (!payload) {
+                    target.innerHTML = '<div class="small text-muted tree-grid-empty">Select BIOS to load files.</div>';
+                    return;
+                }
+                const rows = payload.bios || [];
+                const total = Number(payload.total || rows.length);
+                const loaded = rows.length;
+                const hasMore = loaded < total;
+                const firstLoad = payload.loading && !loaded;
+                target.innerHTML = firstLoad
+                    ? '<div class="tree-grid-empty small text-muted">Loading first 10 BIOS files...</div>'
+                    : `
+                        ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load BIOS files.</div>' : ''}
+                        <div class="tree-leaf-list">
+                            ${rows.map(row => {
+                                const present = !!row.present_on_selected;
+                                const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
+                                const path = row.file_path || row.bios_name || row.relative_path || '';
+                                const sizeText = row.file_size ? formatBytes(row.file_size) : 'n/a';
+                                const showSync = !present && row.devices && row.devices.length;
+                                const rowPayload = encodeURIComponent(JSON.stringify(Object.assign({}, row)));
+                                const tooltipParts = [row.bios_md5 ? `md5: ${row.bios_md5}` : 'no MD5 reported'];
+                                if (sources) tooltipParts.push(sources);
+                                return `
+                                    <div class="tree-grid-row tree-leaf-row">
+                                        <div class="tree-grid-main">
+                                            <i class="bi bi-cpu tree-grid-icon"></i>
+                                            <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltipParts.join(' · '))}">
+                                                <span class="fw-semibold">${escapeHtml(path)}</span>
+                                            </div>
+                                        </div>
+                                        <div class="tree-grid-meta">${escapeHtml(sizeText)}</div>
+                                        <div class="tree-grid-action">
+                                            <span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${present ? 'Present' : (row.devices && row.devices.length ? 'Missing' : 'Unavailable')}</span>
+                                            ${showSync ? `<button class="btn btn-primary btn-sm" onclick="syncBiosEncoded('${rowPayload}')">Sync</button>` : ''}
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('') || '<div class="tree-grid-empty small text-muted">No BIOS files found for this system.</div>'}
+                        </div>
+                        <div class="tree-grid-more">
+                            <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : 'No BIOS files reported'}</span>
+                            <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? 'disabled' : ''} onclick="loadMoreSystemBiosFiles(${jsAttr(systemName)})">
+                                ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+                                Show more
+                            </button>
+                        </div>
+                    `;
+            }
+
             function cssSafeId(value) {
                 return btoa(unescape(encodeURIComponent(String(value)))).replace(/=+$/g, '').replace(/[^a-zA-Z0-9_-]/g, '_');
             }
@@ -3014,7 +3148,14 @@
                                                 </div>
                                                 <div class="tree-grid-meta">${count.toLocaleString()} files</div>
                                             </button>
-                                            <div id="tree-files-${cssSafeId(systemName)}" class="tree-files"></div>
+                                            ${selectedFileCategory === 'games' ? `<div id="tree-files-${cssSafeId(systemName)}" class="tree-files"></div>` : ''}
+                                            <button type="button" class="tree-grid-row tree-category-row ${selectedFileCategory === 'bios' ? 'is-active' : ''}" onclick="selectFileCategory(${jsAttr(systemName)}, 'bios')">
+                                                <div class="tree-grid-main">
+                                                    <i class="bi bi-cpu tree-grid-icon"></i>
+                                                    <div class="tree-grid-label"><span class="fw-semibold">BIOS</span></div>
+                                                </div>
+                                            </button>
+                                            ${selectedFileCategory === 'bios' ? `<div id="tree-system-bios-files-${cssSafeId(systemName)}" class="tree-files"></div>` : ''}
                                         </div>
                                     ` : ''}
                                 </div>
@@ -3026,7 +3167,7 @@
                                     <div class="tree-grid-main">
                                         <i class="bi ${selectedSystemName === BIOS_TREE_ROOT ? 'bi-chevron-down' : 'bi-chevron-right'} tree-grid-caret"></i>
                                         <i class="bi bi-folder2${selectedSystemName === BIOS_TREE_ROOT ? '-open' : ''} tree-grid-icon"></i>
-                                        <div class="tree-grid-label"><span class="fw-semibold">BIOS</span></div>
+                                        <div class="tree-grid-label"><span class="fw-semibold">Shared / Unassigned BIOS</span></div>
                                     </div>
                                     <div class="tree-grid-meta">${biosTotal.toLocaleString()} files</div>
                                 </button>
@@ -3048,6 +3189,8 @@
                 `;
                 if (selectedSystemName === BIOS_TREE_ROOT) {
                     renderBiosFilePage();
+                } else if (selectedSystemName && selectedFileCategory === 'bios') {
+                    renderSystemBiosFilePage(selectedSystemName);
                 } else if (selectedSystemName) {
                     renderSystemRomPage(selectedSystemName);
                 }

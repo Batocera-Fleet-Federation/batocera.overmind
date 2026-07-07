@@ -2760,6 +2760,8 @@ async def get_device_master_bios(
     device_id: str,
     q: Optional[str] = None,
     status: Optional[str] = None,
+    system_name: Optional[str] = None,
+    unassigned: bool = False,
     page: int = 1,
     per_page: int = 100,
     authorization: Optional[str] = Header(default=None),
@@ -2774,6 +2776,8 @@ async def get_device_master_bios(
         "bios",
         query=q,
         status=status,
+        system_name=system_name,
+        bios_unassigned=unassigned,
         page=page,
         per_page=per_page,
     )

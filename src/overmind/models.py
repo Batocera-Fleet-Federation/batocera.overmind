@@ -308,6 +308,10 @@ class DroneBiosAsset(ExtensibleContractModel):
     fingerprint: Optional[str] = None
     file_size: Optional[int] = None
     byte_count: Optional[int] = None
+    # system_name(s) this BIOS file is known to belong to, resolved by the Drone against
+    # its vendored reference table. Empty for the (common) case of an unrecognized BIOS;
+    # more than one entry for a BIOS legitimately shared across several systems.
+    systems: list[str] = Field(default_factory=list)
 
 
 class DroneArtworkAsset(ExtensibleContractModel):

@@ -5228,6 +5228,7 @@ class PostgresMetadataStore:
                         bios_md5 = EXCLUDED.bios_md5,
                         file_size = EXCLUDED.file_size,
                         last_seen = EXCLUDED.last_seen
+                    RETURNING id
                     """,
                     (
                         device_internal_id,
@@ -5239,6 +5240,15 @@ class PostgresMetadataStore:
                         self._dt(row.get("last_seen") or row.get("added_at")),
                     ),
                 )
+                bios_id = cur.fetchone()[0]
+                systems = row.get("systems")
+                system_names = sorted({str(value).strip() for value in systems if str(value or "").strip()}) if isinstance(systems, list) else []
+                cur.execute("DELETE FROM drone_bios_systems WHERE bios_id = %s", (bios_id,))
+                if system_names:
+                    cur.executemany(
+                        "INSERT INTO drone_bios_systems (bios_id, system_name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        [(bios_id, system_name) for system_name in system_names],
+                    )
         # saves and artwork are no longer stored in Overmind (removed in the
         # gamelist-source-of-truth refactor).
 
@@ -5382,6 +5392,7 @@ class PostgresMetadataStore:
         system_name: Optional[str] = None,
         status: Optional[str] = None,
         artwork_type: Optional[str] = None,
+        bios_unassigned: bool = False,
         page: int = 1,
         per_page: int = 100,
     ) -> tuple[list[dict], int]:
@@ -5395,7 +5406,7 @@ class PostgresMetadataStore:
             cache_key = _cache.master_assets_key(
                 ids, asset_type,
                 selected=selected_internal_id, q=query, sys=system_name,
-                st=status, art=artwork_type, pg=page, pp=per_page,
+                st=status, art=artwork_type, bios_unassigned=bios_unassigned, pg=page, pp=per_page,
             )
             cached = _cache.get(cache_key)
             if cached is not None:
@@ -5447,6 +5458,19 @@ class PostgresMetadataStore:
         if clean_system and master_cfg["has_system"]:
             where.append("lower(coalesce(system_name, '')) = %s")
             params.append(clean_system)
+        if asset_type == "bios":
+            if bios_unassigned:
+                # "Shared/unassigned" bucket: BIOS files with no known system (the common
+                # case) or legitimately shared by more than one -- anything that isn't an
+                # unambiguous single-system match.
+                where.append(
+                    "(SELECT count(*) FROM drone_bios_systems bs WHERE bs.bios_id = drone_bios.id) <> 1"
+                )
+            elif clean_system:
+                where.append(
+                    "EXISTS (SELECT 1 FROM drone_bios_systems bs WHERE bs.bios_id = drone_bios.id AND lower(bs.system_name) = %s)"
+                )
+                params.append(clean_system)
         where_sql = " AND ".join(where)
         selected_param = str(selected_internal_id) if selected_internal_id else None
         clean_status = str(status or "").strip().lower()
