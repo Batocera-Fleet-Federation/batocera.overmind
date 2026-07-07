@@ -192,3 +192,31 @@ def test_mirror_device_details_routes_boolean_metric_to_text():
     assert metric_params["throttled"][4] == "True"      # boolean stored as text
     assert metric_params["load"][3] == 1.5              # real number still numeric
     assert metric_params["load"][4] is None
+
+
+def test_heartbeat_persists_performance_metrics_and_pixen(monkeypatch):
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    monkeypatch.setattr(store, "_core_connection", lambda ensure_schema=False: _FakeConn(cursor))
+
+    ok = store.update_device_heartbeat_data(
+        "drone-1",
+        system_info={
+            "hostname": "cab",
+            "pixen_installed": True,
+            "performance": {"cpu": {"throttled": False, "load": 2.5}},
+        },
+    )
+
+    assert ok is True
+    system_params = next(params for sql, params in cursor.executed if "INSERT INTO drone_system_info" in sql)
+    assert system_params[-2] is True  # pixen_installed, before container
+    metric_params = {
+        params[2]: params
+        for sql, params in cursor.executed
+        if "INSERT INTO drone_performance_metrics" in sql
+    }
+    assert metric_params["throttled"][3] is None
+    assert metric_params["throttled"][4] == "False"
+    assert metric_params["load"][3] == 2.5
+    assert metric_params["load"][4] is None

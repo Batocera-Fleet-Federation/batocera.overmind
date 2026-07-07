@@ -2996,7 +2996,7 @@ def test_device_systems_ui_uses_lazy_file_tree():
     assert "params.set('per_page', String(SYSTEMS_FETCH_PAGE_SIZE));" in js
     assert "while (page < 100)" in js
     assert "if (currentDeviceView === 'systems') {\n                    loadDeviceSystems();\n                }" in js
-    assert "renderDroneNetworkPanel();\n                    renderDroneTokenPanel();\n                    renderDroneSpeedPanel();" in js
+    assert "renderDroneNetworkPanel();\n                renderDroneSpeedPanel();" in js
     assert "const TREE_FILE_LOAD_SIZE = 10;" in js
     assert "const BIOS_TREE_ROOT = '__bios__';" in js
     assert "function selectSystem(systemName, category = 'games')" in js
@@ -4923,6 +4923,23 @@ def test_idle_volume_automation_action_is_supported_and_validated(client):
     assert bad.status_code == 400
 
 
+def test_pixen_update_action_is_supported(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "run_pixen_update"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["action"]["action"] == "run_pixen_update"
+
+
 def test_heartbeat_stores_idle_volume_automation(client):
     client.post("/api/auth/register", json={"email": "hb-iva@example.com", "username": "hb-iva-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("hb-iva@example.com")
@@ -5057,6 +5074,8 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "queueDeviceAction('restart'" in js
     assert "rebuild_asset_metadata" in js
     assert "refresh_emulator_list" in js
+    assert "run_pixen_update" in js
+    assert "Run PixeN Update" in js
     assert "Rebuild Asset Metadata" in js
     systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-admin-panel"')]
     assert "Rebuild Asset Metadata" not in systems_panel
@@ -5237,7 +5256,7 @@ def test_drone_metadata_shows_resolvable_public_ip_state():
     assert "const publicIpStatus = device.peer_resolvable ? ' (peer-resolvable)' : '';" in js
     assert "Public IP: ${escapeHtml(publicIp)}${publicIpStatus}" in js
     overview_start = js.index("function renderDroneNetworkPanel()")
-    overview_end = js.index("function renderDroneTokenPanel()", overview_start)
+    overview_end = js.index("function renderDroneSpeedPanel()", overview_start)
     overview_source = js[overview_start:overview_end]
     assert "Performance Metrics" in overview_source
     assert "renderMetricsGrid(info.performance || {})" in overview_source
@@ -6036,6 +6055,7 @@ def test_relational_schema_declares_domain_tables():
         "drones",
         "drone_network_state",
         "drone_system_info",
+        "drone_performance_metrics",
         "drone_certificates",
         "drone_games",
         "drone_bios",
@@ -6074,6 +6094,7 @@ def test_relational_schema_declares_domain_tables():
     assert "romset_files_thumbprint TEXT" in migration_sql
     assert "screen_mode TEXT" in migration_sql
     assert "audio_volume INTEGER" in migration_sql
+    assert "pixen_installed BOOLEAN" in migration_sql
     assert "idle_volume_target INTEGER" in migration_sql
     assert "edge_online BOOLEAN" in migration_sql
     assert "batocera_version TEXT" in migration_sql
@@ -6174,6 +6195,7 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
                         None, None, None, None, None, None, None,
                     None, None, None, None, "kid", 65, None,
                     None, None, None,
+                    True, {"cpu": {"host_percent": 12.5}},
                 )]
             if "FROM device_admin_claims" in self.sql:
                 return []
@@ -6190,6 +6212,8 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
     action = state["device_actions"]["d1"][0]
     assert state["devices"]["d1"]["system_info"]["screen_mode"] == "kid"
     assert state["devices"]["d1"]["system_info"]["audio_volume"] == 65
+    assert state["devices"]["d1"]["system_info"]["pixen_installed"] is True
+    assert state["devices"]["d1"]["system_info"]["performance"]["cpu"]["host_percent"] == 12.5
     assert action["device_id"] == "drone-a"
     assert action["action"] == "restart"
     assert action["status"] == "pending"
@@ -6236,6 +6260,7 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                         None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None,
                     None, None, None,
+                    False, {"memory": {"used_percent": 44.0}},
                 )]
             if "FROM gameplay_sessions" in self.sql:
                 return [("game-1", "d1", "snes", "Game", "Game.zip", "abc", received_at, 60, received_at)]
@@ -6256,6 +6281,7 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
     state = PostgresMetadataStore()._load_relational_state(RecordingCursor())
 
     assert state["gamelogs"]["d1"][0]["game_name"] == "Game"
+    assert state["devices"]["d1"]["system_info"]["performance"]["memory"]["used_percent"] == 44.0
     assert state["speed_samples"]["d1"][0]["download_mbps"] == 10.25
     assert state["device_events"]["d1"][0]["metadata"] == {"job_id": "job-1"}
     notification = state["notifications"]["s1"][0]
@@ -6302,6 +6328,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         None, None, None, None, None, None, None,
                         None, None, None, None, None,
                         None, None, None,
+                        False, {},
                     ), (
                         "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
                         None, "source-hash", reported_at, reported_at,
@@ -6311,6 +6338,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None,
                     None, None, None,
+                    True, {"cpu": {"host_percent": 8.0}},
                 )]
             if "FROM drone_certificates" in self.sql:
                 return [("d2", "loaded", "fp", "sha", "-----BEGIN CERTIFICATE-----\\npeer\\n-----END CERTIFICATE-----", "subject", "issuer", None, None, "1", None, reported_at)]
@@ -6337,6 +6365,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
     state = PostgresMetadataStore()._load_relational_state(RecordingCursor())
 
     assert state["devices"]["d2"]["certificate"]["public_certificate"].startswith("-----BEGIN CERTIFICATE-----")
+    assert state["devices"]["d2"]["system_info"]["pixen_installed"] is True
     assert state["devices"]["d2"]["certificate"]["san"] == ["DNS:drone-b"]
     assert state["peer_checks"]["d1"][0]["target_drone_id"] == "drone-b"
     assert state["peer_checks"]["d1"][0]["status"] == "pass"

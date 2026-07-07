@@ -64,6 +64,27 @@ def _idle_volume_automation_dict(enabled, idle_minutes, target):
     }
 
 
+def _store_performance_metrics(cur, drone_id: str, performance: dict) -> None:
+    cur.execute("DELETE FROM drone_performance_metrics WHERE drone_id = %s", (drone_id,))
+    if not isinstance(performance, dict):
+        return
+    for group, values in performance.items():
+        if not isinstance(values, dict):
+            continue
+        for name, value in values.items():
+            number = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+            text = None if number is not None else (str(value) if value is not None else None)
+            cur.execute(
+                """
+                INSERT INTO drone_performance_metrics (drone_id, metric_group, metric_name, metric_value, metric_text)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (drone_id, metric_group, metric_name)
+                DO UPDATE SET metric_value = EXCLUDED.metric_value, metric_text = EXCLUDED.metric_text, observed_at = now()
+                """,
+                (drone_id, str(group), str(name), number, text),
+            )
+
+
 def _is_lambda_runtime() -> bool:
     return (os.getenv("OVERMIND_RUNTIME") or "").strip().lower() == "lambda" or bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
@@ -286,8 +307,8 @@ class PostgresMetadataStore:
                              cpu_threads, cpu_max_frequency, memory_available, memory_total,
                              batocera_version, screen_mode, audio_volume,
                              idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
-                             container, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                             pixen_installed, container, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         ON CONFLICT (drone_id) DO UPDATE SET
                             hostname          = COALESCE(EXCLUDED.hostname,          drone_system_info.hostname),
                             model             = COALESCE(EXCLUDED.model,             drone_system_info.model),
@@ -305,6 +326,7 @@ class PostgresMetadataStore:
                             idle_volume_enabled      = COALESCE(EXCLUDED.idle_volume_enabled,      drone_system_info.idle_volume_enabled),
                             idle_volume_idle_minutes = COALESCE(EXCLUDED.idle_volume_idle_minutes, drone_system_info.idle_volume_idle_minutes),
                             idle_volume_target       = COALESCE(EXCLUDED.idle_volume_target,       drone_system_info.idle_volume_target),
+                            pixen_installed   = COALESCE(EXCLUDED.pixen_installed,   drone_system_info.pixen_installed),
                             container         = COALESCE(EXCLUDED.container,         drone_system_info.container),
                             updated_at        = now()
                         """,
@@ -326,9 +348,12 @@ class PostgresMetadataStore:
                             iva[0],
                             iva[1],
                             iva[2],
+                            info.get("pixen_installed"),
                             info.get("container"),
                         ),
                     )
+                    if isinstance(info.get("performance"), dict):
+                        _store_performance_metrics(cur, internal_id, info["performance"])
                 if network and isinstance(network, dict):
                     for addr_type in ("ipv4", "ipv6"):
                         for addr in (network.get(addr_type) or []):
@@ -615,6 +640,7 @@ class PostgresMetadataStore:
                 drone_auto_sync_policy_systems,
                 drone_auto_sync_policies,
                 drone_certificates,
+                drone_performance_metrics,
                 drone_system_info,
                 drone_network_state,
                 device_admin_claims,
@@ -1275,7 +1301,18 @@ class PostgresMetadataStore:
                    s.hostname, s.model, s.system_name, s.architecture, s.cpu_model, s.cpu_cores, s.cpu_threads,
                    s.cpu_max_frequency, s.memory_available, s.memory_total, s.batocera_version,
                    s.screen_mode, s.audio_volume, s.container,
-                   s.idle_volume_enabled, s.idle_volume_idle_minutes, s.idle_volume_target
+                   s.idle_volume_enabled, s.idle_volume_idle_minutes, s.idle_volume_target,
+                   s.pixen_installed,
+                   COALESCE((
+                       SELECT jsonb_object_agg(metric_group, metrics)
+                       FROM (
+                           SELECT metric_group,
+                                  jsonb_object_agg(metric_name, COALESCE(to_jsonb(metric_value), to_jsonb(metric_text))) AS metrics
+                           FROM drone_performance_metrics pm
+                           WHERE pm.drone_id = d.id
+                           GROUP BY metric_group
+                       ) grouped
+                   ), '{}'::jsonb) AS performance
             FROM drones d
             LEFT JOIN drone_network_state n ON n.drone_id = d.id
             LEFT JOIN drone_system_info s ON s.drone_id = d.id
@@ -1295,6 +1332,7 @@ class PostgresMetadataStore:
                 cpu_max_frequency, memory_available, memory_total, batocera_version,
                 screen_mode, audio_volume, container,
                 idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
+                pixen_installed, performance,
             ) = row
             device = {
                 "id": internal_id,
@@ -1337,6 +1375,8 @@ class PostgresMetadataStore:
                     "idle_volume_automation": _idle_volume_automation_dict(
                         idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target
                     ),
+                    "pixen_installed": pixen_installed,
+                    "performance": performance or {},
                     "container": container,
                 },
             }
@@ -1817,6 +1857,7 @@ class PostgresMetadataStore:
             cpu_max_frequency, memory_available, memory_total, batocera_version,
             screen_mode, audio_volume, container,
             idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
+            pixen_installed, performance,
             cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer,
             valid_from, valid_until, serial_number, overmind_signed_at,
             auto_sync_enabled, auto_sync_systems, ipv4, ipv6, hostnames, macs, last_speed_sample,
@@ -1896,6 +1937,8 @@ class PostgresMetadataStore:
                 "idle_volume_automation": _idle_volume_automation_dict(
                     idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target
                 ),
+                "pixen_installed": pixen_installed,
+                "performance": performance or {},
                 "container": container,
             },
             "batocera_info": {},
@@ -1950,6 +1993,17 @@ class PostgresMetadataStore:
                    si.cpu_threads, si.cpu_max_frequency, si.memory_available, si.memory_total,
                    si.batocera_version, si.screen_mode, si.audio_volume, si.container,
                    si.idle_volume_enabled, si.idle_volume_idle_minutes, si.idle_volume_target,
+                   si.pixen_installed,
+                   COALESCE((
+                       SELECT jsonb_object_agg(metric_group, metrics)
+                       FROM (
+                           SELECT metric_group,
+                                  jsonb_object_agg(metric_name, COALESCE(to_jsonb(metric_value), to_jsonb(metric_text))) AS metrics
+                           FROM drone_performance_metrics pm
+                           WHERE pm.drone_id = d.id
+                           GROUP BY metric_group
+                       ) grouped
+                   ), '{{}}'::jsonb) AS performance,
                    dc.status, dc.fingerprint, dc.sha256_fingerprint, dc.public_certificate, dc.subject,
                    dc.issuer, dc.valid_from, dc.valid_until, dc.serial_number, dc.overmind_signed_at,
                    COALESCE(p.enabled, false),
@@ -4413,8 +4467,8 @@ class PostgresMetadataStore:
                 (drone_id, hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
                  cpu_max_frequency, memory_available, memory_total, batocera_version, screen_mode,
                  audio_volume, idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
-                 container, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                 pixen_installed, container, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (drone_id) DO UPDATE SET
                 hostname = EXCLUDED.hostname,
                 model = EXCLUDED.model,
@@ -4432,6 +4486,7 @@ class PostgresMetadataStore:
                 idle_volume_enabled = EXCLUDED.idle_volume_enabled,
                 idle_volume_idle_minutes = EXCLUDED.idle_volume_idle_minutes,
                 idle_volume_target = EXCLUDED.idle_volume_target,
+                pixen_installed = EXCLUDED.pixen_installed,
                 container = EXCLUDED.container,
                 updated_at = now()
             """,
@@ -4453,29 +4508,12 @@ class PostgresMetadataStore:
                 iva[0],
                 iva[1],
                 iva[2],
+                info.get("pixen_installed"),
                 info.get("container"),
             ),
         )
         if isinstance(info.get("performance"), dict):
-            cur.execute("DELETE FROM drone_performance_metrics WHERE drone_id = %s", (device.get("id"),))
-            for group, values in info["performance"].items():
-                if not isinstance(values, dict):
-                    continue
-                for name, value in values.items():
-                    # bool is a subclass of int, so it would be sent to the numeric
-                    # metric_value column and fail with DatatypeMismatch (double precision
-                    # vs boolean), aborting the whole state persist. Route bools to text.
-                    number = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-                    text = None if number is not None else (str(value) if value is not None else None)
-                    cur.execute(
-                        """
-                        INSERT INTO drone_performance_metrics (drone_id, metric_group, metric_name, metric_value, metric_text)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (drone_id, metric_group, metric_name)
-                        DO UPDATE SET metric_value = EXCLUDED.metric_value, metric_text = EXCLUDED.metric_text, observed_at = now()
-                        """,
-                        (device.get("id"), str(group), str(name), number, text),
-                    )
+            _store_performance_metrics(cur, device.get("id"), info["performance"])
         cert = device.get("certificate") if isinstance(device.get("certificate"), dict) else {}
         if cert:
             cur.execute(

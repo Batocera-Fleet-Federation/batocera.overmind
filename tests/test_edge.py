@@ -476,7 +476,7 @@ class DeviceRowMappingTests(unittest.TestCase):
         # Mostly-None row of the exact width _device_from_row unpacks; the helper
         # tolerates None everywhere (list(x or []), bool(x), isinstance checks).
         # Update the width here if the device column list changes.
-        row = [None] * 61
+        row = [None] * 63
         row[1] = "bff-drone-a"  # device_id
         row[25] = True  # edge_online
         row[26] = "203.0.113.9:5555"  # reflexive_endpoint

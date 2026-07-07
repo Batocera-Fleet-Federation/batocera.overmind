@@ -132,6 +132,7 @@ class DroneSystemInfo(ExtensibleContractModel):
     container: Optional[bool] = None
     screen_mode: Optional[Literal["full", "kiosk", "kid"]] = None
     audio_volume: Optional[int] = None
+    pixen_installed: Optional[bool] = None
     performance: dict[str, Any] = Field(default_factory=dict)
 
 

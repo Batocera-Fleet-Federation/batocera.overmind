@@ -307,6 +307,9 @@
                                         <div id="selected-device-id" class="small text-muted"></div>
                                     </div>
                                     <div class="d-flex flex-wrap align-items-center gap-2">
+                                        <button class="btn btn-outline-warning btn-sm mutate-only" onclick="rotateDroneToken()">
+                                            <i class="bi bi-arrow-clockwise me-1"></i>Rotate Token
+                                        </button>
                                         <button class="btn btn-outline-danger btn-sm mutate-only" onclick="deleteSelectedDevice()">
                                             <i class="bi bi-plug-x me-1"></i>Disconnect
                                         </button>
@@ -326,7 +329,6 @@
                                 <div id="device-overview-panel" class="device-subpanel">
                                     <div id="drone-network-panel" class="mb-3"></div>
                                     <div id="drone-speed-panel" class="mb-3"></div>
-                                    <div id="drone-token-panel" class="mb-3 mutate-only"></div>
                                 </div>
                                 <div id="device-systems-panel" class="device-subpanel" style="display:none;">
                                     <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-end gap-2">

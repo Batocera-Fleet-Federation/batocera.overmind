@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS drone_system_info (
     idle_volume_enabled BOOLEAN,
     idle_volume_idle_minutes INTEGER,
     idle_volume_target INTEGER,
+    pixen_installed BOOLEAN,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

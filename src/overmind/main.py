@@ -117,6 +117,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "collect_emulator_configs",
     "collect_log_sources",
     "refresh_emulator_list",
+    "run_pixen_update",
     "sync_rom",
     "sync_system",
     "sync_bios",

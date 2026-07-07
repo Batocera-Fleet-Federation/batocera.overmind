@@ -3293,6 +3293,16 @@
                         </div>
                         <div class="small text-muted mt-2">Rebuild re-scans and re-uploads a fresh inventory; purge keeps fingerprints and forces a full re-scan.</div>
                     </div></div>
+                    ${info.pixen_installed === true ? `
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <strong><i class="bi bi-play-circle me-1"></i>PixeN</strong>
+                        <div class="d-flex flex-wrap gap-2 mt-2">
+                            <button class="btn btn-outline-success btn-sm" type="button"
+                                onclick="queueDeviceAction('run_pixen_update')"><i class="bi bi-play-circle me-1"></i>Run PixeN Update</button>
+                        </div>
+                        <div class="small text-muted mt-2">Runs the installed PixeN upgrade script on the selected Drone.</div>
+                    </div></div>
+                    ` : ""}
                     <div class="card"><div class="card-body py-3">
                         <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                             <strong><i class="bi bi-list-check me-1"></i>Recent Actions</strong>
@@ -3493,21 +3503,6 @@
                                 <div class="small text-muted">${escapeHtml(r.target_address || 'n/a')} · ${escapeHtml(r.checked_at || 'n/a')} · ${r.latency_ms ?? 'n/a'} ms</div>
                             </div>
                         `).join('') : '<div class="small text-muted mt-1">No drones have resolved this drone yet.</div>'}
-                    </div></div>
-                `;
-            }
-
-            function renderDroneTokenPanel() {
-                const container = document.getElementById('drone-token-panel');
-                const device = selectedDrone();
-                if (!container || !device) return;
-                container.innerHTML = `
-                    <div class="card"><div class="card-body py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
-                        <div>
-                            <strong>Drone Authorization Token</strong>
-                            <div class="small text-muted">${device.token_rotated_at ? `Last rotated: ${new Date(device.token_rotated_at).toLocaleString()}` : 'Token hash stored in Overmind'}</div>
-                        </div>
-                        <button class="btn btn-outline-danger btn-sm" onclick="rotateDroneToken()"><i class="bi bi-arrow-clockwise me-1"></i>Rotate Token</button>
                     </div></div>
                 `;
             }
@@ -3849,7 +3844,6 @@
                 workspace.style.display = 'block';
                 updateSelectedDeviceHeader();
                 renderDroneNetworkPanel();
-                renderDroneTokenPanel();
                 renderDroneSpeedPanel();
             }
 
@@ -3905,7 +3899,6 @@
 
                 if (currentDeviceView === 'overview') {
                     renderDroneNetworkPanel();
-                    renderDroneTokenPanel();
                     renderDroneSpeedPanel();
                 }
                 if (currentDeviceView === 'systems') {
@@ -4142,6 +4135,7 @@
                 const labels = {
                     restart: 'remote restart',
                     rebuild_asset_metadata: 'rebuild asset metadata',
+                    run_pixen_update: 'run PixeN update',
                     refresh_emulator_list: 'refresh emulator list',
                     set_screen_mode: 'set screen mode',
                     set_volume: 'set volume',
@@ -4197,6 +4191,7 @@
                 const labels = {
                     restart: 'Remote Restart',
                     refresh_emulator_list: 'Refresh Emulator List',
+                    run_pixen_update: 'Run PixeN Update',
                     rebuild_asset_metadata: 'Rebuild Asset Metadata',
                     set_screen_mode: 'Set Screen Mode',
                     set_volume: 'Set Volume',
@@ -4213,6 +4208,7 @@
             function summarizeActionResult(result) {
                 if (!result) return '';
                 if (result.type === 'asset_metadata_rebuild') return `${result.rom_count || 0} ROM entries, ${result.bios_count || 0} BIOS files, ${result.artwork_count || 0} artwork rows uploaded`;
+                if (result.type === 'pixen_update') return result.status === 'started' ? `PixeN update started${result.pid ? ` (pid ${result.pid})` : ''}` : `PixeN update ${result.status || 'returned'}`;
                 if (result.type === 'emulator_list_refresh') return result.emulationstation_restarted ? 'EmulationStation restart issued' : 'EmulationStation restart was not issued';
                 if (result.type === 'screen_mode') return `Screen mode set to ${result.mode || 'unknown'}${result.emulationstation_restarted ? '; EmulationStation restarted' : ''}`;
                 if (result.type === 'audio_volume') return result.muted ? 'Volume muted' : `Volume set to ${result.level}%`;
