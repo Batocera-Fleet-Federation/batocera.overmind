@@ -465,8 +465,13 @@ class PostgresMetadataStore:
         bios_thumbprint: Optional[str] = None,
         saves_thumbprint: Optional[str] = None,
     ) -> bool:
-        """Persist the Drone-supplied asset thumbprints verbatim (no recompute)."""
-        if not internal_id or (romset_thumbprint is None and bios_thumbprint is None and saves_thumbprint is None):
+        """Persist the Drone-supplied asset thumbprints verbatim (no recompute).
+
+        Saves thumbprints are accepted from older Drones but not persisted: the
+        data-diet schema baseline dropped the saves_files_thumbprint columns
+        (saves sync is local-only), so writing them would fail on UndefinedColumn.
+        """
+        if not internal_id or (romset_thumbprint is None and bios_thumbprint is None):
             return False
         conn = self._core_connection(ensure_schema=False)
         if conn is None:
@@ -478,15 +483,13 @@ class PostgresMetadataStore:
                     UPDATE drones
                     SET romset_files_thumbprint = COALESCE(%s::text, romset_files_thumbprint),
                         bios_files_thumbprint = COALESCE(%s::text, bios_files_thumbprint),
-                        saves_files_thumbprint = COALESCE(%s::text, saves_files_thumbprint),
                         romset_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN romset_files_thumbprint_at ELSE now() END,
-                        bios_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN bios_files_thumbprint_at ELSE now() END,
-                        saves_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN saves_files_thumbprint_at ELSE now() END
+                        bios_files_thumbprint_at = CASE WHEN %s::text IS NULL THEN bios_files_thumbprint_at ELSE now() END
                     WHERE id = %s
                     """,
                     (
-                        romset_thumbprint, bios_thumbprint, saves_thumbprint,
-                        romset_thumbprint, bios_thumbprint, saves_thumbprint, internal_id,
+                        romset_thumbprint, bios_thumbprint,
+                        romset_thumbprint, bios_thumbprint, internal_id,
                     ),
                 )
                 return cur.rowcount > 0

@@ -468,6 +468,37 @@ class StorePresenceTests(unittest.TestCase):
         self.assertFalse(store.update_device_edge_presence("dev1", online=True))
 
 
+class StoreAssetThumbprintTests(unittest.TestCase):
+    def _store_with_cursor(self, cursor):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: _FakeConn(cursor)
+        return store
+
+    def test_thumbprint_update_never_writes_saves_columns(self):
+        # Regression: the data-diet schema baseline dropped saves_files_thumbprint(_at)
+        # from `drones`, but this UPDATE still referenced them -- UndefinedColumn on
+        # every inventory upload's final chunk, so drones re-uploaded their full
+        # inventory forever and the catalog stayed stale.
+        cursor = _FakeCursor(rowcount=1)
+        store = self._store_with_cursor(cursor)
+        ok = store.update_device_asset_thumbprints(
+            "dev1", romset_thumbprint="rom-tp", bios_thumbprint="bios-tp", saves_thumbprint="saves-tp"
+        )
+        self.assertTrue(ok)
+        sql, params = cursor.executed[0]
+        self.assertIn("romset_files_thumbprint", sql)
+        self.assertIn("bios_files_thumbprint", sql)
+        self.assertNotIn("saves_files_thumbprint", sql)
+        self.assertEqual(params, ("rom-tp", "bios-tp", "rom-tp", "bios-tp", "dev1"))
+
+    def test_saves_only_thumbprint_is_a_noop(self):
+        # Older drones may still send only a saves thumbprint; nothing to persist.
+        cursor = _FakeCursor(rowcount=1)
+        store = self._store_with_cursor(cursor)
+        self.assertFalse(store.update_device_asset_thumbprints("dev1", saves_thumbprint="saves-tp"))
+        self.assertEqual(cursor.executed, [])
+
+
 class DeviceRowMappingTests(unittest.TestCase):
     """_device_from_row must surface the edge_online / reflexive_endpoint columns
     that _select_device_sql now projects (positions 26 & 27, after checked_at)."""
