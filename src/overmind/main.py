@@ -110,6 +110,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "set_screen_mode",
     "set_volume",
     "set_idle_volume_automation",
+    "set_idle_game_exit_automation",
     "collect_rom_metadata",
     "rebuild_asset_metadata",
     "purge_asset_cache",
@@ -2262,6 +2263,21 @@ async def create_device_action(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Provide at least one of: enabled, idle_minutes, target_volume",
+            )
+        action_payload = normalized
+    if action_type == "set_idle_game_exit_automation":
+        normalized: dict = {}
+        if "enabled" in action_payload:
+            normalized["enabled"] = bool(action_payload.get("enabled"))
+        if action_payload.get("idle_minutes") is not None:
+            try:
+                normalized["idle_minutes"] = max(1, min(1440, int(action_payload["idle_minutes"])))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="idle_minutes must be a number")
+        if not normalized:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide at least one of: enabled, idle_minutes",
             )
         action_payload = normalized
     if action_type in {"rebuild_asset_metadata", "purge_asset_cache"}:

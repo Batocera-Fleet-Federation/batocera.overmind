@@ -64,6 +64,38 @@ def _idle_volume_automation_dict(enabled, idle_minutes, target):
     }
 
 
+def _idle_game_exit_automation_columns(info: dict) -> tuple:
+    """Extract (enabled, idle_minutes) from a Drone's reported system_info.
+
+    The Drone reports idle-game-exit automation as a nested ``idle_game_exit_automation``
+    dict; Overmind stores it as two explicit columns for the per-Drone admin UI.
+    Returns (None, None) when the Drone has not reported it.
+    """
+    raw = info.get("idle_game_exit_automation")
+    if not isinstance(raw, dict):
+        return (None, None)
+    enabled = raw.get("enabled")
+    try:
+        idle_minutes = int(raw["idle_minutes"]) if raw.get("idle_minutes") is not None else None
+    except (TypeError, ValueError):
+        idle_minutes = None
+    return (bool(enabled) if enabled is not None else None, idle_minutes)
+
+
+def _idle_game_exit_automation_dict(enabled, idle_minutes):
+    """Rebuild the nested idle_game_exit_automation dict from stored columns.
+
+    Returns None when the Drone has never reported it (all columns NULL) so the
+    UI can show "not yet reported" rather than a misleading default.
+    """
+    if enabled is None and idle_minutes is None:
+        return None
+    return {
+        "enabled": bool(enabled),
+        "idle_minutes": idle_minutes,
+    }
+
+
 def _store_performance_metrics(cur, drone_id: str, performance: dict) -> None:
     cur.execute("DELETE FROM drone_performance_metrics WHERE drone_id = %s", (drone_id,))
     if not isinstance(performance, dict):
@@ -300,6 +332,7 @@ class PostgresMetadataStore:
                 if system_info and isinstance(system_info, dict):
                     info = system_info
                     iva = _idle_volume_automation_columns(info)
+                    ige = _idle_game_exit_automation_columns(info)
                     cur.execute(
                         """
                         INSERT INTO drone_system_info
@@ -307,8 +340,9 @@ class PostgresMetadataStore:
                              cpu_threads, cpu_max_frequency, memory_available, memory_total,
                              batocera_version, screen_mode, audio_volume,
                              idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
+                             idle_game_exit_enabled, idle_game_exit_idle_minutes,
                              pixen_installed, container, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         ON CONFLICT (drone_id) DO UPDATE SET
                             hostname          = COALESCE(EXCLUDED.hostname,          drone_system_info.hostname),
                             model             = COALESCE(EXCLUDED.model,             drone_system_info.model),
@@ -326,6 +360,8 @@ class PostgresMetadataStore:
                             idle_volume_enabled      = COALESCE(EXCLUDED.idle_volume_enabled,      drone_system_info.idle_volume_enabled),
                             idle_volume_idle_minutes = COALESCE(EXCLUDED.idle_volume_idle_minutes, drone_system_info.idle_volume_idle_minutes),
                             idle_volume_target       = COALESCE(EXCLUDED.idle_volume_target,       drone_system_info.idle_volume_target),
+                            idle_game_exit_enabled      = COALESCE(EXCLUDED.idle_game_exit_enabled,      drone_system_info.idle_game_exit_enabled),
+                            idle_game_exit_idle_minutes = COALESCE(EXCLUDED.idle_game_exit_idle_minutes, drone_system_info.idle_game_exit_idle_minutes),
                             pixen_installed   = COALESCE(EXCLUDED.pixen_installed,   drone_system_info.pixen_installed),
                             container         = COALESCE(EXCLUDED.container,         drone_system_info.container),
                             updated_at        = now()
@@ -348,6 +384,8 @@ class PostgresMetadataStore:
                             iva[0],
                             iva[1],
                             iva[2],
+                            ige[0],
+                            ige[1],
                             info.get("pixen_installed"),
                             info.get("container"),
                         ),
@@ -1302,6 +1340,7 @@ class PostgresMetadataStore:
                    s.cpu_max_frequency, s.memory_available, s.memory_total, s.batocera_version,
                    s.screen_mode, s.audio_volume, s.container,
                    s.idle_volume_enabled, s.idle_volume_idle_minutes, s.idle_volume_target,
+                   s.idle_game_exit_enabled, s.idle_game_exit_idle_minutes,
                    s.pixen_installed,
                    COALESCE((
                        SELECT jsonb_object_agg(metric_group, metrics)
@@ -1332,6 +1371,7 @@ class PostgresMetadataStore:
                 cpu_max_frequency, memory_available, memory_total, batocera_version,
                 screen_mode, audio_volume, container,
                 idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
+                idle_game_exit_enabled, idle_game_exit_idle_minutes,
                 pixen_installed, performance,
             ) = row
             device = {
@@ -1374,6 +1414,9 @@ class PostgresMetadataStore:
                     "audio_volume": audio_volume,
                     "idle_volume_automation": _idle_volume_automation_dict(
                         idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target
+                    ),
+                    "idle_game_exit_automation": _idle_game_exit_automation_dict(
+                        idle_game_exit_enabled, idle_game_exit_idle_minutes
                     ),
                     "pixen_installed": pixen_installed,
                     "performance": performance or {},
@@ -1857,6 +1900,7 @@ class PostgresMetadataStore:
             cpu_max_frequency, memory_available, memory_total, batocera_version,
             screen_mode, audio_volume, container,
             idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
+            idle_game_exit_enabled, idle_game_exit_idle_minutes,
             pixen_installed, performance,
             cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer,
             valid_from, valid_until, serial_number, overmind_signed_at,
@@ -1937,6 +1981,9 @@ class PostgresMetadataStore:
                 "idle_volume_automation": _idle_volume_automation_dict(
                     idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target
                 ),
+                "idle_game_exit_automation": _idle_game_exit_automation_dict(
+                    idle_game_exit_enabled, idle_game_exit_idle_minutes
+                ),
                 "pixen_installed": pixen_installed,
                 "performance": performance or {},
                 "container": container,
@@ -1993,6 +2040,7 @@ class PostgresMetadataStore:
                    si.cpu_threads, si.cpu_max_frequency, si.memory_available, si.memory_total,
                    si.batocera_version, si.screen_mode, si.audio_volume, si.container,
                    si.idle_volume_enabled, si.idle_volume_idle_minutes, si.idle_volume_target,
+                   si.idle_game_exit_enabled, si.idle_game_exit_idle_minutes,
                    si.pixen_installed,
                    COALESCE((
                        SELECT jsonb_object_agg(metric_group, metrics)
@@ -4461,14 +4509,16 @@ class PostgresMetadataStore:
                 )
         info = device.get("system_info") if isinstance(device.get("system_info"), dict) else {}
         iva = _idle_volume_automation_columns(info)
+        ige = _idle_game_exit_automation_columns(info)
         cur.execute(
             """
             INSERT INTO drone_system_info
                 (drone_id, hostname, model, system_name, architecture, cpu_model, cpu_cores, cpu_threads,
                  cpu_max_frequency, memory_available, memory_total, batocera_version, screen_mode,
                  audio_volume, idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
+                 idle_game_exit_enabled, idle_game_exit_idle_minutes,
                  pixen_installed, container, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (drone_id) DO UPDATE SET
                 hostname = EXCLUDED.hostname,
                 model = EXCLUDED.model,
@@ -4486,6 +4536,8 @@ class PostgresMetadataStore:
                 idle_volume_enabled = EXCLUDED.idle_volume_enabled,
                 idle_volume_idle_minutes = EXCLUDED.idle_volume_idle_minutes,
                 idle_volume_target = EXCLUDED.idle_volume_target,
+                idle_game_exit_enabled = EXCLUDED.idle_game_exit_enabled,
+                idle_game_exit_idle_minutes = EXCLUDED.idle_game_exit_idle_minutes,
                 pixen_installed = EXCLUDED.pixen_installed,
                 container = EXCLUDED.container,
                 updated_at = now()
@@ -4508,6 +4560,8 @@ class PostgresMetadataStore:
                 iva[0],
                 iva[1],
                 iva[2],
+                ige[0],
+                ige[1],
                 info.get("pixen_installed"),
                 info.get("container"),
             ),
@@ -5230,13 +5284,14 @@ class PostgresMetadataStore:
                 cur.execute(
                     """
                     INSERT INTO drone_games
-                        (drone_id, system_id, system_name, gamelist_id, name, rom_fingerprint, file_size, last_seen)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                        (drone_id, system_id, system_name, gamelist_id, name, rom_fingerprint, file_size, entry_type, last_seen)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
                     ON CONFLICT (drone_id, system_name, gamelist_id) DO UPDATE SET
                         system_id = EXCLUDED.system_id,
                         name = EXCLUDED.name,
                         rom_fingerprint = EXCLUDED.rom_fingerprint,
                         file_size = EXCLUDED.file_size,
+                        entry_type = EXCLUDED.entry_type,
                         last_seen = EXCLUDED.last_seen
                     """,
                     (
@@ -5247,6 +5302,7 @@ class PostgresMetadataStore:
                         row.get("name") or row.get("rom_name"),
                         row.get("rom_fingerprint") or row.get("fingerprint"),
                         row.get("file_size") or row.get("byte_count"),
+                        str(row.get("entry_type") or "file"),
                         self._dt(row.get("last_seen") or row.get("added_at")),
                     ),
                 )
@@ -5293,14 +5349,14 @@ class PostgresMetadataStore:
     # Domain asset read helpers: games live in drone_games (keyed by gamelist_id), BIOS in
     # drone_bios. Both are projected to the dict shape callers/UI expect.
     _DOMAIN_ASSET_SOURCE = {
-        "rom": ("drone_games", "system_name, gamelist_id, name, rom_fingerprint, file_size", "system_name NULLS LAST, name NULLS LAST, gamelist_id"),
+        "rom": ("drone_games", "system_name, gamelist_id, name, rom_fingerprint, file_size, entry_type", "system_name NULLS LAST, name NULLS LAST, gamelist_id"),
         "bios": ("drone_bios", "bios_name, normalized_path, file_path, bios_md5, file_size", "normalized_path"),
     }
 
     @staticmethod
     def _domain_asset_payload(asset_type: str, row: tuple) -> dict:
         if asset_type == "rom":
-            system_name, gamelist_id, name, fingerprint, file_size = row
+            system_name, gamelist_id, name, fingerprint, file_size, entry_type = row
             return {
                 "system_name": system_name,
                 "gamelist_id": gamelist_id,
@@ -5309,6 +5365,8 @@ class PostgresMetadataStore:
                 "name": name,
                 "rom_fingerprint": fingerprint,
                 "file_size": file_size,
+                # 'folder' = folder-unit game; file_size is the folder's total bytes.
+                "entry_type": entry_type or "file",
             }
         if asset_type == "bios":
             bios_name, normalized_path, file_path, md5, file_size = row
@@ -5567,13 +5625,17 @@ class PostgresMetadataStore:
         if not rows:
             return [], 0
         total = int(rows[0][-1] or 0)
+        # Row shape: device_internal_id, <payload columns...>, master_key,
+        # present_on_selected, total_count. Slice by the payload width so adding a
+        # column to _DOMAIN_ASSET_SOURCE can't silently misalign the master rows.
+        payload_width = len(payload_columns.split(","))
         output = []
         for row in rows:
-            payload = self._domain_asset_payload(asset_type, row[1:6])
+            payload = self._domain_asset_payload(asset_type, row[1 : 1 + payload_width])
             payload["_device_internal_id"] = row[0]
-            payload["_master_key"] = row[6]
+            payload["_master_key"] = row[1 + payload_width]
             payload["_artwork_type"] = None
-            payload["_present_on_selected"] = bool(row[7])
+            payload["_present_on_selected"] = bool(row[2 + payload_width])
             output.append(payload)
         if _cache:
             _cache.set(cache_key, {"rows": output, "total": total}, ttl=30)

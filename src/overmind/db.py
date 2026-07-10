@@ -2643,6 +2643,7 @@ class OvermindDatabase:
             "restart": "Remote Restart",
             "set_screen_mode": "Set Screen Mode",
             "set_idle_volume_automation": "Idle Volume Automation",
+            "set_idle_game_exit_automation": "Idle Game Exit Automation",
         }.get(
             str(action.get("action") or ""),
             str(action.get("action") or "action").replace("_", " ").title(),
@@ -2738,6 +2739,7 @@ class OvermindDatabase:
                 "rom_name": rom_name or gamelist_id,
                 "rom_fingerprint": item.get("rom_fingerprint") or item.get("fingerprint") or item.get("hash"),
                 "file_size": item.get("file_size") or item.get("byte_count") or item.get("size"),
+                "entry_type": item.get("entry_type"),
             })
         replace_all = bool(row_metadata.get("replace_all"))
         if is_inventory_chunk and replace_all:
@@ -3083,6 +3085,9 @@ class OvermindDatabase:
                 "file_path": rom.get("file_path") or gamelist_id,
                 "rom_fingerprint": rom.get("rom_fingerprint"),
                 "file_size": rom.get("file_size"),
+                # 'folder' = folder-unit game (marker/disc systems); file_size is then
+                # the game folder's total bytes.
+                "entry_type": str(rom.get("entry_type") or "file"),
                 "added_at": datetime.utcnow(),
                 "last_seen": datetime.utcnow(),
             })

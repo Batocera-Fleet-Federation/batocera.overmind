@@ -4923,6 +4923,50 @@ def test_idle_volume_automation_action_is_supported_and_validated(client):
     assert bad.status_code == 400
 
 
+def test_idle_game_exit_automation_action_is_supported_and_validated(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_idle_game_exit_automation", "payload": {"enabled": True, "idle_minutes": 20}},
+    )
+    assert response.status_code == 200, response.text
+    action = response.json()["action"]
+    assert action["action"] == "set_idle_game_exit_automation"
+    assert action["payload"] == {"enabled": True, "idle_minutes": 20}
+
+    # Out-of-range values are clamped server-side.
+    clamped = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_idle_game_exit_automation", "payload": {"idle_minutes": 99999}},
+    )
+    assert clamped.status_code == 200
+    assert clamped.json()["action"]["payload"] == {"idle_minutes": 1440}
+
+    # An empty payload is rejected.
+    empty = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_idle_game_exit_automation", "payload": {}},
+    )
+    assert empty.status_code == 400
+
+    # Non-numeric values are rejected.
+    bad = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_idle_game_exit_automation", "payload": {"idle_minutes": "soon"}},
+    )
+    assert bad.status_code == 400
+
+
 def test_pixen_update_action_is_supported(client):
     seed_test_fleet()
     token = client.post(
@@ -4962,6 +5006,30 @@ def test_heartbeat_stores_idle_volume_automation(client):
         "enabled": True,
         "idle_minutes": 5,
         "target_volume": 25,
+    }
+
+
+def test_heartbeat_stores_idle_game_exit_automation(client):
+    client.post("/api/auth/register", json={"email": "hb-ige@example.com", "username": "hb-ige-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("hb-ige@example.com")
+    db.create_device(user["id"], "drone-ige", "Drone IGE", {"ip_address": "10.0.0.4"}, raw_token="drone-token-ige")
+
+    response = client.post(
+        "/api/devices/drone-ige/heartbeat",
+        headers={"Authorization": "Bearer drone-token-ige"},
+        json={
+            "device_id": "drone-ige",
+            "system_info": {
+                "hostname": "drone-ige",
+                "idle_game_exit_automation": {"enabled": True, "idle_minutes": 20},
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    refreshed = db.get_device_by_device_id("drone-ige")
+    assert refreshed["system_info"]["idle_game_exit_automation"] == {
+        "enabled": True,
+        "idle_minutes": 20,
     }
 
 
@@ -5062,6 +5130,39 @@ def test_asset_metadata_delta_upserts_existing_rows_without_duplicate_system_cou
     assert db.get_user_systems_summary(user["id"]) == [{"system_name": "snes", "rom_count": 1, "device_count": 1}]
 
 
+def test_asset_metadata_ingest_carries_entry_type(client):
+    """Folder-unit games (marker/disc systems) report entry_type=folder with the
+    folder's total size; rows without the field keep the 'file' default."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "entry-type@example.com", "username": "entry-type", "password": "testpass123"},
+    )
+    user = db.get_user_by_email("entry-type@example.com")
+    db.create_device(user["id"], "entry-type-drone", "Entry Type Drone", {})
+
+    db.store_rom_metadata("entry-type-drone", {
+        "type": "asset_metadata",
+        "update_mode": "inventory_delta",
+        "systems": [{"name": "lindbergh", "rom_count": 1}, {"name": "snes", "rom_count": 1}],
+        "roms": [
+            {
+                "system": "lindbergh",
+                "gamelist_game_id": "42",
+                "name": "House of the Dead 4",
+                "file_size": 5_000_000_000,
+                "entry_type": "folder",
+                "rom_fingerprint": "fp-hotd4",
+            },
+            {"system": "snes", "rom_name": "Game", "file_path": "Game.zip", "file_size": 3},
+        ],
+    })
+
+    roms = {rom["system_name"]: rom for rom in db.get_device_roms("entry-type-drone")}
+    assert roms["lindbergh"]["entry_type"] == "folder"
+    assert roms["lindbergh"]["file_size"] == 5_000_000_000
+    assert roms["snes"]["entry_type"] == "file"
+
+
 def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_buttons():
     html = Path(__file__).resolve().parents[1].joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
@@ -5091,6 +5192,8 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "queueDeviceVolume(" in js
     assert "renderIdleVolumeCard(info)" in js
     assert "queueDeviceAction('set_idle_volume_automation'" in js
+    assert "renderIdleGameExitCard(info)" in js
+    assert "queueDeviceAction('set_idle_game_exit_automation'" in js
     assert '<table class="table table-sm align-middle bff-stack">' in js
     assert "deleteDeviceActions()" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
@@ -6096,6 +6199,7 @@ def test_relational_schema_declares_domain_tables():
     assert "audio_volume INTEGER" in migration_sql
     assert "pixen_installed BOOLEAN" in migration_sql
     assert "idle_volume_target INTEGER" in migration_sql
+    assert "idle_game_exit_idle_minutes INTEGER" in migration_sql
     assert "edge_online BOOLEAN" in migration_sql
     assert "batocera_version TEXT" in migration_sql
     assert "def list_user_notifications" in store_source
@@ -6195,6 +6299,7 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
                         None, None, None, None, None, None, None,
                     None, None, None, None, "kid", 65, None,
                     None, None, None,
+                    None, None,
                     True, {"cpu": {"host_percent": 12.5}},
                 )]
             if "FROM device_admin_claims" in self.sql:
@@ -6260,6 +6365,7 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                         None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None,
                     None, None, None,
+                    None, None,
                     False, {"memory": {"used_percent": 44.0}},
                 )]
             if "FROM gameplay_sessions" in self.sql:
@@ -6328,6 +6434,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         None, None, None, None, None, None, None,
                         None, None, None, None, None,
                         None, None, None,
+                        None, None,
                         False, {},
                     ), (
                         "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
@@ -6338,6 +6445,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None,
                     None, None, None,
+                    None, None,
                     True, {"cpu": {"host_percent": 8.0}},
                 )]
             if "FROM drone_certificates" in self.sql:

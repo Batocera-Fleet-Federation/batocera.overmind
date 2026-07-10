@@ -3276,6 +3276,7 @@
                         <div class="btn-group flex-wrap" role="group" aria-label="Volume presets">${volumeButtons}</div>
                     </div></div>
                     ${renderIdleVolumeCard(info)}
+                    ${renderIdleGameExitCard(info)}
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <strong><i class="bi bi-power me-1"></i>Power</strong>
                         <div class="mt-2">
@@ -3409,6 +3410,54 @@
                 await queueDeviceAction('set_idle_volume_automation', {
                     confirm: false,
                     payload: { enabled, idle_minutes: idleMinutes, target_volume: targetVolume },
+                });
+            }
+
+            function renderIdleGameExitCard(info) {
+                const automation = (info && typeof info.idle_game_exit_automation === 'object' && info.idle_game_exit_automation) || null;
+                const reported = !!automation;
+                const enabled = reported ? !!automation.enabled : false;
+                const idleMinutes = reported && Number.isFinite(Number(automation.idle_minutes)) ? Number(automation.idle_minutes) : 15;
+                const current = !reported
+                    ? 'not yet reported'
+                    : (enabled
+                        ? `on — exit the game after ${idleMinutes} min idle`
+                        : 'off');
+                return `
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-power me-1"></i>Idle Game Exit Automation</strong>
+                            <span class="small text-muted" data-device-admin-field="idle-game-exit">Current: ${escapeHtml(current)}</span>
+                        </div>
+                        <div class="small text-muted mb-2">Exit the running game and return to EmulationStation after it has gone without any controller or keyboard input for a set amount of time. Only applies while a game is actually running.</div>
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" role="switch" id="idle-game-exit-enabled" ${enabled ? 'checked' : ''}>
+                            <label class="form-check-label" for="idle-game-exit-enabled">Enable idle game exit</label>
+                        </div>
+                        <div class="row g-2 align-items-end">
+                            <div class="col-sm-5">
+                                <label class="form-label small mb-1" for="idle-game-exit-minutes">Idle minutes</label>
+                                <input class="form-control form-control-sm" type="number" id="idle-game-exit-minutes" min="1" max="1440" step="1" value="${idleMinutes}">
+                            </div>
+                            <div class="col-sm-2">
+                                <button class="btn btn-primary btn-sm w-100" type="button" onclick="queueDeviceIdleGameExit()"><i class="bi bi-save me-1"></i>Save</button>
+                            </div>
+                        </div>
+                        <div class="small text-muted mt-2">Applied on the Drone within about a minute.</div>
+                    </div></div>
+                `;
+            }
+
+            async function queueDeviceIdleGameExit() {
+                const enabled = !!document.getElementById('idle-game-exit-enabled')?.checked;
+                const idleMinutes = parseInt(document.getElementById('idle-game-exit-minutes')?.value, 10);
+                if (!Number.isFinite(idleMinutes) || idleMinutes < 1 || idleMinutes > 1440) {
+                    showMessage('Idle minutes must be between 1 and 1440.', 'danger');
+                    return;
+                }
+                await queueDeviceAction('set_idle_game_exit_automation', {
+                    confirm: false,
+                    payload: { enabled, idle_minutes: idleMinutes },
                 });
             }
 
@@ -4140,6 +4189,7 @@
                     set_screen_mode: 'set screen mode',
                     set_volume: 'set volume',
                     set_idle_volume_automation: 'update idle volume automation',
+                    set_idle_game_exit_automation: 'update idle game exit automation',
                     collect_rom_metadata: 'collect ROM and system metadata',
                     collect_game_logs: 'collect Game Logs',
                     collect_emulator_configs: 'collect emulator configs',
@@ -4196,6 +4246,7 @@
                     set_screen_mode: 'Set Screen Mode',
                     set_volume: 'Set Volume',
                     set_idle_volume_automation: 'Idle Volume Automation',
+                    set_idle_game_exit_automation: 'Idle Game Exit Automation',
                     purge_asset_cache: 'Purge Asset Cache',
                     collect_game_logs: 'Game Logs',
                     collect_emulator_configs: 'Emulator Configs',
@@ -4213,6 +4264,7 @@
                 if (result.type === 'screen_mode') return `Screen mode set to ${result.mode || 'unknown'}${result.emulationstation_restarted ? '; EmulationStation restarted' : ''}`;
                 if (result.type === 'audio_volume') return result.muted ? 'Volume muted' : `Volume set to ${result.level}%`;
                 if (result.type === 'idle_volume_automation') return result.enabled ? `Idle volume on: lower to ${result.target_volume}% after ${result.idle_minutes} min idle` : 'Idle volume automation disabled';
+                if (result.type === 'idle_game_exit_automation') return result.enabled ? `Idle game exit on: exit after ${result.idle_minutes} min idle` : 'Idle game exit automation disabled';
                 if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;
                 if (result.type === 'game_logs') return `${(result.sessions || []).length} parsed play sessions, ${(result.logs || []).length} logs`;
                 if (result.type === 'emulator_configs') return `${(result.configs || []).length} config files`;
