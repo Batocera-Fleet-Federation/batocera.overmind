@@ -2492,12 +2492,16 @@
                     } else {
                         // Fleet-wide, unpaginated: lets the tree show systems this
                         // drone has zero files for yet, so "All"/"Missing" can
-                        // surface games worth pulling in from other Drones.
-                        const response = await apiGet('/api/systems');
+                        // surface games worth pulling in from other Drones. The
+                        // search matches system name OR any game title within it
+                        // server-side, so it's passed through rather than
+                        // re-filtered here by system name only.
+                        const systemsParams = new URLSearchParams();
+                        if (q) systemsParams.set('q', q);
+                        const response = await apiGet(`/api/systems${systemsParams.toString() ? `?${systemsParams.toString()}` : ''}`);
                         if (!response.ok) throw new Error('Failed to load systems');
                         const data = await response.json();
-                        const q_lower = q.toLowerCase();
-                        systems = (data.systems || []).filter(row => !q || String(row.system_name || '').toLowerCase().includes(q_lower));
+                        systems = data.systems || [];
                         total = systems.length;
                     }
                     await loadBiosSummary();
@@ -2724,6 +2728,7 @@
                         romParams.set('system_name', systemName);
                         romParams.set('offset', String(offset));
                         romParams.set('per_page', String(pageSize));
+                        if (q) romParams.set('q', q);
                         url = `/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`;
                     } else {
                         // "All"/"Missing": presence-aware, fleet-wide list (same source

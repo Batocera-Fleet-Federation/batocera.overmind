@@ -2658,6 +2658,7 @@ async def update_device_roms(
 async def get_device_roms(
     device_id: str,
     system_name: Optional[str] = None,
+    q: Optional[str] = None,
     page: Optional[int] = None,
     per_page: int = 100,
     offset: Optional[int] = None,
@@ -2671,11 +2672,12 @@ async def get_device_roms(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    
+
     if page is not None or offset is not None:
         result = db.get_device_roms_page(
             device_id,
             system_name=system_name,
+            query=q,
             page=page or 1,
             per_page=per_page,
             offset=offset,
@@ -3252,10 +3254,10 @@ async def get_swarm_gameplay(
 
 
 @app.get("/api/systems", response_model=SystemsResponse)
-async def list_systems(authorization: Optional[str] = Header(default=None)):
+async def list_systems(q: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """List systems with ROM counts across all user devices."""
     user = get_current_user(authorization)
-    return {"systems": db.get_user_systems_summary(user["id"])}
+    return {"systems": db.get_user_systems_summary(user["id"], query=q)}
 
 
 # ==================== UI ====================

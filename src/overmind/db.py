@@ -3805,6 +3805,7 @@ class OvermindDatabase:
         device_id: str,
         *,
         system_name: Optional[str] = None,
+        query: Optional[str] = None,
         page: int = 1,
         per_page: int = 100,
         offset: Optional[int] = None,
@@ -3820,20 +3821,27 @@ class OvermindDatabase:
                 internal_device["id"],
                 "rom",
                 system_name=system_name,
+                query=query,
                 page=page,
                 per_page=per_page,
                 offset=offset_value,
             )
             return {"rows": rows, "total": total, "page": page, "per_page": per_page, "offset": offset_value}
         rows = self.get_device_roms_by_system(device_id, system_name) if system_name else self.get_device_roms(device_id)
+        term = str(query or "").strip().lower()
+        if term:
+            rows = [
+                row for row in rows
+                if term in str(row.get("rom_name") or row.get("name") or row.get("file_path") or "").lower()
+            ]
         start = offset_value
         return {"rows": rows[start:start + per_page], "total": len(rows), "page": page, "per_page": per_page, "offset": offset_value}
 
-    def get_user_systems_summary(self, user_id: str) -> List[dict]:
+    def get_user_systems_summary(self, user_id: str, *, query: Optional[str] = None) -> List[dict]:
         """Get system summary across all devices owned by a user."""
         devices = self.get_user_devices(user_id)
         if self._asset_store_enabled():
-            return postgres_store.summarize_rom_systems([device["id"] for device in devices])
+            return postgres_store.summarize_rom_systems([device["id"] for device in devices], query=query)
         summary: Dict[str, dict] = {}
         for device in devices:
             internal_id = device["id"]
@@ -3847,12 +3855,20 @@ class OvermindDatabase:
                         "system_name": system_name,
                         "rom_count": 0,
                         "device_ids": set(),
+                        "rom_names": [],
                     }
                 summary[system_name]["rom_count"] += 1
                 summary[system_name]["device_ids"].add(device["device_id"])
+                summary[system_name]["rom_names"].append(str(rom.get("rom_name") or rom.get("name") or rom.get("file_path") or ""))
 
+        term = str(query or "").strip().lower()
         systems = []
         for item in summary.values():
+            if term:
+                system_matches = term in item["system_name"].lower()
+                game_matches = any(term in name.lower() for name in item["rom_names"])
+                if not (system_matches or game_matches):
+                    continue
             systems.append(
                 {
                     "system_name": item["system_name"],
@@ -3946,9 +3962,22 @@ class OvermindDatabase:
         rows = self.get_device_systems_summary(device_id)
         term = str(query or "").strip().lower()
         if term:
+            # Match the system name OR any game's title within it (mirrors
+            # page_device_rom_systems), so searching a game surfaces its system
+            # even when the system name itself doesn't contain the search text.
+            matching_systems = {
+                str(row.get("system_name") or row.get("name") or "").lower()
+                for row in rows
+                if term in str(row.get("system_name") or row.get("name") or "").lower()
+            }
+            for rom in self.get_device_roms(device_id):
+                rom_name = str(rom.get("rom_name") or rom.get("name") or rom.get("file_path") or "").lower()
+                system_name = str(rom.get("system_name") or "").lower()
+                if system_name and term in rom_name:
+                    matching_systems.add(system_name)
             rows = [
                 row for row in rows
-                if term in str(row.get("system_name") or row.get("name") or "").lower()
+                if str(row.get("system_name") or row.get("name") or "").lower() in matching_systems
             ]
         rows.sort(key=lambda row: str(row.get("system_name") or row.get("name") or "").lower())
         start = (page - 1) * per_page

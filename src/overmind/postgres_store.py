@@ -5674,11 +5674,14 @@ class PostgresMetadataStore:
             _cache.set(cache_key, {"rows": output, "total": total}, ttl=30)
         return output, total
 
-    def summarize_rom_systems(self, device_internal_ids: Iterable[str]) -> list[dict]:
+    def summarize_rom_systems(self, device_internal_ids: Iterable[str], *, query: Optional[str] = None) -> list[dict]:
         ids = [str(value) for value in device_internal_ids if value]
         if not ids or not self.assets_enabled():
             return []
-        if _cache:
+        clean_query = str(query or "").strip().lower()
+        # The cache key only accounts for `ids`, so a filtered call must bypass it
+        # (caching per query string would explode cardinality for a cheap summary).
+        if not clean_query and _cache:
             cache_key = _cache.rom_systems_key(ids)
             cached = _cache.get(cache_key)
             if cached is not None:
@@ -5686,24 +5689,34 @@ class PostgresMetadataStore:
         conn = self._connect()
         if conn is None:
             return []
+        where = ["drone_id = ANY(%s)", "system_name IS NOT NULL"]
+        params: list[object] = [ids]
+        if clean_query:
+            # Match the system name OR any game's title within it, so searching a
+            # game surfaces the system it lives in even when the system name
+            # itself doesn't contain the search text.
+            where.append("(lower(system_name) LIKE %s OR lower(name) LIKE %s)")
+            like = f"%{clean_query}%"
+            params.append(like)
+            params.append(like)
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT system_name, count(*), count(*), count(DISTINCT drone_id)
                     FROM drone_games
-                    WHERE drone_id = ANY(%s) AND system_name IS NOT NULL
+                    WHERE {" AND ".join(where)}
                     GROUP BY system_name
                     ORDER BY system_name
                     """,
-                    (ids,),
+                    params,
                 )
                 rows = cur.fetchall()
         result = [
             {"system_name": row[0], "rom_count": int(row[1]), "game_count": int(row[2]), "device_count": int(row[3])}
             for row in rows
         ]
-        if _cache:
+        if not clean_query and _cache:
             _cache.set(cache_key, result, ttl=60)
         return result
 
@@ -5730,8 +5743,13 @@ class PostgresMetadataStore:
         params: list[object] = [device_internal_id]
         clean_query = str(query or "").strip().lower()
         if clean_query:
-            where.append("lower(system_name) LIKE %s")
-            params.append(f"%{clean_query}%")
+            # Match the system name OR any game's title within it, so searching a
+            # game surfaces the system it lives in even when the system name itself
+            # doesn't contain the search text.
+            where.append("(lower(system_name) LIKE %s OR lower(name) LIKE %s)")
+            like = f"%{clean_query}%"
+            params.append(like)
+            params.append(like)
         where_sql = " AND ".join(where)
         with conn:
             with conn.cursor() as cur:

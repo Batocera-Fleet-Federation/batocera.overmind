@@ -2946,6 +2946,105 @@ def test_device_systems_support_server_side_pagination(client):
     assert [row["system_name"] for row in payload["systems"]] == ["nes"]
 
 
+def test_device_systems_search_matches_game_titles_not_just_system_names(client):
+    """Regression: searching a game name previously found nothing, because the
+    systems list only matched the search text against system_name -- a game
+    living in a system whose name doesn't contain the search text could never be
+    found (the system folder itself wouldn't even appear)."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "game-search@example.com", "username": "game-search", "password": "testpass123"},
+    )
+    user = db.get_user_by_email("game-search@example.com")
+    db.create_device(user["id"], "game-search-drone", "Game Search Drone", {"ip_address": "10.0.0.3"}, raw_token="game-search-token")
+    db.add_roms("game-search-drone", "snes", [{"rom_name": "Super Metroid", "file_path": "Super Metroid.zip"}])
+    db.add_roms("game-search-drone", "genesis", [{"rom_name": "Sonic the Hedgehog", "file_path": "Sonic.zip"}])
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "game-search@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+
+    # "metroid" matches no system name, only a game inside "snes".
+    response = client.get(
+        "/api/devices/game-search-drone/systems?q=metroid",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["system_name"] for row in payload["systems"]] == ["snes"]
+
+    # A system-name match still works (unchanged behavior).
+    response = client.get(
+        "/api/devices/game-search-drone/systems?q=genesis",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert [row["system_name"] for row in response.json()["systems"]] == ["genesis"]
+
+    # No match -> no systems.
+    response = client.get(
+        "/api/devices/game-search-drone/systems?q=nonexistent-game",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.json()["systems"] == []
+
+
+def test_device_roms_endpoint_filters_by_game_title(client):
+    """Regression: GET /api/devices/{id}/roms silently ignored any search text --
+    once a system folder was expanded, the file list never filtered by the typed
+    game name."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "rom-search@example.com", "username": "rom-search", "password": "testpass123"},
+    )
+    user = db.get_user_by_email("rom-search@example.com")
+    db.create_device(user["id"], "rom-search-drone", "Rom Search Drone", {"ip_address": "10.0.0.4"}, raw_token="rom-search-token")
+    db.add_roms(
+        "rom-search-drone",
+        "snes",
+        [
+            {"rom_name": "Super Metroid", "file_path": "Super Metroid.zip"},
+            {"rom_name": "Chrono Trigger", "file_path": "Chrono Trigger.zip"},
+        ],
+    )
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "rom-search@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+
+    response = client.get(
+        "/api/devices/rom-search-drone/roms?system_name=snes&q=metroid&offset=0&per_page=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["rom_name"] for row in payload["roms"]] == ["Super Metroid"]
+    assert payload["total"] == 1
+
+
+def test_swarm_wide_systems_search_matches_game_titles(client):
+    """/api/systems (the fleet-wide list backing the "All"/"Missing" scope) must
+    honor the same game-title search as the per-device systems list."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "fleet-search@example.com", "username": "fleet-search", "password": "testpass123"},
+    )
+    user = db.get_user_by_email("fleet-search@example.com")
+    db.create_device(user["id"], "fleet-search-drone", "Fleet Search Drone", {"ip_address": "10.0.0.5"}, raw_token="fleet-search-token")
+    db.add_roms("fleet-search-drone", "snes", [{"rom_name": "Super Metroid", "file_path": "Super Metroid.zip"}])
+    db.add_roms("fleet-search-drone", "genesis", [{"rom_name": "Sonic the Hedgehog", "file_path": "Sonic.zip"}])
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "fleet-search@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+
+    response = client.get("/api/systems?q=metroid", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert [row["system_name"] for row in response.json()["systems"]] == ["snes"]
+
+    response = client.get("/api/systems", headers={"Authorization": f"Bearer {token}"})
+    assert {row["system_name"] for row in response.json()["systems"]} == {"snes", "genesis"}
+
+
 def test_devices_list_does_not_load_inventory_counts(client, monkeypatch):
     client.post(
         "/api/auth/register",

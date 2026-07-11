@@ -535,6 +535,67 @@ class IsPeerResolvableTests(unittest.TestCase):
         self.assertIsNone(store.is_peer_resolvable(""))
 
 
+class PageDeviceRomSystemsSearchTests(unittest.TestCase):
+    """page_device_rom_systems: a search must match a game's title within a
+    system, not just the system name -- otherwise searching a game whose system
+    name doesn't contain the search text finds nothing (see
+    db.get_device_systems_page / the "search doesn't find games" bug)."""
+
+    def _store_with_cursor(self, cursor):
+        store = PostgresMetadataStore()
+        store.assets_enabled = lambda: True  # type: ignore[assignment]
+        store._core_connection = lambda ensure_schema=False: _FakeConn(cursor)
+        return store
+
+    def test_query_matches_system_name_or_game_name(self):
+        cursor = _FakeCursor(fetchone_result=(1,), fetchall_result=[("snes", 1, 1, None)])
+        store = self._store_with_cursor(cursor)
+        rows, total = store.page_device_rom_systems("device-1", query="Metroid")
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["system_name"], "snes")
+        count_sql, count_params = cursor.executed[0]
+        self.assertIn("(lower(system_name) LIKE %s OR lower(name) LIKE %s)", count_sql)
+        self.assertEqual(count_params, ["device-1", "%metroid%", "%metroid%"])
+
+    def test_blank_query_omits_the_name_filter(self):
+        cursor = _FakeCursor(fetchone_result=(1,), fetchall_result=[("snes", 1, 1, None)])
+        store = self._store_with_cursor(cursor)
+        store.page_device_rom_systems("device-1")
+        count_sql, count_params = cursor.executed[0]
+        self.assertNotIn("LIKE", count_sql)
+        self.assertEqual(count_params, ["device-1"])
+
+
+class SummarizeRomSystemsSearchTests(unittest.TestCase):
+    """summarize_rom_systems backs the fleet-wide /api/systems list (the "All"/
+    "Missing" scope): same game-title matching as the per-device version, and
+    must bypass the summary cache when filtered (the cache key doesn't account
+    for the query, so caching a filtered result would leak across searches)."""
+
+    def _store_with_cursor(self, cursor):
+        store = PostgresMetadataStore()
+        store.assets_enabled = lambda: True  # type: ignore[assignment]
+        store._connect = lambda: _FakeConn(cursor)
+        return store
+
+    def test_query_matches_system_name_or_game_name(self):
+        cursor = _FakeCursor(fetchall_result=[("snes", 2, 2, 1)])
+        store = self._store_with_cursor(cursor)
+        result = store.summarize_rom_systems(["device-1"], query="Metroid")
+        self.assertEqual(result, [{"system_name": "snes", "rom_count": 2, "game_count": 2, "device_count": 1}])
+        sql, params = cursor.executed[0]
+        self.assertIn("(lower(system_name) LIKE %s OR lower(name) LIKE %s)", sql)
+        self.assertEqual(params, [["device-1"], "%metroid%", "%metroid%"])
+
+    def test_blank_query_omits_the_name_filter(self):
+        cursor = _FakeCursor(fetchall_result=[("snes", 2, 2, 1)])
+        store = self._store_with_cursor(cursor)
+        store.summarize_rom_systems(["device-1"])
+        sql, params = cursor.executed[0]
+        self.assertNotIn("LIKE", sql)
+        self.assertEqual(params, [["device-1"]])
+
+
 class DeviceRowMappingTests(unittest.TestCase):
     """_device_from_row must surface the edge_online / reflexive_endpoint columns
     that _select_device_sql now projects (positions 26 & 27, after checked_at)."""
