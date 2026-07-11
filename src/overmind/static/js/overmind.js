@@ -3279,6 +3279,7 @@
                     </div></div>
                     ${renderIdleVolumeCard(info)}
                     ${renderIdleGameExitCard(info)}
+                    ${renderWifiRecoveryCard(info)}
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <strong><i class="bi bi-power me-1"></i>Power</strong>
                         <div class="mt-2">
@@ -3466,6 +3467,42 @@
                     payload: desired,
                 });
                 rememberPendingDeviceAutomation('idle_game_exit_automation', desired);
+                renderDeviceAdminPanel();
+            }
+
+            function renderWifiRecoveryCard(info) {
+                const automation = (info && typeof info.wifi_recovery_automation === 'object' && info.wifi_recovery_automation) || null;
+                const reported = !!automation;
+                const enabled = reported ? !!automation.enabled : false;
+                const current = !reported
+                    ? 'not yet reported'
+                    : (enabled ? `${automation.pending ? 'pending - ' : ''}on` : 'off');
+                return `
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-wifi me-1"></i>Wi-Fi Recovery Automation</strong>
+                            <span class="small text-muted" data-device-admin-field="wifi-recovery">Current: ${escapeHtml(current)}</span>
+                        </div>
+                        <div class="small text-muted mb-2">Every 60 seconds, verify that Wi-Fi is enabled and connected. A failed check disables Wi-Fi, waits three seconds, and enables it again.</div>
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" role="switch" id="wifi-recovery-enabled" ${enabled ? 'checked' : ''}>
+                                <label class="form-check-label" for="wifi-recovery-enabled">Enable Wi-Fi recovery</label>
+                            </div>
+                            <button class="btn btn-primary btn-sm" type="button" onclick="queueDeviceWifiRecovery()"><i class="bi bi-save me-1"></i>Save</button>
+                        </div>
+                        <div class="small text-muted mt-2">Applied on the Drone within about a minute.</div>
+                    </div></div>
+                `;
+            }
+
+            async function queueDeviceWifiRecovery() {
+                const desired = { enabled: !!document.getElementById('wifi-recovery-enabled')?.checked };
+                await queueDeviceAction('set_wifi_recovery_automation', {
+                    confirm: false,
+                    payload: desired,
+                });
+                rememberPendingDeviceAutomation('wifi_recovery_automation', desired);
                 renderDeviceAdminPanel();
             }
 
@@ -4061,6 +4098,7 @@
                     set_volume: 'set volume',
                     set_idle_volume_automation: 'update idle volume automation',
                     set_idle_game_exit_automation: 'update idle game exit automation',
+                    set_wifi_recovery_automation: 'update Wi-Fi recovery automation',
                     collect_rom_metadata: 'collect ROM and system metadata',
                     collect_game_logs: 'collect Game Logs',
                     collect_emulator_configs: 'collect emulator configs',
@@ -4118,6 +4156,7 @@
                     set_volume: 'Set Volume',
                     set_idle_volume_automation: 'Idle Volume Automation',
                     set_idle_game_exit_automation: 'Idle Game Exit Automation',
+                    set_wifi_recovery_automation: 'Wi-Fi Recovery Automation',
                     purge_asset_cache: 'Purge Asset Cache',
                     collect_game_logs: 'Game Logs',
                     collect_emulator_configs: 'Emulator Configs',
@@ -4136,6 +4175,7 @@
                 if (result.type === 'audio_volume') return result.muted ? 'Volume muted' : `Volume set to ${result.level}%`;
                 if (result.type === 'idle_volume_automation') return result.enabled ? `Idle volume on: lower to ${result.target_volume}% after ${result.idle_minutes} min idle` : 'Idle volume automation disabled';
                 if (result.type === 'idle_game_exit_automation') return result.enabled ? `Idle game exit on: exit after ${result.idle_minutes} min idle` : 'Idle game exit automation disabled';
+                if (result.type === 'wifi_recovery_automation') return result.enabled ? 'Wi-Fi recovery automation enabled' : 'Wi-Fi recovery automation disabled';
                 if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;
                 if (result.type === 'game_logs') return `${(result.sessions || []).length} parsed play sessions, ${(result.logs || []).length} logs`;
                 if (result.type === 'emulator_configs') return `${(result.configs || []).length} config files`;

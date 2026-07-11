@@ -96,6 +96,19 @@ def _idle_game_exit_automation_dict(enabled, idle_minutes):
     }
 
 
+def _wifi_recovery_automation_column(info: dict):
+    raw = info.get("wifi_recovery_automation")
+    if not isinstance(raw, dict) or raw.get("enabled") is None:
+        return None
+    return bool(raw.get("enabled"))
+
+
+def _wifi_recovery_automation_dict(enabled):
+    if enabled is None:
+        return None
+    return {"enabled": bool(enabled)}
+
+
 def _store_performance_metrics(cur, drone_id: str, performance: dict) -> None:
     cur.execute("DELETE FROM drone_performance_metrics WHERE drone_id = %s", (drone_id,))
     if not isinstance(performance, dict):
@@ -333,6 +346,7 @@ class PostgresMetadataStore:
                     info = system_info
                     iva = _idle_volume_automation_columns(info)
                     ige = _idle_game_exit_automation_columns(info)
+                    wifi_recovery_enabled = _wifi_recovery_automation_column(info)
                     cur.execute(
                         """
                         INSERT INTO drone_system_info
@@ -341,8 +355,9 @@ class PostgresMetadataStore:
                              batocera_version, screen_mode, audio_volume,
                              idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
                              idle_game_exit_enabled, idle_game_exit_idle_minutes,
+                             wifi_recovery_enabled,
                              pixen_installed, container, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         ON CONFLICT (drone_id) DO UPDATE SET
                             hostname          = COALESCE(EXCLUDED.hostname,          drone_system_info.hostname),
                             model             = COALESCE(EXCLUDED.model,             drone_system_info.model),
@@ -362,6 +377,7 @@ class PostgresMetadataStore:
                             idle_volume_target       = COALESCE(EXCLUDED.idle_volume_target,       drone_system_info.idle_volume_target),
                             idle_game_exit_enabled      = COALESCE(EXCLUDED.idle_game_exit_enabled,      drone_system_info.idle_game_exit_enabled),
                             idle_game_exit_idle_minutes = COALESCE(EXCLUDED.idle_game_exit_idle_minutes, drone_system_info.idle_game_exit_idle_minutes),
+                            wifi_recovery_enabled = COALESCE(EXCLUDED.wifi_recovery_enabled, drone_system_info.wifi_recovery_enabled),
                             pixen_installed   = COALESCE(EXCLUDED.pixen_installed,   drone_system_info.pixen_installed),
                             container         = COALESCE(EXCLUDED.container,         drone_system_info.container),
                             updated_at        = now()
@@ -386,6 +402,7 @@ class PostgresMetadataStore:
                             iva[2],
                             ige[0],
                             ige[1],
+                            wifi_recovery_enabled,
                             info.get("pixen_installed"),
                             info.get("container"),
                         ),
@@ -1344,6 +1361,7 @@ class PostgresMetadataStore:
                    s.screen_mode, s.audio_volume, s.container,
                    s.idle_volume_enabled, s.idle_volume_idle_minutes, s.idle_volume_target,
                    s.idle_game_exit_enabled, s.idle_game_exit_idle_minutes,
+                   s.wifi_recovery_enabled,
                    s.pixen_installed,
                    COALESCE((
                        SELECT jsonb_object_agg(metric_group, metrics)
@@ -1375,6 +1393,7 @@ class PostgresMetadataStore:
                 screen_mode, audio_volume, container,
                 idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
                 idle_game_exit_enabled, idle_game_exit_idle_minutes,
+                wifi_recovery_enabled,
                 pixen_installed, performance,
             ) = row
             device = {
@@ -1421,6 +1440,7 @@ class PostgresMetadataStore:
                     "idle_game_exit_automation": _idle_game_exit_automation_dict(
                         idle_game_exit_enabled, idle_game_exit_idle_minutes
                     ),
+                    "wifi_recovery_automation": _wifi_recovery_automation_dict(wifi_recovery_enabled),
                     "pixen_installed": pixen_installed,
                     "performance": performance or {},
                     "container": container,
@@ -1904,6 +1924,7 @@ class PostgresMetadataStore:
             screen_mode, audio_volume, container,
             idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
             idle_game_exit_enabled, idle_game_exit_idle_minutes,
+            wifi_recovery_enabled,
             pixen_installed, performance,
             cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer,
             valid_from, valid_until, serial_number, overmind_signed_at,
@@ -1987,6 +2008,7 @@ class PostgresMetadataStore:
                 "idle_game_exit_automation": _idle_game_exit_automation_dict(
                     idle_game_exit_enabled, idle_game_exit_idle_minutes
                 ),
+                "wifi_recovery_automation": _wifi_recovery_automation_dict(wifi_recovery_enabled),
                 "pixen_installed": pixen_installed,
                 "performance": performance or {},
                 "container": container,
@@ -2044,6 +2066,7 @@ class PostgresMetadataStore:
                    si.batocera_version, si.screen_mode, si.audio_volume, si.container,
                    si.idle_volume_enabled, si.idle_volume_idle_minutes, si.idle_volume_target,
                    si.idle_game_exit_enabled, si.idle_game_exit_idle_minutes,
+                   si.wifi_recovery_enabled,
                    si.pixen_installed,
                    COALESCE((
                        SELECT jsonb_object_agg(metric_group, metrics)
@@ -4688,6 +4711,7 @@ class PostgresMetadataStore:
         info = device.get("system_info") if isinstance(device.get("system_info"), dict) else {}
         iva = _idle_volume_automation_columns(info)
         ige = _idle_game_exit_automation_columns(info)
+        wifi_recovery_enabled = _wifi_recovery_automation_column(info)
         cur.execute(
             """
             INSERT INTO drone_system_info
@@ -4695,8 +4719,9 @@ class PostgresMetadataStore:
                  cpu_max_frequency, memory_available, memory_total, batocera_version, screen_mode,
                  audio_volume, idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
                  idle_game_exit_enabled, idle_game_exit_idle_minutes,
+                 wifi_recovery_enabled,
                  pixen_installed, container, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (drone_id) DO UPDATE SET
                 hostname = EXCLUDED.hostname,
                 model = EXCLUDED.model,
@@ -4716,6 +4741,7 @@ class PostgresMetadataStore:
                 idle_volume_target = EXCLUDED.idle_volume_target,
                 idle_game_exit_enabled = EXCLUDED.idle_game_exit_enabled,
                 idle_game_exit_idle_minutes = EXCLUDED.idle_game_exit_idle_minutes,
+                wifi_recovery_enabled = EXCLUDED.wifi_recovery_enabled,
                 pixen_installed = EXCLUDED.pixen_installed,
                 container = EXCLUDED.container,
                 updated_at = now()
@@ -4740,6 +4766,7 @@ class PostgresMetadataStore:
                 iva[2],
                 ige[0],
                 ige[1],
+                wifi_recovery_enabled,
                 info.get("pixen_installed"),
                 info.get("container"),
             ),

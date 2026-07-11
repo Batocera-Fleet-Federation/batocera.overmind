@@ -2650,6 +2650,7 @@ class OvermindDatabase:
             "set_screen_mode": "Set Screen Mode",
             "set_idle_volume_automation": "Idle Volume Automation",
             "set_idle_game_exit_automation": "Idle Game Exit Automation",
+            "set_wifi_recovery_automation": "Wi-Fi Recovery Automation",
         }.get(
             str(action.get("action") or ""),
             str(action.get("action") or "action").replace("_", " ").title(),

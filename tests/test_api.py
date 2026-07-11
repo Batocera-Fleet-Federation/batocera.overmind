@@ -5163,6 +5163,30 @@ def test_idle_game_exit_automation_action_is_supported_and_validated(client):
     assert bad.status_code == 400
 
 
+def test_wifi_recovery_automation_action_is_supported_and_validated(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_wifi_recovery_automation", "payload": {"enabled": True}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["action"]["payload"] == {"enabled": True}
+
+    empty = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers=headers,
+        json={"action": "set_wifi_recovery_automation", "payload": {}},
+    )
+    assert empty.status_code == 400
+
+
 def test_pixen_update_action_is_supported(client):
     seed_test_fleet()
     token = client.post(
@@ -5227,6 +5251,27 @@ def test_heartbeat_stores_idle_game_exit_automation(client):
         "enabled": True,
         "idle_minutes": 20,
     }
+
+
+def test_heartbeat_stores_wifi_recovery_automation(client):
+    client.post("/api/auth/register", json={"email": "hb-wifi@example.com", "username": "hb-wifi-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("hb-wifi@example.com")
+    db.create_device(user["id"], "drone-wifi", "Drone Wi-Fi", {"ip_address": "10.0.0.5"}, raw_token="drone-token-wifi")
+
+    response = client.post(
+        "/api/devices/drone-wifi/heartbeat",
+        headers={"Authorization": "Bearer drone-token-wifi"},
+        json={
+            "device_id": "drone-wifi",
+            "system_info": {
+                "hostname": "drone-wifi",
+                "wifi_recovery_automation": {"enabled": True},
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    refreshed = db.get_device_by_device_id("drone-wifi")
+    assert refreshed["system_info"]["wifi_recovery_automation"] == {"enabled": True}
 
 
 def test_delete_actions_clears_device_queue(client):
@@ -5392,6 +5437,9 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "queueDeviceAction('set_idle_game_exit_automation'" in js
     assert "rememberPendingDeviceAutomation('idle_volume_automation', desired);" in js
     assert "rememberPendingDeviceAutomation('idle_game_exit_automation', desired);" in js
+    assert "renderWifiRecoveryCard(info)" in js
+    assert "queueDeviceAction('set_wifi_recovery_automation'" in js
+    assert "rememberPendingDeviceAutomation('wifi_recovery_automation', desired);" in js
     assert '<table class="table table-sm align-middle bff-stack">' in js
     assert "deleteDeviceActions()" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html
@@ -6496,9 +6544,10 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                     None, None, None, None, "kid", 65, None,
-                    None, None, None,
-                    None, None,
-                    True, {"cpu": {"host_percent": 12.5}},
+                        None, None, None,
+                        None, None,
+                        None,
+                        True, {"cpu": {"host_percent": 12.5}},
                 )]
             if "FROM device_admin_claims" in self.sql:
                 return []
@@ -6562,9 +6611,10 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None,
-                    None, None, None,
-                    None, None,
-                    False, {"memory": {"used_percent": 44.0}},
+                        None, None, None,
+                        None, None,
+                        None,
+                        False, {"memory": {"used_percent": 44.0}},
                 )]
             if "FROM gameplay_sessions" in self.sql:
                 return [("game-1", "d1", "snes", "Game", "Game.zip", "abc", received_at, 60, received_at)]
@@ -6631,9 +6681,10 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         443, "https", "https://drone-a:443", False, None, None,
                         None, None, None, None, None, None, None,
                         None, None, None, None, None,
-                        None, None, None,
-                        None, None,
-                        False, {},
+                            None, None, None,
+                            None, None,
+                            None,
+                            False, {},
                     ), (
                         "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
                         None, "source-hash", reported_at, reported_at,
@@ -6642,9 +6693,10 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         443, "https", "https://drone-b:443", True, "198.51.100.2", reported_at,
                         None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None,
-                    None, None, None,
-                    None, None,
-                    True, {"cpu": {"host_percent": 8.0}},
+                        None, None, None,
+                        None, None,
+                        None,
+                        True, {"cpu": {"host_percent": 8.0}},
                 )]
             if "FROM drone_certificates" in self.sql:
                 return [("d2", "loaded", "fp", "sha", "-----BEGIN CERTIFICATE-----\\npeer\\n-----END CERTIFICATE-----", "subject", "issuer", None, None, "1", None, reported_at)]

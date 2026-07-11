@@ -111,6 +111,7 @@ SUPPORTED_DEVICE_ACTIONS = {
     "set_volume",
     "set_idle_volume_automation",
     "set_idle_game_exit_automation",
+    "set_wifi_recovery_automation",
     "collect_rom_metadata",
     "rebuild_asset_metadata",
     "purge_asset_cache",
@@ -2280,6 +2281,13 @@ async def create_device_action(
                 detail="Provide at least one of: enabled, idle_minutes",
             )
         action_payload = normalized
+    if action_type == "set_wifi_recovery_automation":
+        if "enabled" not in action_payload:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide enabled",
+            )
+        action_payload = {"enabled": bool(action_payload.get("enabled"))}
     if action_type in {"rebuild_asset_metadata", "purge_asset_cache"}:
         db.clear_device_asset_metadata(device["user_id"], device_id)
     action = db.create_device_action(device["user_id"], device_id, action_type, action_payload)
