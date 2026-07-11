@@ -596,6 +596,105 @@ class SummarizeRomSystemsSearchTests(unittest.TestCase):
         self.assertEqual(params, [["device-1"]])
 
 
+class StoreActionResultTests(unittest.TestCase):
+    """store_action_result writes to drone_action_results -- migration 0006 added
+    the table after a schema-squash regression left the code referencing a table
+    no migration created (psycopg.errors.UndefinedTable on every action
+    completion that carried a result payload, e.g. sync_rom failures)."""
+
+    def _store_with_cursor(self, cursor):
+        store = PostgresMetadataStore()
+        store.url = "postgresql://fake/db"
+        store.ensure_schema = lambda: None  # type: ignore[assignment]
+        store._connect = lambda: _FakeConn(cursor)
+        return store
+
+    def test_insert_targets_drone_action_results_with_expected_columns(self):
+        cursor = _FakeCursor()
+        store = self._store_with_cursor(cursor)
+        store.store_action_result("dev-a", "action-1", {"type": "rom_sync", "status": "failed"})
+        sql, params = cursor.executed[0]
+        self.assertIn("INSERT INTO drone_action_results (device_id, action_id, result_type, result)", sql)
+        self.assertEqual(params[0], "dev-a")
+        self.assertEqual(params[1], "action-1")
+        self.assertEqual(params[2], "rom_sync")
+
+
+class SyncActivityLeanStoreTests(unittest.TestCase):
+    """rom_sync_activity's lean Postgres path (record/list/search_sync_activity*):
+    the in-memory dict it replaces is per-process, so an activity row reported to
+    one Lambda container was invisible to a different container's next poll --
+    "shows up in Sync Activity for a moment, then disappears" (see db.py's
+    add_rom_sync_activity / get_rom_sync_activity / search_rom_sync_activity)."""
+
+    def _store_with_cursor(self, cursor):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: _FakeConn(cursor)
+        return store
+
+    def _row(self, **overrides):
+        base = {
+            "id": "sync-1", "target_drone_id": "dev-a", "source_drone_id": "dev-b",
+            "asset_type": "rom", "action": "download", "status": "failed",
+            "system_name": "ps3", "file_path": "Dark Souls 2.ps3.squashfs",
+            "rom_fingerprint": "fp", "bios_md5": None, "artwork_type": None,
+            "bytes_transferred": 0, "file_size": 8658403328,
+            "started_at": None, "completed_at": None,
+            "failure_reason": "No healthy source peer with requested ROM found",
+            "received_at": None,
+        }
+        base.update(overrides)
+        return tuple(base.values())
+
+    def test_record_sync_activity_writes_through_the_shared_upsert(self):
+        cursor = _FakeCursor()
+        store = self._store_with_cursor(cursor)
+        self.assertTrue(store.record_sync_activity("dev-a", {"id": "sync-1", "status": "failed"}))
+        sql, params = cursor.executed[0]
+        self.assertIn("INSERT INTO sync_activity", sql)
+        self.assertIn("ON CONFLICT (id) DO UPDATE", sql)
+        self.assertEqual(params[0], "sync-1")
+        self.assertEqual(params[1], "dev-a")
+
+    def test_record_sync_activity_without_connection_returns_false(self):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: None
+        self.assertFalse(store.record_sync_activity("dev-a", {"id": "sync-1"}))
+
+    def test_list_sync_activity_for_device_projects_columns(self):
+        cursor = _FakeCursor(fetchall_result=[self._row()])
+        store = self._store_with_cursor(cursor)
+        rows = store.list_sync_activity_for_device("dev-a")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "sync-1")
+        self.assertEqual(rows[0]["status"], "failed")
+        self.assertEqual(rows[0]["system_name"], "ps3")
+        self.assertEqual(rows[0]["failure_reason"], "No healthy source peer with requested ROM found")
+        sql, params = cursor.executed[0]
+        self.assertIn("WHERE target_drone_id = %s", sql)
+        self.assertEqual(params, ("dev-a", 100))
+
+    def test_list_sync_activity_without_connection_returns_none(self):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: None
+        self.assertIsNone(store.list_sync_activity_for_device("dev-a"))
+
+    def test_search_sync_activity_applies_status_and_query_filters(self):
+        cursor = _FakeCursor(fetchall_result=[self._row()])
+        store = self._store_with_cursor(cursor)
+        rows = store.search_sync_activity_for_devices(["dev-a", "dev-b"], query="dark souls", status="Failed")
+        self.assertEqual(len(rows), 1)
+        sql, params = cursor.executed[0]
+        self.assertIn("target_drone_id = ANY(%s)", sql)
+        self.assertIn("lower(coalesce(status, '')) = %s", sql)
+        self.assertIn("LIKE %s", sql)
+        self.assertEqual(params, [["dev-a", "dev-b"], "failed", "%dark souls%", 500])
+
+    def test_search_sync_activity_empty_ids_short_circuits(self):
+        store = PostgresMetadataStore()
+        self.assertEqual(store.search_sync_activity_for_devices([]), [])
+
+
 class DeviceRowMappingTests(unittest.TestCase):
     """_device_from_row must surface the edge_online / reflexive_endpoint columns
     that _select_device_sql now projects (positions 26 & 27, after checked_at)."""

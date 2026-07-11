@@ -128,5 +128,8 @@ Full flow + wire protocol: see the Drone repo's `app/transport/` and the
 ## Skills (`.claude/skills/`, auto-surfaced)
 
 `overmind-db-management`, `overmind-edge-networking`, `overmind-architecture`,
-`overmind-aws-deployment`, `bff-ui-theme-functionality`. Consult the matching
-skill before non-trivial work in that area.
+`overmind-aws-deployment`, `overmind-live-debugging` (debugging live Overmind in
+AWS — finding the right Lambda tier/log group, tight CloudWatch epoch queries,
+reading tracebacks to the real exception, migration/schema cross-checks),
+`bff-ui-theme-functionality`. Consult the matching skill before non-trivial work in
+that area.

@@ -2442,6 +2442,127 @@ class PostgresMetadataStore:
                 row = cur.fetchone()
         return bool(row[0]) if row else False
 
+    _SYNC_ACTIVITY_COLUMNS = (
+        "id, target_drone_id, source_drone_id, asset_type, action, status, system_name, file_path, "
+        "rom_fingerprint, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at, "
+        "failure_reason, received_at"
+    )
+
+    @staticmethod
+    def _sync_activity_row(row: tuple) -> dict:
+        (rid, target_drone_id, source_drone_id, asset_type, action, status, system_name, file_path,
+         rom_fingerprint, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at,
+         failure_reason, received_at) = row
+        return {
+            "id": rid,
+            "target_drone_id": target_drone_id,
+            "source_drone_id": source_drone_id,
+            "asset_type": asset_type,
+            "action": action,
+            "status": status,
+            "system": system_name,
+            "system_name": system_name,
+            "relative_path": file_path,
+            "rom_path": file_path,
+            "rom_fingerprint": rom_fingerprint,
+            "bios_md5": bios_md5,
+            "artwork_type": artwork_type,
+            "bytes_transferred": bytes_transferred,
+            "file_size": file_size,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "failure_reason": failure_reason,
+            "received_at": received_at,
+        }
+
+    def record_sync_activity(self, internal_device_id: str, row: dict) -> bool:
+        """Persist one sync-activity entry directly to `sync_activity` (lean write,
+        reusing the same upsert `_insert_sync_activity` runs from the full-state
+        mirror). Returns False when Postgres is unavailable so the caller can fall
+        back to its in-memory copy.
+
+        This exists for the same reason as `is_peer_resolvable`: db.py's in-memory
+        rom_sync_activity dict is per-process, and the full-state mirror that would
+        otherwise carry this into Postgres never runs in production (its reload is
+        skipped once relational Postgres is configured) -- so a sync's activity row
+        was visible only to whichever single Lambda container happened to handle
+        that one request, and vanished on the very next poll served by a different
+        container ("shows up in Sync Activity for a moment, then disappears").
+        """
+        if not internal_device_id or not isinstance(row, dict):
+            return False
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                self._insert_sync_activity(cur, internal_device_id, row)
+        return True
+
+    def list_sync_activity_for_device(self, internal_device_id: str, limit: int = 100) -> Optional[list[dict]]:
+        """Most recent sync-activity rows for one device, newest first. Returns
+        None when Postgres is unavailable (caller falls back to in-memory)."""
+        if not internal_device_id:
+            return None
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {self._SYNC_ACTIVITY_COLUMNS} FROM sync_activity "
+                    "WHERE target_drone_id = %s "
+                    "ORDER BY COALESCE(completed_at, started_at, received_at) DESC, received_at DESC "
+                    "LIMIT %s",
+                    (internal_device_id, max(1, int(limit))),
+                )
+                rows = cur.fetchall()
+        return [self._sync_activity_row(row) for row in rows]
+
+    def search_sync_activity_for_devices(
+        self,
+        internal_device_ids: Iterable[str],
+        *,
+        query: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 500,
+    ) -> Optional[list[dict]]:
+        """Sync-activity rows across several devices (a user's whole fleet), most
+        recent first, with optional free-text and status filters. Returns None when
+        Postgres is unavailable (caller falls back to in-memory)."""
+        ids = [str(value) for value in internal_device_ids if value]
+        if not ids:
+            return []
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        where = ["target_drone_id = ANY(%s)"]
+        params: list[object] = [ids]
+        clean_status = str(status or "").strip().lower()
+        if clean_status:
+            where.append("lower(coalesce(status, '')) = %s")
+            params.append(clean_status)
+        clean_query = str(query or "").strip().lower()
+        if clean_query:
+            where.append(
+                "lower(coalesce(system_name,'') || ' ' || coalesce(file_path,'') || ' ' || "
+                "coalesce(rom_fingerprint,'') || ' ' || coalesce(bios_md5,'') || ' ' || "
+                "coalesce(failure_reason,'') || ' ' || coalesce(source_drone_id,'')) LIKE %s"
+            )
+            params.append(f"%{clean_query}%")
+        params.append(max(1, int(limit)))
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {self._SYNC_ACTIVITY_COLUMNS} FROM sync_activity "
+                    f"WHERE {' AND '.join(where)} "
+                    "ORDER BY COALESCE(completed_at, started_at, received_at) DESC, received_at DESC "
+                    "LIMIT %s",
+                    params,
+                )
+                rows = cur.fetchall()
+        return [self._sync_activity_row(row) for row in rows]
+
     def create_transfer_session(
         self,
         *,

@@ -3702,6 +3702,18 @@ class OvermindDatabase:
             else:
                 bucket.append(entry)
             del bucket[:-200]
+        # Lean write to the real sync_activity table, keyed by the TARGET device (the
+        # table has one target_drone_id FK column, unlike the in-memory dual-bucket
+        # copy above). Needed because the full-state mirror that would otherwise carry
+        # this into Postgres never runs in production (see record_sync_activity's
+        # docstring) -- without this, the activity briefly appears (from whichever
+        # Lambda container handled this exact request) then vanishes on the next poll.
+        target_device = self.get_device_by_device_id(str(entry.get("target_drone_id") or ""))
+        if target_device:
+            try:
+                postgres_store.record_sync_activity(target_device["id"], entry)
+            except Exception:
+                pass
         return entry
 
     def store_download_state(self, device_id: str, payload: dict) -> Optional[dict]:
@@ -3758,9 +3770,16 @@ class OvermindDatabase:
         device = self.get_device_by_device_id(device_id)
         if not device or device["user_id"] != user_id:
             return None
+        relational = postgres_store.list_sync_activity_for_device(device["id"], limit=100)
+        if relational is not None:
+            return relational
         return list(reversed(self.rom_sync_activity.get(device["id"], [])))[:100]
 
     def search_rom_sync_activity(self, user_id: str, query: Optional[str] = None, status: Optional[str] = None) -> List[dict]:
+        device_ids = [device["id"] for device in self.get_user_devices(user_id)]
+        relational = postgres_store.search_sync_activity_for_devices(device_ids, query=query, status=status, limit=500)
+        if relational is not None:
+            return relational
         rows = []
         seen = set()
         for device in self.get_user_devices(user_id):
