@@ -3190,6 +3190,42 @@ def test_is_drone_peer_resolvable_prefers_postgres_lean_read(monkeypatch):
     assert db.is_drone_peer_resolvable("device-with-empty-in-memory-state") is False
 
 
+def test_heartbeat_swarm_reachability_prefers_postgres_lean_read(client, monkeypatch):
+    """get_swarm_for_device grades peer reachability from Postgres first: the
+    peer-checks report and a heartbeat routinely run on different Lambda
+    containers, so the in-memory peer_checks dict is usually empty when the swarm
+    payload is built -- every peer was graded public_resolvable=false and drones
+    intermittently failed cross-network syncs with "No healthy source peer with
+    requested ROM found" depending on which container served their heartbeat."""
+    client.post(
+        "/api/auth/register",
+        json={"email": "swarm-reach@example.com", "username": "swarm-reach", "password": "testpass123"},
+    )
+    user = db.get_user_by_email("swarm-reach@example.com")
+    db.create_device(user["id"], "swarm-target", "Swarm Target", {"ip_address": "10.0.0.9"}, raw_token="t")
+    db.create_device(
+        user["id"],
+        "swarm-source",
+        "Swarm Source",
+        {"network": {"public_ip": "8.8.4.4"}, "api_port": 443, "scheme": "https"},
+        raw_token="s",
+    )
+
+    # In-memory peer_checks is empty (a fresh container); Postgres knows the source passed.
+    monkeypatch.setattr(db_module.postgres_store, "list_peer_resolvable_targets", lambda: {"swarm-source"})
+    swarm = db.get_swarm_for_device("swarm-target")
+    row = next(r for r in swarm if r["drone_id"] == "swarm-source")
+    assert row["public_resolvable"] is True
+    assert row["public_reachable_url"] == "https://8.8.4.4"
+
+    # Postgres unavailable -> falls back to the (here: empty) in-memory view.
+    monkeypatch.setattr(db_module.postgres_store, "list_peer_resolvable_targets", lambda: None)
+    swarm = db.get_swarm_for_device("swarm-target")
+    row = next(r for r in swarm if r["drone_id"] == "swarm-source")
+    assert row["public_resolvable"] is False
+    assert row["public_reachable_url"] is None
+
+
 def test_background_polling_does_not_pin_global_loading_toast():
     js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     assert "const controller = new AbortController();" in js

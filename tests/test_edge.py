@@ -534,6 +534,24 @@ class IsPeerResolvableTests(unittest.TestCase):
         store = PostgresMetadataStore()
         self.assertIsNone(store.is_peer_resolvable(""))
 
+    def test_list_peer_resolvable_targets_returns_pass_set(self):
+        # Backs the heartbeat's swarm payload (db.get_swarm_for_device): grading
+        # every peer at once from Postgres instead of the per-container in-memory
+        # dict, so the swarm's public_resolvable flags stop flapping per Lambda
+        # container ("No healthy source peer" on cross-network syncs).
+        cursor = _FakeCursor(fetchall_result=[("drone-a",), ("drone-b",)])
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: _FakeConn(cursor)
+        self.assertEqual(store.list_peer_resolvable_targets(), {"drone-a", "drone-b"})
+        sql, _params = cursor.executed[0]
+        self.assertIn("DISTINCT target_drone_id", sql)
+        self.assertIn("status = 'pass'", sql)
+
+    def test_list_peer_resolvable_targets_without_connection_returns_none(self):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: None
+        self.assertIsNone(store.list_peer_resolvable_targets())
+
 
 class PageDeviceRomSystemsSearchTests(unittest.TestCase):
     """page_device_rom_systems: a search must match a game's title within a

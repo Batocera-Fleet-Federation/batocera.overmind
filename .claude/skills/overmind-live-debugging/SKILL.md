@@ -53,6 +53,23 @@ every route you care about individually, don't assume neighbors share a tier.
 `scheduled` is separate again — that's EventBridge-triggered jobs
 (`notification-delivery`, `device-status`, `public-reachability`), not
 request-triggered; check it for cron-job misbehavior, not user-facing 500s.
+Reading `scheduled` logs correctly:
+
+- **Some jobs log only their failures.** `public-reachability` prints a line per
+  *unreachable* drone ("`Public reachability: <id> not resolvable -- ...`") and
+  nothing for drones that probed fine — absence of a drone from the output means
+  it PASSED, not that it wasn't probed. Don't conclude a device was flapping just
+  because it never appears.
+- **Shared public IPs are graded by certificate, not by HTTP success.** Multiple
+  drones behind one NAT share a public IP but only one can own the :443
+  port-forward; the probe hits the IP and identifies the answering drone by its
+  TLS cert. The others get "`not resolvable -- public IP X answered by a different
+  Drone (<id>)`" — that's correct behavior for a shared-IP site, not an error.
+- **Verify the real cadence from the log timestamps, not from `locals.tf`.** The
+  deployed EventBridge rule can differ from the current Terraform (observed:
+  `locals.tf` said `rate(15 minutes)` while the deployed rule fired every minute —
+  a later tf apply hadn't happened). The interval matters when you're reasoning
+  about how stale a reachability/status flag could have been at a failure instant.
 
 ## Step 2 — query CloudWatch with a tight epoch window
 
@@ -198,9 +215,26 @@ only through a full-state snapshot whose *read* side is skipped once real
 relational Postgres is configured. Anything relying solely on that dict is
 invisible across Lambda containers/functions — see `.github`'s `bff-live-debugging`
 skill, Step 6, for the full pattern and the fix shape (`is_peer_resolvable`,
-`record_sync_activity`/`list_sync_activity_for_device` are the two existing
-examples to mirror). If a symptom is "shows up once then disappears" or "works
-sometimes", check for this before looking anywhere else.
+`record_sync_activity`/`list_sync_activity_for_device`, and
+`list_peer_resolvable_targets` — which fixed the heartbeat swarm payload — are the
+existing examples to mirror). If a symptom is "shows up once then disappears" or
+"works sometimes", check for this before looking anywhere else.
+
+Two refinements from live incidents:
+
+- **Response builders count, not just GET endpoints.** The bug isn't limited to
+  "read an in-memory dict and return it" — any handler that *derives* fields for a
+  response payload from in-memory state is affected. `get_swarm_for_device` graded
+  every peer's `public_resolvable` from the in-memory `peer_checks` dict while
+  assembling the heartbeat response, so which container served a drone's heartbeat
+  determined whether its peers looked reachable — the flag then flapped in the
+  drone's own cache once a minute. When a *drone-side* cached value flaps, suspect
+  the Overmind handler that produces it.
+- **Correlate flapping with cold starts.** Each invocation's `REPORT` line carries
+  `Init Duration` only on a cold start (fresh container = completely empty
+  in-memory dicts). A failure that lines up with an `Init Duration` invocation —
+  or with a burst of new `START RequestId` container ids — is strong evidence for
+  this class even before you find the guilty dict.
 
 ## Safety rules
 

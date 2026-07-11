@@ -2442,6 +2442,30 @@ class PostgresMetadataStore:
                 row = cur.fetchone()
         return bool(row[0]) if row else False
 
+    def list_peer_resolvable_targets(self) -> Optional[set]:
+        """All device_ids some drone has reported a passing peer-check against.
+
+        Lean set-read counterpart of is_peer_resolvable, for callers that grade
+        every peer at once (the heartbeat's swarm payload). Returns None when
+        Postgres is unavailable so the caller can fall back to its in-memory view.
+
+        Same rationale as is_peer_resolvable: db.py's in-memory peer_checks dict
+        is per-process, so on Lambda the container answering a heartbeat usually
+        never saw any peer-checks POST and would grade every peer unreachable --
+        the swarm payload then flaps per-container and drones intermittently fail
+        cross-network syncs with "No healthy source peer with requested ROM found".
+        """
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT target_drone_id FROM drone_peer_checks WHERE status = 'pass'"
+                )
+                rows = cur.fetchall()
+        return {str(row[0]) for row in rows if row and row[0]}
+
     _SYNC_ACTIVITY_COLUMNS = (
         "id, target_drone_id, source_drone_id, asset_type, action, status, system_name, file_path, "
         "rom_fingerprint, bios_md5, artwork_type, bytes_transferred, file_size, started_at, completed_at, "

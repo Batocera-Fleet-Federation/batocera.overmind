@@ -2240,14 +2240,20 @@ class OvermindDatabase:
         if not device:
             return []
         cutoff = datetime.utcnow() - timedelta(seconds=max(1, int(offline_seconds)))
-        # Build a set of peer-resolvable device_ids from the peer_checks buckets
-        peer_resolvable_ids: set = set()
-        for bucket in self.peer_checks.values():
-            for check in bucket:
-                if check.get("status") == "pass":
-                    target = check.get("target_drone_id")
-                    if target:
-                        peer_resolvable_ids.add(str(target))
+        # Peer-resolvable device_ids: Postgres first (the report and this heartbeat
+        # routinely run on different Lambda containers, so the in-memory buckets
+        # below are usually empty here -- grading every peer unreachable and making
+        # cross-network syncs flap with "No healthy source peer"); fall back to the
+        # in-memory buckets only when Postgres can't answer.
+        peer_resolvable_ids = postgres_store.list_peer_resolvable_targets()
+        if peer_resolvable_ids is None:
+            peer_resolvable_ids = set()
+            for bucket in self.peer_checks.values():
+                for check in bucket:
+                    if check.get("status") == "pass":
+                        target = check.get("target_drone_id")
+                        if target:
+                            peer_resolvable_ids.add(str(target))
         output = []
         for peer in self.get_user_devices(device["user_id"]):
             resolved = peer.get("resolved_network") or {}
