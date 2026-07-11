@@ -2412,6 +2412,36 @@ class PostgresMetadataStore:
                 )
                 return cur.rowcount > 0
 
+    def is_peer_resolvable(self, target_device_id: str) -> Optional[bool]:
+        """Return True if any drone has ever reported a passing peer-check reaching
+        target_device_id. Lean reader over drone_peer_checks (populated by the
+        full-state mirror on every add_peer_checks call, keyed by the reported
+        target_drone_id string -- no join needed). Returns None when Postgres is
+        unavailable so the caller can fall back to its in-memory view instead of
+        wrongly treating "can't check" as "not resolvable".
+
+        This exists because db.py's in-memory peer_checks dict is per-process: on
+        Lambda, the request that reports a peer-check result and the later request
+        that decides sync eligibility routinely land on different containers (even
+        different Lambda functions -- /peer-checks and /sync-rom are on different
+        tiers), so the in-memory-only check almost always sees an empty dict and
+        every cross-drone sync fails with "No resolvable source Drone has this ROM".
+        """
+        target = str(target_device_id or "").strip()
+        if not target:
+            return None
+        conn = self._core_connection(ensure_schema=False)
+        if conn is None:
+            return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT EXISTS (SELECT 1 FROM drone_peer_checks WHERE target_drone_id = %s AND status = 'pass')",
+                    (target,),
+                )
+                row = cur.fetchone()
+        return bool(row[0]) if row else False
+
     def create_transfer_session(
         self,
         *,

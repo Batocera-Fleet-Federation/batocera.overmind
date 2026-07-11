@@ -2969,7 +2969,19 @@ class OvermindDatabase:
         return sorted(latest.values(), key=lambda row: str(row.get("target_name") or row.get("target_drone_id") or "").lower())
 
     def is_drone_peer_resolvable(self, device_id: str) -> bool:
-        """Return True if any other drone has a passing peer-check targeting this device."""
+        """Return True if any other drone has a passing peer-check targeting this device.
+
+        Checked against Postgres first: the report (POST .../peer-checks) and this
+        check (a sync-rom/bios/system request) routinely run on different Lambda
+        containers, so the in-memory peer_checks dict below -- populated only by
+        add_peer_checks calls handled by THIS process, never reloaded from Postgres
+        once relational storage is configured -- would otherwise almost always be
+        empty here and fail every cross-drone sync. Falls back to the in-memory
+        view only when Postgres can't answer (not configured / connection failed).
+        """
+        result = postgres_store.is_peer_resolvable(device_id)
+        if result is not None:
+            return result
         for bucket in self.peer_checks.values():
             for check in bucket:
                 if str(check.get("target_drone_id") or "") == device_id and check.get("status") == "pass":

@@ -499,6 +499,42 @@ class StoreAssetThumbprintTests(unittest.TestCase):
         self.assertEqual(cursor.executed, [])
 
 
+class IsPeerResolvableTests(unittest.TestCase):
+    """postgres_store.is_peer_resolvable: the lean Postgres-backed read that lets
+    sync-rom/bios/system eligibility work even when the request that reports a
+    peer-check and the request that later decides sync eligibility land on
+    different Lambda containers -- db.py's in-memory peer_checks dict is
+    per-process and would otherwise almost always be empty (see db.is_drone_peer_resolvable)."""
+
+    def _store_with_cursor(self, cursor):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: _FakeConn(cursor)
+        return store
+
+    def test_returns_true_when_a_passing_check_exists(self):
+        cursor = _FakeCursor(fetchone_result=(True,))
+        store = self._store_with_cursor(cursor)
+        self.assertTrue(store.is_peer_resolvable("drone-b"))
+        sql, params = cursor.executed[0]
+        self.assertIn("drone_peer_checks", sql)
+        self.assertIn("status = 'pass'", sql)
+        self.assertEqual(params, ("drone-b",))
+
+    def test_returns_false_when_no_passing_check_exists(self):
+        cursor = _FakeCursor(fetchone_result=(False,))
+        store = self._store_with_cursor(cursor)
+        self.assertFalse(store.is_peer_resolvable("drone-b"))
+
+    def test_returns_none_without_a_connection(self):
+        store = PostgresMetadataStore()
+        store._core_connection = lambda ensure_schema=False: None
+        self.assertIsNone(store.is_peer_resolvable("drone-b"))
+
+    def test_blank_target_returns_none(self):
+        store = PostgresMetadataStore()
+        self.assertIsNone(store.is_peer_resolvable(""))
+
+
 class DeviceRowMappingTests(unittest.TestCase):
     """_device_from_row must surface the edge_online / reflexive_endpoint columns
     that _select_device_sql now projects (positions 26 & 27, after checked_at)."""

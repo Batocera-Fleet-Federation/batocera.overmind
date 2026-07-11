@@ -130,11 +130,12 @@
             let selectedSystemName = null;
             let selectedFileCategory = null;
             let deviceRomSearchQuery = '';
-            let deviceShowAllDrones = false;
+            // 'mine' (default, this drone's own files) | 'all' (fleet-wide) | 'missing'
+            // (fleet-wide, not present on this drone) -- replaces the old "Show all
+            // Drones" toggle, applied uniformly to both the ROM and BIOS tree leaves.
+            let deviceAssetScope = 'mine';
             let deviceSystemsPage = 1;
-            let masterRomPage = 1;
             let swarmMasterPage = 1;
-            let selectedMasterRomKey = null;
             let pendingConnectionTimer = null;
             let actionRefreshTimer = null;
             let selectedDeviceDataRefreshTimer = null;
@@ -150,7 +151,6 @@
             let downloadsRefreshTimer = null;
             let downloadsRefreshInFlight = false;
             let notificationsInFlight = false;
-            let systemFilterOptionsRequestId = 0;
             let superAdminMetricsTimer = null;
             let syncActionsOffset = 0;
             let syncActionsPageSize = 20;
@@ -172,7 +172,6 @@
             const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
             const AUTH_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
             const SUPER_ADMIN_EMAIL = 'mr_jerrodh@hotmail.com';
-            const MASTER_ROM_PAGE_SIZE = 100;
             const SYSTEMS_FETCH_PAGE_SIZE = 100;
             const TREE_FILE_LOAD_SIZE = 10;
             const BIOS_TREE_ROOT = '__bios__';
@@ -2420,9 +2419,8 @@
                 selectedSystemName = null;
                 selectedFileCategory = null;
                 deviceRomSearchQuery = '';
-                deviceShowAllDrones = false;
+                deviceAssetScope = 'mine';
                 deviceSystemsPage = 1;
-                selectedMasterRomKey = null;
                 setRoute('devices', deviceId, 'overview');
             }
 
@@ -2436,32 +2434,32 @@
                 return `${minutes}m`;
             }
 
-            function applyDeviceSystemsScope() {
-                const checkbox = document.getElementById('device-show-all-drones');
-                const systems = document.getElementById('systems-list');
-                const allDrones = document.getElementById('swarm-rom-availability-panel');
-                if (checkbox) checkbox.checked = deviceShowAllDrones;
-                if (systems) systems.style.display = deviceShowAllDrones ? 'none' : '';
-                if (allDrones) allDrones.style.display = deviceShowAllDrones ? '' : 'none';
-            }
-
             async function loadDeviceSystemsView() {
-                applyDeviceSystemsScope();
-                if (deviceShowAllDrones) {
-                    await loadSwarmRomAvailabilityPanel();
-                    return;
-                }
+                const scopeSelect = document.getElementById('device-asset-scope-filter');
+                if (scopeSelect) scopeSelect.value = deviceAssetScope;
                 await loadDeviceSystems();
             }
 
-            function toggleDeviceAllDrones(checked) {
-                deviceShowAllDrones = !!checked;
+            // 'status' param sent to the presence-aware master-roms/master-bios
+            // endpoints: 'present' for the default "My Files" scope (only what's
+            // already on this drone), unset for "All" (fleet-wide, both present and
+            // missing), 'missing' for "Missing" (fleet-wide, not on this drone).
+            function deviceAssetStatusParam() {
+                if (deviceAssetScope === 'missing') return 'missing';
+                if (deviceAssetScope === 'all') return '';
+                return 'present';
+            }
+
+            function handleDeviceAssetScopeChange(value) {
+                const next = ['mine', 'all', 'missing'].includes(value) ? value : 'mine';
+                if (next === deviceAssetScope) return;
+                deviceAssetScope = next;
                 deviceSystemsPage = 1;
-                masterRomPage = 1;
                 selectedSystemName = null;
                 selectedFileCategory = null;
-                selectedMasterRomKey = null;
-                updateRouteQuery({ all: deviceShowAllDrones ? 1 : null, dsp: null, rp: null, syn: null, fc: null, rs: null });
+                currentSystemRomPages = {};
+                currentSystemBiosPages = {};
+                updateRouteQuery({ sc: deviceAssetScope === 'mine' ? null : deviceAssetScope, dsp: null, syn: null, fc: null });
                 loadDeviceSystemsView();
             }
 
@@ -2471,23 +2469,37 @@
                 }
                 try {
                     const q = (deviceRomSearchQuery || '').trim();
-                    let page = 1;
                     let total = 0;
-                    const systems = [];
-                    do {
-                        const params = new URLSearchParams();
-                        if (q) params.set('q', q);
-                        params.set('page', String(page));
-                        params.set('per_page', String(SYSTEMS_FETCH_PAGE_SIZE));
-                        const response = await apiGet(`/api/devices/${selectedDeviceId}/systems?${params.toString()}`);
-                        if (!response.ok) throw new Error('Failed to load device systems');
+                    let systems = [];
+                    if (deviceAssetScope === 'mine') {
+                        let page = 1;
+                        const rows = [];
+                        do {
+                            const params = new URLSearchParams();
+                            if (q) params.set('q', q);
+                            params.set('page', String(page));
+                            params.set('per_page', String(SYSTEMS_FETCH_PAGE_SIZE));
+                            const response = await apiGet(`/api/devices/${selectedDeviceId}/systems?${params.toString()}`);
+                            if (!response.ok) throw new Error('Failed to load device systems');
+                            const data = await response.json();
+                            const page_rows = data.systems || [];
+                            total = Number(data.total || page_rows.length || 0);
+                            rows.push(...page_rows);
+                            if (!page_rows.length || rows.length >= total) break;
+                            page += 1;
+                        } while (page < 100);
+                        systems = rows;
+                    } else {
+                        // Fleet-wide, unpaginated: lets the tree show systems this
+                        // drone has zero files for yet, so "All"/"Missing" can
+                        // surface games worth pulling in from other Drones.
+                        const response = await apiGet('/api/systems');
+                        if (!response.ok) throw new Error('Failed to load systems');
                         const data = await response.json();
-                        const rows = data.systems || [];
-                        total = Number(data.total || rows.length || 0);
-                        systems.push(...rows);
-                        if (!rows.length || systems.length >= total) break;
-                        page += 1;
-                    } while (page < 100);
+                        const q_lower = q.toLowerCase();
+                        systems = (data.systems || []).filter(row => !q || String(row.system_name || '').toLowerCase().includes(q_lower));
+                        total = systems.length;
+                    }
                     await loadBiosSummary();
                     currentSystemRomPages = {};
                     currentSystemBiosPages = {};
@@ -2546,13 +2558,6 @@
                 if (event.key !== 'Enter') return;
                 event.preventDefault();
                 submitDeviceRomSearch();
-            }
-
-            function setMasterRomPage(page) {
-                masterRomPage = Math.max(1, page);
-                updateRouteQuery({ rp: masterRomPage });
-                loadSwarmRomAvailabilityPanel();
-                scrollAppToTop();
             }
 
             function systemRomState(systemName) {
@@ -2643,48 +2648,6 @@
                 loadSystemBiosFilePage(systemName, { reset: false });
             }
 
-            function handleDeviceRomFilterChange() {
-                // Trigger server-side reload of the master table when filters change
-                masterRomPage = 1;
-                selectedMasterRomKey = null;
-                updateRouteQuery({ rp: 1, rs: null });
-                loadSwarmRomAvailabilityPanel();
-                scrollAppToTop();
-            }
-
-            async function populateSystemFilterOptions() {
-                // populate systems dropdown from currentDeviceSystems or from server summary
-                const select = document.getElementById('device-rom-system-filter');
-                if (!select) return;
-                const requestId = ++systemFilterOptionsRequestId;
-                const selectedSystem = select.value || '';
-                try {
-                    const resp = await apiGet('/api/systems');
-                    if (!resp.ok) return;
-                    const data = await resp.json();
-                    if (requestId !== systemFilterOptionsRequestId) return;
-                    const currentSelection = select.value || selectedSystem;
-                    select.innerHTML = '<option value="">All systems</option>';
-                    const systems = data.systems || [];
-                    systems.forEach(s => {
-                        const opt = document.createElement('option');
-                        opt.value = s.system_name;
-                        opt.text = `${s.system_name} (${Number(s.game_count ?? s.rom_count ?? 0)} games / ${Number(s.rom_count ?? 0)} files)`;
-                        opt.selected = s.system_name === currentSelection;
-                        select.appendChild(opt);
-                    });
-                    if (currentSelection && select.value !== currentSelection) {
-                        const opt = document.createElement('option');
-                        opt.value = currentSelection;
-                        opt.text = currentSelection;
-                        opt.selected = true;
-                        select.appendChild(opt);
-                    }
-                } catch (e) {
-                    // ignore
-                }
-            }
-
             async function refreshSystemsAndRoms(triggerEl) {
                 // Reload only the visible systems page; individual ROM pages are fetched
                 // when a system row is expanded.
@@ -2715,17 +2678,15 @@
                 }
             }
 
-            async function syncSystemFromFilter(systemParam) {
-                const system = systemParam || document.getElementById('device-rom-system-filter')?.value || '';
-                if (!system) return alert('Select a system to sync');
-                if (!selectedDeviceId) return;
-                if (!confirm(`Queue sync for system ${system} on this Drone?`)) return;
+            async function syncMissingSystemFiles(systemName) {
+                if (!systemName || !selectedDeviceId) return;
+                if (!confirm(`Queue sync for all missing games in ${systemName} on this Drone?`)) return;
                 try {
-                    await syncSystem(system);
-                    await loadSwarmRomAvailabilityPanel();
+                    await syncSystem(systemName);
+                    await loadSystemRomPage(systemName, { reset: true });
                 } catch (err) {
                     console.error('Error syncing system:', err);
-                    showMessage('Failed to queue system sync.', 'error');
+                    showMessage(err.message || 'Failed to queue system sync.', 'error');
                 }
             }
 
@@ -2756,11 +2717,28 @@
                 };
                 renderSystemRomPage(systemName);
                 try {
-                    const romParams = new URLSearchParams();
-                    romParams.set('system_name', systemName);
-                    romParams.set('offset', String(offset));
-                    romParams.set('per_page', String(pageSize));
-                    const romResponse = await apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`);
+                    const q = (deviceRomSearchQuery || '').trim();
+                    let url;
+                    if (deviceAssetScope === 'mine') {
+                        const romParams = new URLSearchParams();
+                        romParams.set('system_name', systemName);
+                        romParams.set('offset', String(offset));
+                        romParams.set('per_page', String(pageSize));
+                        url = `/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`;
+                    } else {
+                        // "All"/"Missing": presence-aware, fleet-wide list (same source
+                        // the BIOS tree leaves already use) so Sync buttons + badges
+                        // can appear here too.
+                        const romParams = new URLSearchParams();
+                        romParams.set('system', systemName);
+                        romParams.set('page', String(Math.floor(offset / pageSize) + 1));
+                        romParams.set('per_page', String(pageSize));
+                        if (q) romParams.set('q', q);
+                        const status = deviceAssetStatusParam();
+                        if (status) romParams.set('status', status);
+                        url = `/api/devices/${selectedDeviceId}/master-roms?${romParams.toString()}`;
+                    }
+                    const romResponse = await apiGet(url);
                     if (!romResponse.ok) throw new Error('Failed to load system ROMs');
                     const payload = await romResponse.json();
                     if (selectedDeviceId !== requestDeviceId || systemRomRequestSeq[systemName] !== requestGen) return;
@@ -2791,71 +2769,6 @@
                 if (selectedSystemName === systemName) renderSystemRomPage(systemName);
             }
 
-            function renderRomDetailValue(label, value) {
-                const display = value === null || value === undefined || value === '' ? 'n/a' : String(value);
-                return `<div class="rom-detail-field">
-                    <div class="small text-muted">${escapeHtml(label)}</div>
-                    <div class="small">${escapeHtml(display)}</div>
-                </div>`;
-            }
-
-            function renderRomDetailPanel(row, sizeText, sources, statusLabel) {
-                const fileName = row.file_path || row.rom_name || row.relative_path || row.rom_path || '';
-                const fields = [
-                    ['System', row.system_name || row.system],
-                    ['ROM', row.rom_name || fileName],
-                    ['Path', fileName],
-                    ['Fingerprint', row.rom_fingerprint || row.fingerprint],
-                    ['Size', sizeText || row.size || row.file_size],
-                    ['Status', statusLabel],
-                    ['Source', sources || row.preferred_source_name || row.preferred_source],
-                    ['Entry type', row.entry_type],
-                    ['Title', row.title],
-                ];
-                const raw = Object.assign({}, row);
-                delete raw.devices;
-                return `<div class="rom-detail-panel">
-                    <div class="rom-detail-grid">
-                        ${fields.map(([label, value]) => renderRomDetailValue(label, value)).join('')}
-                    </div>
-                    <details class="mt-2">
-                        <summary class="small text-muted">Raw ROM metadata</summary>
-                        <pre class="mono small mt-2 mb-0">${escapeHtml(JSON.stringify(raw, null, 2))}</pre>
-                    </details>
-                </div>`;
-            }
-
-            function masterRomRowKey(row) {
-                const fingerprint = String(row.rom_fingerprint || row.fingerprint || '').trim().toLowerCase();
-                if (fingerprint) return `fingerprint:${fingerprint}`;
-                const system = String(row.system_name || row.system || '').trim().toLowerCase();
-                const path = String(row.file_path || row.rom_name || row.relative_path || row.rom_path || '').trim().toLowerCase();
-                return `path:${system}:${path}`;
-            }
-
-            function toggleMasterRomDetail(rowId) {
-                const detail = document.getElementById(rowId);
-                if (!detail) return;
-                const isOpen = detail.style.display !== 'none';
-                const trigger = document.querySelector(`[data-rom-detail-target="${rowId}"]`);
-                const masterKey = trigger ? trigger.getAttribute('data-rom-master-key') : '';
-                document.querySelectorAll('.rom-master-detail-row').forEach(row => {
-                    row.style.display = 'none';
-                });
-                document.querySelectorAll('.rom-master-row.is-expanded').forEach(row => {
-                    row.classList.remove('is-expanded');
-                });
-                if (isOpen) {
-                    if (masterKey && selectedMasterRomKey === masterKey) selectedMasterRomKey = null;
-                    updateRouteQuery({ rs: selectedMasterRomKey });
-                    return;
-                }
-                detail.style.display = 'table-row';
-                if (trigger) trigger.classList.add('is-expanded');
-                selectedMasterRomKey = masterKey || null;
-                updateRouteQuery({ rs: selectedMasterRomKey });
-            }
-
             async function loadBiosSummary() {
                 if (!selectedDeviceId) return;
                 currentBiosSummary = { ...currentBiosSummary, loading: true, error: false };
@@ -2866,6 +2779,8 @@
                     params.set('page', '1');
                     params.set('per_page', '1');
                     params.set('unassigned', 'true');
+                    const status = deviceAssetStatusParam();
+                    if (status) params.set('status', status);
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
                     if (!response.ok) throw new Error('Failed to load BIOS summary');
                     const payload = await response.json();
@@ -2901,6 +2816,8 @@
                     params.set('page', String(page));
                     params.set('per_page', String(TREE_FILE_LOAD_SIZE));
                     params.set('unassigned', 'true');
+                    const status = deviceAssetStatusParam();
+                    if (status) params.set('status', status);
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
                     if (!response.ok) throw new Error('Failed to load BIOS files');
                     const payload = await response.json();
@@ -2944,6 +2861,7 @@
                 const loaded = roms.length;
                 const hasMore = loaded < total;
                 const firstLoad = payload.loading && !loaded;
+                const showPresence = deviceAssetScope !== 'mine';
                 target.innerHTML = firstLoad
                     ? '<div class="tree-grid-empty small text-muted">Loading first 10 games...</div>'
                     : `
@@ -2952,17 +2870,28 @@
                             ${roms.map(rom => {
                                 const path = rom.file_path || rom.relative_path || rom.rom_name || '';
                                 const label = rom.rom_name || path;
-                                const tooltip = rom.rom_fingerprint ? `${path} · fingerprint: ${rom.rom_fingerprint}` : path;
+                                const present = !!rom.present_on_selected;
+                                const sources = (rom.devices || []).map(d => d.device_name || d.device_id).join(', ');
+                                const tooltipParts = [rom.rom_fingerprint ? `fingerprint: ${rom.rom_fingerprint}` : path];
+                                if (sources) tooltipParts.push(sources);
                                 const size = rom.file_size ? formatBytes(rom.file_size) : 'n/a';
+                                const showSync = showPresence && !present && rom.devices && rom.devices.length;
+                                const rowPayload = JSON.stringify(rom).replace(/'/g, '&#39;');
                                 return `
                                     <div class="tree-grid-row tree-leaf-row">
                                         <div class="tree-grid-main">
                                             <i class="bi bi-file-earmark-binary tree-grid-icon"></i>
-                                            <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltip)}">
+                                            <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltipParts.join(' · '))}">
                                                 <span class="fw-semibold">${escapeHtml(label)}</span>
                                             </div>
                                         </div>
                                         <div class="tree-grid-meta">${escapeHtml(size)}</div>
+                                        ${showPresence ? `
+                                            <div class="tree-grid-action">
+                                                <span class="badge ${present ? 'text-bg-success' : (rom.devices && rom.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${present ? 'Present' : (rom.devices && rom.devices.length ? 'Missing' : 'Unavailable')}</span>
+                                                ${showSync ? `<button class="btn btn-primary btn-sm" title="Download" aria-label="Download" onclick='syncRom(${rowPayload})'><i class="bi bi-download"></i></button>` : ''}
+                                            </div>
+                                        ` : ''}
                                     </div>
                                 `;
                             }).join('') || '<div class="tree-grid-empty small text-muted">No games reported for this system.</div>'}
@@ -3047,6 +2976,8 @@
                     params.set('page', String(page));
                     params.set('per_page', String(TREE_FILE_LOAD_SIZE));
                     params.set('system_name', systemName);
+                    const status = deviceAssetStatusParam();
+                    if (status) params.set('status', status);
                     const response = await apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`);
                     if (!response.ok) throw new Error('Failed to load BIOS files');
                     const payload = await response.json();
@@ -3180,7 +3111,10 @@
                                                 </div>
                                                 <div class="tree-grid-meta">${count.toLocaleString()} files</div>
                                             </button>
-                                            ${selectedFileCategory === 'games' ? `<div id="tree-files-${cssSafeId(systemName)}" class="tree-files"></div>` : ''}
+                                            ${selectedFileCategory === 'games' ? `
+                                                <div id="tree-files-${cssSafeId(systemName)}" class="tree-files"></div>
+                                                ${deviceAssetScope === 'missing' ? `<div class="px-2 pb-2"><button class="btn btn-outline-primary btn-sm" type="button" onclick="syncMissingSystemFiles(${jsAttr(systemName)})"><i class="bi bi-cloud-arrow-down me-1"></i>Sync all missing here</button></div>` : ''}
+                                            ` : ''}
                                             <button type="button" class="tree-grid-row tree-category-row ${selectedFileCategory === 'bios' ? 'is-active' : ''}" onclick="selectFileCategory(${jsAttr(systemName)}, 'bios')">
                                                 <div class="tree-grid-main">
                                                     <i class="bi bi-cpu tree-grid-icon"></i>
@@ -3638,166 +3572,34 @@
                 `;
             }
 
-            async function loadSwarmRomAvailabilityPanel() {
-                // Render a single master ROM table that shows all known ROMs across the swarm
-                // and indicates whether the selected Drone already has each ROM.
-                const container = document.getElementById('swarm-rom-availability-panel');
-                if (!container || !selectedDeviceId) return;
+            async function readErrorDetail(response, fallback) {
                 try {
-                    // prepare server-side filter params
-                    const params = new URLSearchParams();
-                    const q = (deviceRomSearchQuery || '').trim();
-                    const system = document.getElementById('device-rom-system-filter')?.value || '';
-                    const status = document.getElementById('device-rom-status-filter')?.value || '';
-                    if (q) params.set('q', q);
-                    if (system) params.set('system', system);
-                    if (status) params.set('status', status);
-                    params.set('page', String(masterRomPage));
-                    params.set('per_page', String(MASTER_ROM_PAGE_SIZE));
-                    const url = `/api/devices/${selectedDeviceId}/master-roms` + (params.toString() ? `?${params.toString()}` : '');
-                    const response = await apiGet(url);
-                    if (!response.ok) throw new Error('Failed to load swarm ROM availability');
-                    const payload = await response.json();
-                    const filtered = payload.roms || [];
-                    const total = payload.total || filtered.length;
-                    const page = payload.page || masterRomPage;
-                    const perPage = payload.per_page || MASTER_ROM_PAGE_SIZE;
-                    const pageCount = Math.max(1, Math.ceil(total / perPage));
-                    masterRomPage = page;
-
-                    const missingCount = filtered.filter(r => !r.present_on_selected).length;
-                    const renderPageButton = (pageNumber) => {
-                        return `<button class="btn btn-sm ${pageNumber === page ? 'btn-primary' : 'btn-outline-secondary'}" onclick="setMasterRomPage(${pageNumber})">${pageNumber}</button>`;
-                    };
-                    const paginationButtons = [];
-                    if (pageCount <= 7) {
-                        for (let i = 1; i <= pageCount; i += 1) paginationButtons.push(renderPageButton(i));
-                    } else {
-                        const start = Math.max(1, page - 2);
-                        const end = Math.min(pageCount, page + 2);
-                        if (start > 1) paginationButtons.push(renderPageButton(1));
-                        if (start > 2) paginationButtons.push('<span class="px-2">&hellip;</span>');
-                        for (let i = start; i <= end; i += 1) paginationButtons.push(renderPageButton(i));
-                        if (end < pageCount - 1) paginationButtons.push('<span class="px-2">&hellip;</span>');
-                        if (end < pageCount) paginationButtons.push(renderPageButton(pageCount));
-                    }
-                    container.innerHTML = `
-                        <div class="card"><div class="card-body py-2">
-                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <div class="d-flex gap-2 align-items-center">
-                                    <strong>ROM Files (All Drones)</strong>
-                                    <div class="small text-muted">${total} ROMs · ${missingCount} missing here</div>
-                                </div>
-                                <div class="d-flex gap-2">
-                                    <button class="btn btn-outline-secondary btn-sm" onclick="refreshSystemsAndRoms(this)"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-                                    <button class="btn btn-outline-primary btn-sm mutate-only" onclick="rescanDroneMetadata()"><i class="bi bi-database-down me-1"></i>Rescan drone</button>
-                                </div>
-                            </div>
-                            <div id="sync-system-buttons" class="d-flex flex-wrap gap-2 mb-3"></div>
-                            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
-                                <div class="small text-muted">Page ${page} of ${pageCount} · ${perPage} per page</div>
-                                <div class="btn-group bff-segmented" role="group" aria-label="Master ROM pagination">
-                                    <button class="btn btn-sm btn-outline-secondary" ${page <= 1 ? 'disabled' : ''} onclick="setMasterRomPage(${Math.max(1, page - 1)})">Previous</button>
-                                    ${paginationButtons.join('')}
-                                    <button class="btn btn-sm btn-outline-secondary" ${page >= pageCount ? 'disabled' : ''} onclick="setMasterRomPage(${Math.min(pageCount, page + 1)})">Next</button>
-                                </div>
-                            </div>
-                            <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
-                                <th>System</th>
-                                <th>ROM</th>
-                                <th>Source</th>
-                                <th>Status</th>
-                                <th></th>
-                            </tr></thead><tbody>
-                                ${filtered.map((row, rowIndex) => {
-                                    const present = !!row.present_on_selected;
-                                    const sources = (row.devices || []).map(d => d.device_name || d.device_id).join(', ');
-                                    const preferred = row.preferred_source_name || (row.devices && row.devices[0] && (row.devices[0].device_name || row.devices[0].device_id)) || '';
-                                    const sizeText = row.size ? `${(Number(row.size) / 1024 / 1024).toFixed(2)} MB` : (row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '');
-                                    const statusLabel = present ? (row.present_label || 'Present') : (row.devices && row.devices.length ? 'Missing' : 'Unavailable');
-                                    const showSync = !present && row.devices && row.devices.length;
-                                    const rowData = Object.assign({}, row, { preferred_sync_source: row.preferred_source || preferred });
-                                    const rowKey = masterRomRowKey(row);
-                                    const detailId = `master-rom-detail-${page}-${rowIndex}`;
-                                    const expanded = rowKey && rowKey === selectedMasterRomKey;
-                                    return `
-                                        <tr class="rom-master-row ${expanded ? 'is-expanded' : ''}" data-rom-detail-target="${detailId}" data-rom-master-key="${escapeHtml(rowKey)}" onclick="toggleMasterRomDetail('${detailId}')">
-                                            <td>${escapeHtml(row.system_name || '')}</td>
-                                            <td style="min-width:240px">
-                                                <div>${escapeHtml(row.file_path || row.rom_name || '')}</div>
-                                            </td>
-                                            <td class="text-muted">${escapeHtml(sources || preferred)}</td>
-                                            <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${escapeHtml(statusLabel)}</span></td>
-                                            <td>
-                                                ${showSync ? `<button class="btn btn-primary btn-sm" onclick='event.stopPropagation(); syncRom(${JSON.stringify(rowData).replace(/'/g, "'")})'><i class="bi bi-download me-1"></i>Download</button>` : '<span class="small text-muted">Details</span>'}
-                                            </td>
-                                        </tr>
-                                        <tr id="${detailId}" class="rom-master-detail-row" style="display:${expanded ? 'table-row' : 'none'};"><td colspan="5">${renderRomDetailPanel(row, sizeText, sources || preferred, statusLabel)}</td></tr>
-                                    `;
-                                }).join('')}
-                            </tbody></table></div>
-                            ${total ? '' : (
-                                (q || system || status)
-                                    ? '<div class="small text-muted">No ROMs found for this filter.</div>'
-                                    : renderDroneMetadataWaitingState('System & Roms metadata')
-                            )}
-                        </div></div>
-                    `;
-                    // populate per-system Sync buttons for missing systems
-                    try {
-                        const btnContainer = document.getElementById('sync-system-buttons');
-                        if (btnContainer) {
-                            btnContainer.innerHTML = '';
-                            const missingBySystem = filtered.reduce((acc, r) => {
-                                if (!r.present_on_selected) {
-                                    const s = r.system_name || 'Unknown';
-                                    acc[s] = (acc[s] || 0) + 1;
-                                }
-                                return acc;
-                            }, {});
-                            Object.keys(missingBySystem).sort().forEach(s => {
-                                const btn = document.createElement('button');
-                                btn.className = 'btn btn-outline-primary btn-sm';
-                                btn.textContent = `Sync ${s} (${missingBySystem[s]})`;
-                                btn.onclick = () => syncSystemFromFilter(s);
-                                btnContainer.appendChild(btn);
-                            });
-                        }
-                    } catch (e) {
-                        // ignore
-                    }
-                    // ensure system filter has options
-                    populateSystemFilterOptions();
-                } catch (error) {
-                    console.error('Error loading master ROM table:', error);
-                    container.innerHTML = '<div class="empty-state">Unable to load ROMs.</div>';
+                    const body = await response.json();
+                    return body && body.detail ? String(body.detail) : fallback;
+                } catch (e) {
+                    return fallback;
                 }
             }
 
             async function syncRom(row) {
                 try {
-                    const response = await fetch(`/api/devices/${selectedDeviceId}/sync-rom`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                        body: JSON.stringify(row)
-                    });
-                    if (!response.ok) throw new Error('Failed to queue ROM sync');
+                    const response = await apiPost(`/api/devices/${selectedDeviceId}/sync-rom`, row);
+                    if (!response.ok) throw new Error(await readErrorDetail(response, 'Failed to queue ROM sync.'));
                     showMessage('Download queued. The selected Drone will choose the source peer automatically.', 'success');
-                    // Refresh the master ROM table so the Sync button disappears once the Drone reports the ROM
-                    await loadSwarmRomAvailabilityPanel();
+                    // Refresh the current leaf list so the Sync button disappears once the Drone reports the ROM
+                    const systemName = row.system_name || row.system || '';
+                    if (systemName && selectedSystemName === systemName && selectedFileCategory === 'games') {
+                        await loadSystemRomPage(systemName, { reset: true });
+                    }
                 } catch (error) {
                     console.error('Error queuing ROM sync:', error);
-                    showMessage('Failed to queue ROM sync.', 'error');
+                    showMessage(error.message || 'Failed to queue ROM sync.', 'error');
                 }
             }
 
             async function syncSystem(systemName) {
-                const response = await fetch(`/api/devices/${selectedDeviceId}/sync-system`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                    body: JSON.stringify({ system_name: systemName })
-                });
-                if (!response.ok) throw new Error('Failed to queue system sync');
+                const response = await apiPost(`/api/devices/${selectedDeviceId}/sync-system`, { system_name: systemName });
+                if (!response.ok) throw new Error(await readErrorDetail(response, 'Failed to queue system sync.'));
                 showMessage('System sync queued. The Drone will choose source peers automatically.', 'success');
             }
 
@@ -3812,12 +3614,8 @@
 
             async function syncBios(row) {
                 try {
-                    const response = await fetch(`/api/devices/${selectedDeviceId}/sync-bios`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}`},
-                        body: JSON.stringify(row)
-                    });
-                    if (!response.ok) throw new Error('Failed to queue BIOS sync');
+                    const response = await apiPost(`/api/devices/${selectedDeviceId}/sync-bios`, row);
+                    if (!response.ok) throw new Error(await readErrorDetail(response, 'Failed to queue BIOS sync.'));
                     showMessage('BIOS sync queued. The Drone will choose the source peer automatically.', 'success');
                     await loadBiosSummary();
                     if (selectedSystemName === BIOS_TREE_ROOT) {
@@ -3827,7 +3625,7 @@
                     }
                 } catch (error) {
                     console.error('Error queuing BIOS sync:', error);
-                    showMessage('Failed to queue BIOS sync.', 'error');
+                    showMessage(error.message || 'Failed to queue BIOS sync.', 'error');
                 }
             }
 
@@ -4049,7 +3847,7 @@
             // Page-number params are omitted from the URL when they equal 1 so a
             // first page produces a clean hash; non-page params (searches, filters,
             // selections) are only dropped when blank.
-            const ROUTE_PAGE_KEYS = new Set(['sp', 'dsp', 'rp', 'ap', 'mp']);
+            const ROUTE_PAGE_KEYS = new Set(['sp', 'dsp', 'ap', 'mp']);
             function updateRouteQuery(updates, options = {}) {
                 const raw = window.location.hash || '#/devices';
                 const qIndex = raw.indexOf('?');
@@ -4094,10 +3892,8 @@
                 const q = getRouteQuery();
                 const intParam = (key) => Math.max(1, Number.parseInt(q.get(key) || '1', 10) || 1);
                 deviceSystemsPage = intParam('dsp');
-                masterRomPage = intParam('rp');
                 deviceRomSearchQuery = q.get('rq') || '';
-                deviceShowAllDrones = q.get('all') === '1';
-                selectedMasterRomKey = q.get('rs') || null;
+                deviceAssetScope = ['all', 'missing'].includes(q.get('sc')) ? q.get('sc') : 'mine';
                 selectedSystemName = q.get('syn') || null;
                 selectedFileCategory = q.get('fc') || (selectedSystemName === BIOS_TREE_ROOT ? 'bios' : (selectedSystemName ? 'games' : null));
                 swarmMasterPage = intParam('mp');

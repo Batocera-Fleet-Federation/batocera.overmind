@@ -3011,39 +3011,84 @@ def test_device_systems_ui_uses_lazy_file_tree():
     assert "const pageSize = TREE_FILE_LOAD_SIZE;" in js
     assert "romParams.set('offset', String(offset));" in js
     assert "romParams.set('per_page', String(pageSize));" in js
-    assert "apiGet(`/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`)" in js
+    # "mine" scope stays on the per-device endpoint; "all"/"missing" switch to the
+    # presence-aware master endpoint (see the scope-consolidation test).
+    assert "url = `/api/devices/${selectedDeviceId}/roms?${romParams.toString()}`;" in js
+    assert "const romResponse = await apiGet(url);" in js
     assert "apiGet(`/api/devices/${selectedDeviceId}/master-bios?${params.toString()}`)" in js
     assert "tree-grid" in js
     assert "Show more" in js
     loader_start = js.index("async function loadSystemRomPage(systemName, options = {})")
-    loader_end = js.index("function renderRomDetailValue", loader_start)
+    loader_end = js.index("async function loadBiosSummary()", loader_start)
     loader_source = js[loader_start:loader_end]
     assert "master-artwork" not in loader_source
     systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-admin-panel"')]
     assert "Rebuild Asset Metadata" not in systems_panel
-    # Artwork is no longer stored in Overmind, so the ROM detail row/panel dropped
-    # the per-ROM artwork chip rendering entirely (gamelist-source refactor).
+    # Artwork is no longer stored in Overmind, so the ROM leaf rendering never grew
+    # per-ROM artwork chips (gamelist-source refactor).
     assert "artworkRowsForRom" not in js
     assert "renderRomArtworkDetails" not in js
-    assert "toggleMasterRomDetail" in js
-    assert "renderRomDetailPanel(row, sizeText, sources || preferred, statusLabel)" in js
 
 
-def test_device_systems_ui_can_search_all_drones_and_queue_downloads():
+def test_device_systems_ui_unifies_mine_all_missing_scope_and_queues_downloads():
+    """The old separate "Show all Drones" flat table was folded into the tree: one
+    dropdown (My Files / All / Missing) drives both the ROM and BIOS tree leaves,
+    which carry their own presence badge + per-row Sync/Download button."""
     root = Path(__file__).resolve().parents[1]
     js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
     html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
 
-    assert 'id="device-show-all-drones"' in html
-    assert "toggleDeviceAllDrones(this.checked)" in html
+    # The old boolean toggle + separate flat table are gone.
+    assert 'id="device-show-all-drones"' not in html
+    assert "toggleDeviceAllDrones" not in js
+    assert "swarm-rom-availability-panel" not in html
+    assert "swarm-rom-availability-panel" not in js
+    assert "loadSwarmRomAvailabilityPanel" not in js
+
+    # Replaced by a single scope dropdown reusing the existing treeview.
+    assert 'id="device-asset-scope-filter"' in html
+    assert 'onchange="handleDeviceAssetScopeChange(this.value)"' in html
+    assert '<option value="mine">My Files</option>' in html
+    assert '<option value="all">All (across all drones)</option>' in html
+    assert '<option value="missing">Missing (not on this drone)</option>' in html
     assert "Search systems or games" in html
-    assert "deviceShowAllDrones = q.get('all') === '1';" in js
-    assert "await loadSwarmRomAvailabilityPanel();" in js
-    assert "`/api/devices/${selectedDeviceId}/master-roms`" in js
+    assert "let deviceAssetScope = 'mine';" in js
+    assert "deviceAssetScope = ['all', 'missing'].includes(q.get('sc')) ? q.get('sc') : 'mine';" in js
+
+    # ROM tree leaves switch to the presence-aware master endpoint outside "mine",
+    # and BIOS leaves (already master-backed) now honor the same status filter.
+    assert "`/api/devices/${selectedDeviceId}/master-roms?${romParams.toString()}`" in js
     assert "`/api/devices/${selectedDeviceId}/sync-rom`" in js
-    assert '<i class="bi bi-download me-1"></i>Download' in js
+    assert "function deviceAssetStatusParam()" in js
+    render_start = js.index("function renderSystemRomPage(systemName)")
+    render_end = js.index("function renderBiosFilePage()", render_start)
+    render_source = js[render_start:render_end]
+    assert "present_on_selected" in render_source
+    assert "onclick='syncRom(" in render_source
+
+    # Icon-only Download button (no more label text on the tree leaf action).
+    assert '<i class="bi bi-download me-1"></i>Download' not in js
+    assert """title="Download" aria-label="Download" onclick='syncRom(${rowPayload})'><i class="bi bi-download"></i>""" in js
+
     assert "apiGet('/api/sync-activity'" in js
-    assert "document.querySelectorAll('.rom-master-detail-row').forEach" in js
+
+
+def test_is_drone_peer_resolvable_prefers_postgres_lean_read(monkeypatch):
+    """The report (POST .../peer-checks) and this check routinely run on different
+    Lambda containers, so db.py's in-memory peer_checks dict below is per-process
+    and would otherwise almost always be empty here (the "Failed to queue ROM
+    sync" / "No resolvable source Drone" bug). The Postgres-backed read must be
+    consulted first and, when it can answer, must NOT fall through to the
+    in-memory dict."""
+    monkeypatch.setattr(db_module.postgres_store, "is_peer_resolvable", lambda device_id: True)
+    assert db.is_drone_peer_resolvable("device-with-empty-in-memory-state") is True
+
+    monkeypatch.setattr(db_module.postgres_store, "is_peer_resolvable", lambda device_id: False)
+    assert db.is_drone_peer_resolvable("device-with-empty-in-memory-state") is False
+
+    # Postgres unavailable (None) -> falls back to the in-memory dict, unaffected.
+    monkeypatch.setattr(db_module.postgres_store, "is_peer_resolvable", lambda device_id: None)
+    assert db.is_drone_peer_resolvable("device-with-empty-in-memory-state") is False
 
 
 def test_background_polling_does_not_pin_global_loading_toast():
