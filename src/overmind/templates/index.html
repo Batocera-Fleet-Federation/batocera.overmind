@@ -331,13 +331,17 @@
                                     <div id="drone-speed-panel" class="mb-3"></div>
                                 </div>
                                 <div id="device-systems-panel" class="device-subpanel" style="display:none;">
-                                    <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-end gap-2">
+                                    <div class="mb-3 rom-browser-toolbar d-flex flex-wrap align-items-end gap-3">
                                         <div style="flex:1;min-width:220px">
-                                            <label class="form-label" for="device-rom-search">Search systems</label>
+                                            <label class="form-label" for="device-rom-search">Search systems or games</label>
                                             <div class="input-group">
                                                 <input id="device-rom-search" class="form-control" type="search" placeholder="Enter search terms" onkeydown="handleDeviceRomSearchKeydown(event)">
                                                 <button class="btn btn-primary" type="button" onclick="submitDeviceRomSearch()">Search</button>
                                             </div>
+                                        </div>
+                                        <div class="form-check form-switch pb-2">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="device-show-all-drones" onchange="toggleDeviceAllDrones(this.checked)">
+                                            <label class="form-check-label" for="device-show-all-drones">Show all Drones</label>
                                         </div>
                                     </div>
                                     <div id="systems-list"></div>

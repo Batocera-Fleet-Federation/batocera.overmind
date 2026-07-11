@@ -2995,7 +2995,7 @@ def test_device_systems_ui_uses_lazy_file_tree():
     assert "params.set('page', String(page));" in js
     assert "params.set('per_page', String(SYSTEMS_FETCH_PAGE_SIZE));" in js
     assert "while (page < 100)" in js
-    assert "if (currentDeviceView === 'systems') {\n                    loadDeviceSystems();\n                }" in js
+    assert "if (currentDeviceView === 'systems') {\n                    loadDeviceSystemsView();\n                }" in js
     assert "renderDroneNetworkPanel();\n                renderDroneSpeedPanel();" in js
     assert "const TREE_FILE_LOAD_SIZE = 10;" in js
     assert "const BIOS_TREE_ROOT = '__bios__';" in js
@@ -3027,6 +3027,22 @@ def test_device_systems_ui_uses_lazy_file_tree():
     assert "renderRomArtworkDetails" not in js
     assert "toggleMasterRomDetail" in js
     assert "renderRomDetailPanel(row, sizeText, sources || preferred, statusLabel)" in js
+
+
+def test_device_systems_ui_can_search_all_drones_and_queue_downloads():
+    root = Path(__file__).resolve().parents[1]
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+
+    assert 'id="device-show-all-drones"' in html
+    assert "toggleDeviceAllDrones(this.checked)" in html
+    assert "Search systems or games" in html
+    assert "deviceShowAllDrones = q.get('all') === '1';" in js
+    assert "await loadSwarmRomAvailabilityPanel();" in js
+    assert "`/api/devices/${selectedDeviceId}/master-roms`" in js
+    assert "`/api/devices/${selectedDeviceId}/sync-rom`" in js
+    assert '<i class="bi bi-download me-1"></i>Download' in js
+    assert "apiGet('/api/sync-activity'" in js
     assert "document.querySelectorAll('.rom-master-detail-row').forEach" in js
 
 
@@ -5194,6 +5210,8 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "queueDeviceAction('set_idle_volume_automation'" in js
     assert "renderIdleGameExitCard(info)" in js
     assert "queueDeviceAction('set_idle_game_exit_automation'" in js
+    assert "rememberPendingDeviceAutomation('idle_volume_automation', desired);" in js
+    assert "rememberPendingDeviceAutomation('idle_game_exit_automation', desired);" in js
     assert '<table class="table table-sm align-middle bff-stack">' in js
     assert "deleteDeviceActions()" not in html
     assert "onclick=\"queueDeviceAction('collect_game_logs')\"" not in html

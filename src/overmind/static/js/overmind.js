@@ -130,6 +130,7 @@
             let selectedSystemName = null;
             let selectedFileCategory = null;
             let deviceRomSearchQuery = '';
+            let deviceShowAllDrones = false;
             let deviceSystemsPage = 1;
             let masterRomPage = 1;
             let swarmMasterPage = 1;
@@ -144,6 +145,7 @@
             let devicesRefreshInFlight = false;
             let renderedDeviceActionsDeviceId = null;
             let renderedDeviceActionsSignature = null;
+            let pendingDeviceAutomation = {};
             let pendingConnectionsInFlight = false;
             let downloadsRefreshTimer = null;
             let downloadsRefreshInFlight = false;
@@ -1632,7 +1634,7 @@
                     const response = await apiGet(withSwarm('/api/devices'), { showLoader: options.showLoader !== false });
                     if (!response.ok) throw new Error('Failed to load devices');
                     const data = await response.json();
-                    currentDevices = data.devices;
+                    currentDevices = (data.devices || []).map(applyPendingDeviceAutomation);
                     const selectedDeviceWasRemoved = Boolean(selectedDeviceId)
                         && !currentDevices.some(d => d.device_id === selectedDeviceId);
                     if (selectedDeviceWasRemoved) selectedDeviceId = null;
@@ -2418,6 +2420,7 @@
                 selectedSystemName = null;
                 selectedFileCategory = null;
                 deviceRomSearchQuery = '';
+                deviceShowAllDrones = false;
                 deviceSystemsPage = 1;
                 selectedMasterRomKey = null;
                 setRoute('devices', deviceId, 'overview');
@@ -2431,6 +2434,35 @@
                 const hours = Math.floor(minutes / 60);
                 if (hours > 0) return `${hours}h ${minutes % 60}m`;
                 return `${minutes}m`;
+            }
+
+            function applyDeviceSystemsScope() {
+                const checkbox = document.getElementById('device-show-all-drones');
+                const systems = document.getElementById('systems-list');
+                const allDrones = document.getElementById('swarm-rom-availability-panel');
+                if (checkbox) checkbox.checked = deviceShowAllDrones;
+                if (systems) systems.style.display = deviceShowAllDrones ? 'none' : '';
+                if (allDrones) allDrones.style.display = deviceShowAllDrones ? '' : 'none';
+            }
+
+            async function loadDeviceSystemsView() {
+                applyDeviceSystemsScope();
+                if (deviceShowAllDrones) {
+                    await loadSwarmRomAvailabilityPanel();
+                    return;
+                }
+                await loadDeviceSystems();
+            }
+
+            function toggleDeviceAllDrones(checked) {
+                deviceShowAllDrones = !!checked;
+                deviceSystemsPage = 1;
+                masterRomPage = 1;
+                selectedSystemName = null;
+                selectedFileCategory = null;
+                selectedMasterRomKey = null;
+                updateRouteQuery({ all: deviceShowAllDrones ? 1 : null, dsp: null, rp: null, syn: null, fc: null, rs: null });
+                loadDeviceSystemsView();
             }
 
             async function loadDeviceSystems() {
@@ -2506,7 +2538,7 @@
                 currentSystemBiosPages = {};
                 currentBiosFilePage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
                 updateRouteQuery({ rq: deviceRomSearchQuery, dsp: null, syn: null, fc: null });
-                loadDeviceSystems();
+                loadDeviceSystemsView();
                 scrollAppToTop();
             }
 
@@ -2661,7 +2693,7 @@
                 const original = btn ? btn.innerHTML : null;
                 if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Refreshing'; }
                 try {
-                    await loadDeviceSystems();
+                    await loadDeviceSystemsView();
                     showMessage('Systems & ROMs refreshed from Overmind.', 'success');
                 } catch (err) {
                     console.error('Error refreshing systems:', err);
@@ -3209,11 +3241,42 @@
                 return currentDevices.find(d => d.device_id === selectedDeviceId) || null;
             }
 
+            function automationValuesMatch(reported, desired) {
+                if (!reported || !desired) return false;
+                return Object.entries(desired).every(([key, value]) => reported[key] === value);
+            }
+
+            function applyPendingDeviceAutomation(device) {
+                if (!device || !device.device_id) return device;
+                const pending = pendingDeviceAutomation[device.device_id];
+                if (!pending) return device;
+                const systemInfo = { ...(device.system_info || {}) };
+                Object.entries(pending).forEach(([field, desired]) => {
+                    if (automationValuesMatch(systemInfo[field], desired)) {
+                        delete pending[field];
+                    } else {
+                        systemInfo[field] = { ...desired, pending: true };
+                    }
+                });
+                if (!Object.keys(pending).length) delete pendingDeviceAutomation[device.device_id];
+                return { ...device, system_info: systemInfo };
+            }
+
+            function rememberPendingDeviceAutomation(field, desired) {
+                if (!selectedDeviceId) return;
+                pendingDeviceAutomation[selectedDeviceId] = {
+                    ...(pendingDeviceAutomation[selectedDeviceId] || {}),
+                    [field]: { ...desired },
+                };
+                const index = currentDevices.findIndex(item => item.device_id === selectedDeviceId);
+                if (index >= 0) currentDevices[index] = applyPendingDeviceAutomation(currentDevices[index]);
+            }
+
             async function refreshSelectedDroneDetails() {
                 if (!selectedDeviceId) return null;
                 const response = await apiGet(`/api/devices/${selectedDeviceId}?include_inventory=false&include_configs=false`, { showLoader: false });
                 if (!response.ok) throw new Error('Failed to load device details');
-                const device = await response.json();
+                const device = applyPendingDeviceAutomation(await response.json());
                 const index = currentDevices.findIndex(item => item.device_id === device.device_id);
                 if (index >= 0) {
                     currentDevices[index] = { ...currentDevices[index], ...device };
@@ -3364,7 +3427,7 @@
                 const current = !reported
                     ? 'not yet reported'
                     : (enabled
-                        ? `on — lower to ${targetVolume}% after ${idleMinutes} min idle`
+                        ? `${automation.pending ? 'pending — ' : 'on — '}lower to ${targetVolume}% after ${idleMinutes} min idle`
                         : 'off');
                 return `
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
@@ -3407,10 +3470,13 @@
                     showMessage('Target volume must be between 0 and 100.', 'danger');
                     return;
                 }
+                const desired = { enabled, idle_minutes: idleMinutes, target_volume: targetVolume };
                 await queueDeviceAction('set_idle_volume_automation', {
                     confirm: false,
-                    payload: { enabled, idle_minutes: idleMinutes, target_volume: targetVolume },
+                    payload: desired,
                 });
+                rememberPendingDeviceAutomation('idle_volume_automation', desired);
+                renderDeviceAdminPanel();
             }
 
             function renderIdleGameExitCard(info) {
@@ -3421,7 +3487,7 @@
                 const current = !reported
                     ? 'not yet reported'
                     : (enabled
-                        ? `on — exit the game after ${idleMinutes} min idle`
+                        ? `${automation.pending ? 'pending — ' : 'on — '}exit the game after ${idleMinutes} min idle`
                         : 'off');
                 return `
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
@@ -3455,10 +3521,13 @@
                     showMessage('Idle minutes must be between 1 and 1440.', 'danger');
                     return;
                 }
+                const desired = { enabled, idle_minutes: idleMinutes };
                 await queueDeviceAction('set_idle_game_exit_automation', {
                     confirm: false,
-                    payload: { enabled, idle_minutes: idleMinutes },
+                    payload: desired,
                 });
+                rememberPendingDeviceAutomation('idle_game_exit_automation', desired);
+                renderDeviceAdminPanel();
             }
 
             async function queueDeviceScreenMode(mode) {
@@ -3660,7 +3729,7 @@
                                             <td class="text-muted">${escapeHtml(sources || preferred)}</td>
                                             <td><span class="badge ${present ? 'text-bg-success' : (row.devices && row.devices.length ? 'text-bg-secondary' : 'text-bg-danger')}">${escapeHtml(statusLabel)}</span></td>
                                             <td>
-                                                ${showSync ? `<button class="btn btn-primary btn-sm" onclick='event.stopPropagation(); syncRom(${JSON.stringify(rowData).replace(/'/g, "'")})'>Sync</button>` : '<span class="small text-muted">Details</span>'}
+                                                ${showSync ? `<button class="btn btn-primary btn-sm" onclick='event.stopPropagation(); syncRom(${JSON.stringify(rowData).replace(/'/g, "'")})'><i class="bi bi-download me-1"></i>Download</button>` : '<span class="small text-muted">Details</span>'}
                                             </td>
                                         </tr>
                                         <tr id="${detailId}" class="rom-master-detail-row" style="display:${expanded ? 'table-row' : 'none'};"><td colspan="5">${renderRomDetailPanel(row, sizeText, sources || preferred, statusLabel)}</td></tr>
@@ -3713,7 +3782,7 @@
                         body: JSON.stringify(row)
                     });
                     if (!response.ok) throw new Error('Failed to queue ROM sync');
-                    showMessage('ROM sync queued. The Drone will choose the source peer automatically.', 'success');
+                    showMessage('Download queued. The selected Drone will choose the source peer automatically.', 'success');
                     // Refresh the master ROM table so the Sync button disappears once the Drone reports the ROM
                     await loadSwarmRomAvailabilityPanel();
                 } catch (error) {
@@ -3951,7 +4020,7 @@
                     renderDroneSpeedPanel();
                 }
                 if (currentDeviceView === 'systems') {
-                    loadDeviceSystems();
+                    loadDeviceSystemsView();
                 }
                 if (currentDeviceView === 'admin') {
                     renderDeviceAdminPanel();
@@ -4027,6 +4096,7 @@
                 deviceSystemsPage = intParam('dsp');
                 masterRomPage = intParam('rp');
                 deviceRomSearchQuery = q.get('rq') || '';
+                deviceShowAllDrones = q.get('all') === '1';
                 selectedMasterRomKey = q.get('rs') || null;
                 selectedSystemName = q.get('syn') || null;
                 selectedFileCategory = q.get('fc') || (selectedSystemName === BIOS_TREE_ROOT ? 'bios' : (selectedSystemName ? 'games' : null));
