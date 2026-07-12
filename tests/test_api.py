@@ -2130,6 +2130,22 @@ def test_download_state_and_cancel_rbac(client):
     assert cancel.json()["action"]["action"] == "cancel_download"
     assert cancel.json()["action"]["payload"]["job_id"] == "job-2"
 
+    pause = client.post(
+        "/api/devices/target-a/downloads/job-1/pause",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert pause.status_code == 200
+    assert pause.json()["action"]["action"] == "pause_download"
+    assert pause.json()["action"]["payload"]["job_id"] == "job-1"
+
+    resume = client.post(
+        "/api/devices/target-a/downloads/job-1/resume",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert resume.status_code == 200
+    assert resume.json()["action"]["action"] == "resume_download"
+    assert resume.json()["action"]["payload"]["job_id"] == "job-1"
+
     client.post(
         f"/api/swarms/{swarm_id}/invitations",
         headers={"Authorization": f"Bearer {owner_token}"},
@@ -2145,6 +2161,12 @@ def test_download_state_and_cancel_rbac(client):
         headers={"Authorization": f"Bearer {viewer_token}"},
     )
     assert denied.status_code == 403
+
+    denied_pause = client.post(
+        "/api/devices/target-a/downloads/job-1/pause",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+    )
+    assert denied_pause.status_code == 403
 
 
 def _device_registration_payload(**overrides):
@@ -3169,7 +3191,40 @@ def test_device_systems_ui_unifies_mine_all_missing_scope_and_queues_downloads()
     assert '<i class="bi bi-download me-1"></i>Download' not in js
     assert """title="Download" aria-label="Download" onclick='syncRom(${rowPayload})'><i class="bi bi-download"></i>""" in js
 
-    assert "apiGet('/api/sync-activity'" in js
+
+def test_downloads_and_sync_activity_views_are_consolidated():
+    """Sync Activity was folded into Downloads: a queued sync shows up there as
+    'pending' instead of living in a separate history view. The old view (button,
+    functions, routes) must be gone; Downloads must gain pause/resume and drop the
+    Queue/Started/Reason columns."""
+    root = Path(__file__).resolve().parents[1]
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    html = root.joinpath("src/overmind/templates/index.html").read_text(encoding="utf-8")
+
+    # The separate Sync Activity view is gone: button, view functions, routes.
+    assert 'data-swarm-view="sync-activity"' not in html
+    assert "Sync Activity" not in html
+    assert "function showSwarmSyncActivity" not in js
+    assert "function loadSyncActivityPanel" not in js
+    assert "'sync-activity'" not in js
+
+    # The removed columns are gone from the downloads table header.
+    downloads_table_start = js.index("function renderSwarmDownloadsTable(rows)")
+    downloads_table_end = js.index("function updateSwarmDownloadsInPlace")
+    downloads_table_source = js[downloads_table_start:downloads_table_end]
+    assert "<th>Queue</th>" not in downloads_table_source
+    assert "<th>Started</th>" not in downloads_table_source
+    assert "<th>Reason</th>" not in downloads_table_source
+
+    # Pause/resume wiring exists end to end.
+    assert "function pauseSwarmDownload(deviceId, jobId)" in js
+    assert "function resumeSwarmDownload(deviceId, jobId)" in js
+    assert "/downloads/${encodeURIComponent(jobId)}/pause" in js
+    assert "/downloads/${encodeURIComponent(jobId)}/resume" in js
+
+    # Recent (completed/failed/cancelled) rows are now surfaced in Downloads --
+    # previously fetched but never rendered.
+    assert "target.recent" in js
 
 
 def test_is_drone_peer_resolvable_prefers_postgres_lean_read(monkeypatch):
@@ -3555,7 +3610,11 @@ def test_sync_rom_does_not_queue_associated_artwork_by_default(client):
     assert [action["action"] for action in actions] == ["sync_rom"]
 
 
-def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):
+def test_sync_rom_holds_pending_when_source_is_not_publicly_resolvable(client):
+    # A known-but-currently-unreachable source must NOT 400 -- the sync is queued
+    # and held 'pending' by the Drone until a source becomes reachable. Only a
+    # source Overmind has never heard of at all (see the sibling
+    # test_sync_rom_rejects_when_no_drone_has_the_rom) is a hard error.
     client.post("/api/auth/register", json={"email": "blocked@example.com", "username": "blocked-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
@@ -3572,9 +3631,93 @@ def test_sync_rom_rejects_source_that_is_not_publicly_resolvable(client):
         json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc"},
     )
 
+    assert response.status_code == 200
+    action = response.json()["action"]
+    assert action["payload"]["devices"] == [{"device_id": "unresolved-source", "device_name": "Unresolved Source"}]
+    actions = db.get_device_actions(user["id"], "blocked-target")
+    assert len(actions) == 1
+    assert actions[0]["action"] == "sync_rom"
+    activity = db.get_rom_sync_activity(user["id"], "blocked-target")
+    assert activity[0]["status"] == "pending"
+
+
+def test_downloads_view_shows_pending_placeholder_then_is_superseded_by_real_job(client):
+    # Consolidation: a queued sync must show up in GET /api/downloads as
+    # 'pending' immediately (before the Drone has even claimed the action), and
+    # that placeholder must disappear -- not duplicate -- once the Drone's own
+    # download job (carrying the same sync_id) is reported.
+    client.post("/api/auth/register", json={"email": "merge-view@example.com", "username": "merge-view-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "merge-view@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("merge-view@example.com")
+    db.create_device(user["id"], "merge-source", "Merge Source", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "merge-target", "Merge Target", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.add_roms("merge-source", "snes", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "abc", "file_size": 8}])
+
+    queued = client.post(
+        "/api/devices/merge-target/sync-rom",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "snes", "gamelist_id": "Game.zip", "rom_fingerprint": "abc"},
+    )
+    assert queued.status_code == 200
+    sync_id = queued.json()["action"]["payload"]["sync_id"]
+
+    before = client.get("/api/downloads", headers={"Authorization": f"Bearer {token}"})
+    target = next(t for t in before.json()["targets"] if t["target_drone_id"] == "merge-target")
+    assert [row["sync_id"] for row in target["downloads"]] == [sync_id]
+    assert target["downloads"][0]["status"] == "pending"
+    assert target["downloads"][0]["job_id"] is None
+
+    # The Drone claims the action and reports a real job carrying the same sync_id.
+    real_job_report = client.post(
+        "/api/devices/merge-target/downloads",
+        headers={"Authorization": "Bearer b"},
+        json={
+            "target_drone_id": "merge-target",
+            "queued": [{
+                "job_id": "real-job-1",
+                "sync_id": sync_id,
+                "asset_type": "rom",
+                "target_drone_id": "merge-target",
+                "source_drone_id": "merge-source",
+                "system": "snes",
+                "file_path": "Game.zip",
+                "file_size": 8,
+                "status": "queued",
+            }],
+        },
+    )
+    assert real_job_report.status_code == 200
+
+    after = client.get("/api/downloads", headers={"Authorization": f"Bearer {token}"})
+    target_after = next(t for t in after.json()["targets"] if t["target_drone_id"] == "merge-target")
+    # Exactly one row for this sync_id -- the real job, not a duplicate placeholder.
+    matching = [row for row in target_after["downloads"] if row["sync_id"] == sync_id]
+    assert len(matching) == 1
+    assert matching[0]["job_id"] == "real-job-1"
+    assert matching[0]["status"] == "queued"
+
+
+def test_sync_rom_rejects_when_no_drone_has_the_rom(client):
+    client.post("/api/auth/register", json={"email": "nowhere@example.com", "username": "nowhere-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "nowhere@example.com", "username": "nowhere-at-example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("nowhere@example.com")
+    db.create_device(user["id"], "empty-target", "Empty Target", {"ip_address": "10.0.0.3"}, raw_token="b")
+
+    response = client.post(
+        "/api/devices/empty-target/sync-rom",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "snes", "gamelist_id": "Ghost.zip", "rom_fingerprint": "none"},
+    )
+
     assert response.status_code == 400
-    assert response.json()["detail"] == "No resolvable source Drone has this ROM"
-    assert db.get_device_actions(user["id"], "blocked-target") == []
+    assert response.json()["detail"] == "No Drone has this ROM"
+    assert db.get_device_actions(user["id"], "empty-target") == []
 
 
 def test_sync_folder_rom_payload_matches_by_path_without_fingerprint(client):
@@ -4330,6 +4473,49 @@ def test_sync_bios_action_payload_includes_only_source_devices_with_bios(client)
     assert action["payload"]["devices"] == [{"device_id": "source-with-bios", "device_name": "Source With BIOS"}]
 
 
+def test_sync_bios_holds_pending_when_source_is_not_publicly_resolvable(client):
+    # Same relaxed-fail-fast behavior as sync_rom/sync_system: a known-but-
+    # unreachable BIOS source is queued 'pending', not rejected with a 400.
+    client.post("/api/auth/register", json={"email": "bios-pending@example.com", "username": "bios-pending-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "bios-pending@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("bios-pending@example.com")
+    db.create_device(user["id"], "unresolved-bios-source", "Unresolved BIOS Source", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "bios-target", "BIOS Target", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.add_bios("unresolved-bios-source", [{"bios_name": "flash.bin", "file_path": "dc/flash.bin", "bios_md5": "bios-fingerprint", "file_size": 8}])
+
+    response = client.post(
+        "/api/devices/bios-target/sync-bios",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"file_path": "dc/flash.bin", "bios_md5": "bios-fingerprint", "file_size": 8},
+    )
+
+    assert response.status_code == 200
+    action = response.json()["action"]
+    assert action["payload"]["devices"] == [{"device_id": "unresolved-bios-source", "device_name": "Unresolved BIOS Source"}]
+
+
+def test_sync_bios_rejects_when_no_drone_has_the_bios(client):
+    client.post("/api/auth/register", json={"email": "bios-nowhere@example.com", "username": "bios-nowhere-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "bios-nowhere@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("bios-nowhere@example.com")
+    db.create_device(user["id"], "bios-empty-target", "BIOS Empty Target", {"ip_address": "10.0.0.3"}, raw_token="b")
+
+    response = client.post(
+        "/api/devices/bios-empty-target/sync-bios",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"file_path": "dc/flash.bin", "bios_md5": "none"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No Drone has this BIOS"
+
+
 def test_sync_artwork_endpoints_removed(client):
     # Overmind no longer stores an artwork inventory (gamelist-source-of-truth
     # refactor) -- the dedicated artwork-sync endpoints are gone; artwork now
@@ -4412,7 +4598,39 @@ def test_bulk_sync_queues_missing_roms_between_selected_drones_only(client):
     assert "syncing 2 ROM(s) for snes" in sync_notifications[0]["message"]
 
 
-def test_sync_system_queues_only_roms_from_resolvable_sources(client):
+def test_bulk_sync_includes_known_but_unresolvable_sources(client):
+    # Same relaxed-fail-fast as the single-target sync endpoints: a bulk sync
+    # source that Overmind knows has the ROM, but isn't currently peer-resolvable,
+    # must still be queued -- not silently dropped from the bulk operation.
+    client.post("/api/auth/register", json={"email": "bulk-pending@example.com", "username": "bulk-pending-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "bulk-pending@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("bulk-pending@example.com")
+    db.create_device(user["id"], "bulk-source", "Bulk Source", {"ip_address": "10.0.0.2"}, raw_token="a")
+    db.create_device(user["id"], "bulk-target", "Bulk Target", {"ip_address": "10.0.0.3"}, raw_token="b")
+    db.add_roms("bulk-source", "snes", [{"rom_name": "Unresolved.zip", "file_path": "Unresolved.zip", "rom_fingerprint": "unresolved", "file_size": 8}])
+
+    response = client.post(
+        "/api/bulk-sync",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"device_ids": ["bulk-source", "bulk-target"], "systems": ["snes"]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action_count"] == 1
+    assert payload["queued_rom_count"] == 1
+
+    claim = client.post("/api/devices/bulk-target/actions/claim", headers={"Authorization": "Bearer b"}, json={})
+    roms = claim.json()["actions"][0]["payload"]["roms"]
+    assert roms[0]["devices"] == [{"device_id": "bulk-source", "device_name": "Bulk Source"}]
+
+
+def test_sync_system_queues_roms_from_all_known_sources_including_unresolvable(client):
+    # A source Overmind knows has the ROM but that isn't currently peer-resolvable
+    # is still queued (the Drone holds it 'pending' until reachable) -- only a
+    # ROM with NO known source anywhere is excluded from the queued set.
     client.post("/api/auth/register", json={"email": "system-sync@example.com", "username": "system-sync-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
@@ -4436,12 +4654,32 @@ def test_sync_system_queues_only_roms_from_resolvable_sources(client):
     payload = response.json()
     assert payload["artwork_action_count"] == 0
     assert payload["artwork_actions"] == []
-    roms = payload["action"]["payload"]["roms"]
-    assert [row["file_path"] for row in roms] == ["Good.zip"]
-    assert roms[0]["devices"] == [{"device_id": "good-source", "device_name": "Good Source"}]
+    roms = {row["file_path"]: row for row in payload["action"]["payload"]["roms"]}
+    assert set(roms) == {"Good.zip", "Blocked.zip"}
+    assert roms["Good.zip"]["devices"] == [{"device_id": "good-source", "device_name": "Good Source"}]
+    assert roms["Blocked.zip"]["devices"] == [{"device_id": "blocked-source", "device_name": "Blocked Source"}]
 
 
-def test_sync_system_uses_peer_check_resolvability_for_sources(client):
+def test_sync_system_rejects_when_system_has_no_known_source(client):
+    client.post("/api/auth/register", json={"email": "empty-sync@example.com", "username": "empty-sync-at-example.com", "password": "testpass123"})
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "empty-sync@example.com", "password": "testpass123"},
+    ).json()["access_token"]
+    user = db.get_user_by_email("empty-sync@example.com")
+    db.create_device(user["id"], "empty-target", "Empty Target", {"ip_address": "10.0.0.4"}, raw_token="c")
+
+    response = client.post(
+        "/api/devices/empty-target/sync-system",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"system_name": "snes"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No Drone has missing ROMs for this system"
+
+
+def test_sync_system_still_queues_unresolvable_source_before_any_peer_check(client):
     client.post("/api/auth/register", json={"email": "probe-sync@example.com", "username": "probe-sync-at-example.com", "password": "testpass123"})
     token = client.post(
         "/api/auth/login",
@@ -4452,15 +4690,18 @@ def test_sync_system_uses_peer_check_resolvability_for_sources(client):
     db.create_device(user["id"], "fresh-target", "Fresh Target", {"ip_address": "10.0.0.4"}, raw_token="b")
     db.add_roms("fresh-source", "fbneo", [{"rom_name": "Game.zip", "file_path": "Game.zip", "rom_fingerprint": "good"}])
 
-    # Without a peer check, the source should not be offered
+    # No peer check yet: the source is still queued (held 'pending' on the Drone).
     response_before = client.post(
         "/api/devices/fresh-target/sync-system",
         headers={"Authorization": f"Bearer {token}"},
         json={"system_name": "fbneo"},
     )
-    assert response_before.status_code == 400
+    assert response_before.status_code == 200
+    roms_before = response_before.json()["action"]["payload"]["roms"]
+    assert roms_before[0]["devices"] == [{"device_id": "fresh-source", "device_name": "Fresh Source"}]
+    assert db.is_drone_peer_resolvable("fresh-source") is False
 
-    # After a passing peer check, the source becomes available
+    # After a passing peer check, the same source is still offered (now reachable).
     mark_source_resolvable("fresh-source", "8.8.8.8")
     response_after = client.post(
         "/api/devices/fresh-target/sync-system",
@@ -4468,8 +4709,8 @@ def test_sync_system_uses_peer_check_resolvability_for_sources(client):
         json={"system_name": "fbneo"},
     )
     assert response_after.status_code == 200
-    roms = response_after.json()["action"]["payload"]["roms"]
-    assert roms[0]["devices"] == [{"device_id": "fresh-source", "device_name": "Fresh Source"}]
+    roms_after = response_after.json()["action"]["payload"]["roms"]
+    assert roms_after[0]["devices"] == [{"device_id": "fresh-source", "device_name": "Fresh Source"}]
     assert db.is_drone_peer_resolvable("fresh-source") is True
 
 

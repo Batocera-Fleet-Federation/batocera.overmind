@@ -2643,7 +2643,7 @@ class OvermindDatabase:
         return None
 
     def _notify_device_action_completion(self, device: dict, device_id: str, action: dict, status: str, message: Optional[str]) -> None:
-        if str(action.get("action") or "") in {"sync_rom", "sync_system", "sync_bios", "sync_artwork", "cancel_download"}:
+        if str(action.get("action") or "") in {"sync_rom", "sync_system", "sync_bios", "sync_artwork", "cancel_download", "pause_download", "resume_download"}:
             return
         action_label = {
             "restart": "Remote Restart",
@@ -3750,6 +3750,7 @@ class OvermindDatabase:
         if postgres_store.available():
             relational = postgres_store.list_download_states(user_id, device_id=device_id)
             if relational is not None:
+                self._merge_pending_sync_activity(user_id, relational)
                 return relational
         devices = [self.user_can_access_device(user_id, device_id)] if device_id else self.get_user_devices(user_id)
         rows = []
@@ -3771,7 +3772,72 @@ class OvermindDatabase:
             state["device_name"] = device.get("device_name")
             rows.append(state)
         rows.sort(key=lambda row: str(row.get("target_drone_id") or "").lower())
+        self._merge_pending_sync_activity(user_id, rows)
         return rows
+
+    def _merge_pending_sync_activity(self, user_id: str, rows: List[dict]) -> None:
+        """Layer synthetic 'pending' rows into a downloads listing for syncs
+        Overmind has queued but the Drone hasn't yet claimed/reported a real job
+        for -- gives instant feedback in the Downloads view the moment a sync is
+        requested, without waiting for the Drone's next heartbeat/state push.
+
+        Deduped by sync_id against each target's existing download items (which
+        carry sync_id once the Drone's real job appears), so the placeholder is
+        superseded -- never duplicated -- the moment the real row shows up.
+        Mutates ``rows`` in place; each row's list fields are replaced (not
+        mutated in place) so this is safe to call on a row still referencing a
+        shared in-memory list.
+        """
+        pending_rows = self.search_rom_sync_activity(user_id, status="pending")
+        if not pending_rows:
+            return
+        by_target: Dict[str, List[dict]] = {}
+        for activity in pending_rows:
+            target = str(activity.get("target_drone_id") or "").strip()
+            if target:
+                by_target.setdefault(target, []).append(activity)
+        if not by_target:
+            return
+        for state in rows:
+            target_drone_id = str(state.get("target_drone_id") or "").strip()
+            candidates = by_target.get(target_drone_id)
+            if not candidates:
+                continue
+            existing_sync_ids = {
+                str(item.get("sync_id") or item.get("job_id") or "")
+                for item in (state.get("downloads") or [])
+                if isinstance(item, dict)
+            }
+            added = []
+            for activity in candidates:
+                sync_id = str(activity.get("sync_id") or activity.get("id") or "")
+                if not sync_id or sync_id in existing_sync_ids:
+                    continue
+                added.append({
+                    "job_id": None,
+                    "sync_id": sync_id,
+                    "asset_type": activity.get("asset_type"),
+                    "status": "pending",
+                    "source_drone_id": activity.get("source_drone_id"),
+                    "system": activity.get("system"),
+                    "file_path": activity.get("relative_path") or activity.get("rom_path") or activity.get("bios_name"),
+                    "relative_path": activity.get("relative_path") or activity.get("rom_path") or activity.get("bios_name"),
+                    "rom_path": activity.get("rom_path"),
+                    "bios_name": activity.get("bios_name"),
+                    "artwork_type": activity.get("artwork_type"),
+                    "file_size": activity.get("file_size"),
+                    "total_bytes": activity.get("file_size"),
+                    "downloaded_bytes": 0,
+                    "bytes_transferred": 0,
+                    "percentage": 0,
+                    "transfer_speed_bps": 0,
+                    "queue_position": None,
+                    "failure_reason": "Waiting for the Drone to claim this sync",
+                })
+                existing_sync_ids.add(sync_id)
+            if added:
+                state["queued"] = list(state.get("queued") or []) + added
+                state["downloads"] = list(state.get("downloads") or []) + added
 
     def get_rom_sync_activity(self, user_id: str, device_id: str) -> Optional[List[dict]]:
         device = self.get_device_by_device_id(device_id)

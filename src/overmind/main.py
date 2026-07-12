@@ -125,6 +125,8 @@ SUPPORTED_DEVICE_ACTIONS = {
     "sync_bios",
     "sync_artwork",
     "cancel_download",
+    "pause_download",
+    "resume_download",
 }
 SWARM_OFFLINE_THRESHOLD_SECONDS = int(os.getenv("SWARM_OFFLINE_THRESHOLD_SECONDS", "180"))
 NOTIFICATION_DELIVERY_INTERVAL_SECONDS = int(os.getenv("NOTIFICATION_DELIVERY_INTERVAL_SECONDS", "180"))
@@ -1006,8 +1008,16 @@ def notify_sync_triggered(user: dict, device: dict, sync_type: str, nature: str,
     )
 
 
-def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = None) -> list:
-    """Return sources that have been peer-resolved by at least one drone in the swarm."""
+def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = None, require_resolvable: bool = True) -> list:
+    """Return known sources for an asset (each an existing, accessible Drone).
+
+    With require_resolvable (the default), further filters to sources with a
+    passing peer-check right now -- used where an immediately-usable list is
+    needed. Callers that queue a sync and let the Drone hold it 'pending' until
+    a source becomes reachable (see actions.py's enqueue_pending_rom/bios) pass
+    require_resolvable=False to keep every known-but-currently-unreachable
+    source, so the Drone has candidates to keep retrying against.
+    """
     eligible = []
     for source in sources if isinstance(sources, list) else []:
         if not isinstance(source, dict):
@@ -1018,7 +1028,7 @@ def resolvable_asset_sources(sources: list, target_device_id: Optional[str] = No
         source_device = db.get_device_by_device_id(source_id)
         if not source_device:
             continue
-        if not db.is_drone_peer_resolvable(source_id):
+        if require_resolvable and not db.is_drone_peer_resolvable(source_id):
             continue
         eligible.append({
             "device_id": source_id,
@@ -2204,6 +2214,32 @@ async def cancel_device_download(device_id: str, job_id: str, authorization: Opt
     return {"status": "queued", "action": action}
 
 
+@app.post("/api/devices/{device_id}/downloads/{job_id}/pause", response_model=ActionQueuedResponse)
+async def pause_device_download(device_id: str, job_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_device_admin(user, device)
+    action = db.create_device_action(device["user_id"], device_id, "pause_download", {"job_id": job_id})
+    if not action:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"status": "queued", "action": action}
+
+
+@app.post("/api/devices/{device_id}/downloads/{job_id}/resume", response_model=ActionQueuedResponse)
+async def resume_device_download(device_id: str, job_id: str, authorization: Optional[str] = Header(default=None)):
+    user = get_current_user(authorization)
+    device = db.user_can_access_device(user["id"], device_id)
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    require_device_admin(user, device)
+    action = db.create_device_action(device["user_id"], device_id, "resume_download", {"job_id": job_id})
+    if not action:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return {"status": "queued", "action": action}
+
+
 @app.post("/api/devices/{device_id}/downloads", response_model=StatusResponse)
 async def update_device_downloads(device_id: str, payload: DroneDownloadsReport, authorization: Optional[str] = Header(default=None)):
     """Persist a live download-state snapshot pushed by a Drone."""
@@ -2859,9 +2895,13 @@ async def sync_device_rom(device_id: str, body: SyncRomRequest, authorization: O
                 if not rom_name:
                     rom_name = row.get("rom_name") or ""
                 break
-    source_devices = resolvable_asset_sources(source_devices, device_id)
+    # require_resolvable=False: keep every known source even if none is
+    # reachable right now -- the Drone holds the sync 'pending' and retries
+    # rather than us failing the request outright. Only truly no known source
+    # (empty here) is a hard error.
+    source_devices = resolvable_asset_sources(source_devices, device_id, require_resolvable=False)
     if not source_devices:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has this ROM")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No Drone has this ROM")
     sync_id = str(uuid.uuid4())
     action = db.create_device_action(device["user_id"], device_id, "sync_rom", {
         "sync_id": sync_id,
@@ -2915,9 +2955,9 @@ async def sync_device_bios(device_id: str, body: SyncBiosRequest, authorization:
             if not requested_fingerprint and row_path == requested_path:
                 source_devices = row.get("devices") if isinstance(row.get("devices"), list) else []
                 break
-    source_devices = resolvable_asset_sources(source_devices, device_id)
+    source_devices = resolvable_asset_sources(source_devices, device_id, require_resolvable=False)
     if not source_devices:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has this BIOS")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No Drone has this BIOS")
     action = db.create_device_action(device["user_id"], device_id, "sync_bios", {
         "bios_name": payload.get("bios_name") or bios_path,
         "file_path": bios_path,
@@ -2957,13 +2997,13 @@ async def sync_device_system(device_id: str, body: SyncSystemRequest, authorizat
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="system_name is required")
     master_rows = db.get_master_roms_for_device(device["user_id"], device_id) or []
     missing = [
-        {**row, "devices": resolvable_asset_sources(row.get("devices") or [], device_id)}
+        {**row, "devices": resolvable_asset_sources(row.get("devices") or [], device_id, require_resolvable=False)}
         for row in master_rows
         if str(row.get("system_name") or "").lower() == system_name.lower() and not row.get("present_on_selected")
     ]
     missing = [row for row in missing if row["devices"]]
     if not missing:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No resolvable source Drone has missing ROMs for this system")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No Drone has missing ROMs for this system")
     for row in missing:
         row["sync_id"] = str(uuid.uuid4())
     action = db.create_device_action(device["user_id"], device_id, "sync_system", {"system_name": system_name, "roms": missing})
@@ -3058,7 +3098,10 @@ async def bulk_sync_drones(body: BulkSyncRequest, authorization: Optional[str] =
         for key, row in union.items():
             if key in target_keys:
                 continue
-            source_devices = resolvable_asset_sources(row.get("devices", []), target_id)
+            # Same relaxed-fail-fast as sync_device_system: keep known-but-currently-
+            # unreachable sources too, so the Drone can hold the sync 'pending'
+            # rather than this ROM silently never being offered to this target.
+            source_devices = resolvable_asset_sources(row.get("devices", []), target_id, require_resolvable=False)
             if not source_devices:
                 continue
             system_name = str(row.get("system_name") or "").strip()

@@ -405,10 +405,8 @@
                 if (cleanPath.includes('/api/devices') && cleanPath.includes('/master-artwork')) return 'Loading artwork...';
                 if (cleanPath.includes('/api/devices') && cleanPath.includes('/gamelogs')) return 'Loading game logs...';
                 if (cleanPath.includes('/api/devices') && cleanPath.includes('/actions')) return 'Loading actions...';
-                if (cleanPath.includes('/api/devices') && cleanPath.includes('/sync-activity')) return 'Loading sync activity...';
                 if (cleanPath.includes('/api/devices')) return 'Loading devices...';
                 if (cleanPath.includes('/api/downloads')) return 'Loading downloads...';
-                if (cleanPath.includes('/api/sync-activity')) return 'Loading sync activity...';
                 if (cleanPath.includes('/api/master-roms')) return 'Loading master ROMs...';
                 if (cleanPath.includes('/api/systems')) return 'Loading systems...';
                 if (cleanPath.includes('/api/hive')) return 'Loading hive...';
@@ -1581,49 +1579,6 @@
                 }
             }
 
-            function setSwarmView(view) {
-                if (!view || !['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'].includes(view)) {
-                    view = 'drones';
-                }
-
-                currentSwarmView = view;
-
-                document.querySelectorAll('.swarm-view-btn').forEach(btn => {
-                    btn.classList.toggle('active', btn.dataset.swarmView === view);
-                });
-
-                const isDronesView = view === 'drones';
-
-                const pendingConnections = document.getElementById('pending-connections');
-                const integrationTokenPanel = document.getElementById('integration-token-panel');
-                const devicesList = document.getElementById('devices-list');
-                const swarmGlobalPanel = document.getElementById('swarm-global-panel');
-
-                if (pendingConnections) pendingConnections.style.display = isDronesView ? '' : 'none';
-                if (integrationTokenPanel) integrationTokenPanel.style.display = isDronesView ? '' : 'none';
-                if (devicesList) devicesList.style.display = isDronesView ? '' : 'none';
-                if (swarmGlobalPanel) swarmGlobalPanel.style.display = isDronesView ? 'none' : '';
-
-                if (view === 'drones') {
-                    loadDevices();
-                    return;
-                }
-
-                if (view === 'downloads') {
-                    loadSwarmDownloads();
-                    return;
-                }
-
-                if (view === 'sync-activity') {
-                    loadSwarmSyncActivity();
-                    return;
-                }
-
-                if (view === 'master-list') {
-                    loadSwarmMasterList();
-                }
-            }
-
             async function loadDevices(options = {}) {
                 const applyRoute = options.applyRoute !== false;
                 const background = options.background === true;
@@ -1957,7 +1912,7 @@
             function flattenDownloadTargets(targets) {
                 const rows = [];
                 (targets || []).forEach(target => {
-                    [...(target.active || []), ...(target.queued || [])].forEach(row => {
+                    [...(target.active || []), ...(target.queued || []), ...(target.recent || [])].forEach(row => {
                         rows.push({
                             ...row,
                             target_drone_id: row.target_drone_id || target.target_drone_id,
@@ -1973,20 +1928,39 @@
             }
 
             function downloadStatusClass(status) {
-                return status === 'failed' ? 'danger' : status === 'completed' ? 'success' : status === 'cancelled' ? 'secondary' : 'primary';
+                return status === 'failed' ? 'danger'
+                    : status === 'completed' ? 'success'
+                    : status === 'cancelled' ? 'secondary'
+                    : status === 'downloading' ? 'info'
+                    : status === 'paused' ? 'warning'
+                    : status === 'pending' ? 'dark'
+                    : 'primary';
             }
 
-            function renderDownloadCancelButton(row) {
-                const active = ['queued', 'downloading'].includes(String(row.status || ''));
-                return active && canMutateSwarm()
-                    ? `<button class="btn btn-outline-danger btn-sm" onclick="cancelSwarmDownload('${escapeHtml(row.target_drone_id)}','${escapeHtml(row.job_id || row.id)}')"><i class="bi bi-x-circle"></i></button>`
-                    : '';
+            function renderDownloadActionButtons(row) {
+                if (!canMutateSwarm()) return '';
+                const status = String(row.status || '');
+                const jobId = row.job_id || row.id;
+                if (!jobId) return ''; // a not-yet-claimed pending placeholder has no job_id yet
+                const target = escapeHtml(row.target_drone_id);
+                const job = escapeHtml(jobId);
+                const buttons = [];
+                if (['queued', 'downloading', 'pending', 'paused'].includes(status)) {
+                    buttons.push(`<button class="btn btn-outline-danger btn-sm" title="Cancel" onclick="cancelSwarmDownload('${target}','${job}')"><i class="bi bi-x-circle"></i></button>`);
+                }
+                if (['queued', 'pending', 'downloading'].includes(status)) {
+                    buttons.push(`<button class="btn btn-outline-warning btn-sm" title="Pause" onclick="pauseSwarmDownload('${target}','${job}')"><i class="bi bi-pause-fill"></i></button>`);
+                }
+                if (status === 'paused') {
+                    buttons.push(`<button class="btn btn-outline-success btn-sm" title="Resume" onclick="resumeSwarmDownload('${target}','${job}')"><i class="bi bi-play-fill"></i></button>`);
+                }
+                return buttons.join(' ');
             }
 
             function renderSwarmDownloadsTable(rows) {
                 return `<div class="table-responsive"><table class="table table-sm align-middle bff-stack">
                     <thead><tr>
-                        <th>Target</th><th>Source</th><th>Status</th><th>Queue</th><th>File</th><th>Size</th><th>Downloaded</th><th>Progress</th><th>Speed</th><th>Started</th><th>Reason</th><th></th>
+                        <th>Target</th><th>Source</th><th>Status</th><th>File</th><th>Size</th><th>Downloaded</th><th>Progress</th><th>Speed</th><th></th>
                     </tr></thead>
                     <tbody>${rows.map(row => {
                         const pct = Number(row.percentage || 0);
@@ -1995,15 +1969,12 @@
                             <td class="small"><div class="fw-semibold">${escapeHtml(row.target_device_name || row.target_drone_id || 'n/a')}</div><div class="small text-muted mono">${escapeHtml(row.target_drone_id || '')}</div></td>
                             <td class="small mono">${escapeHtml(row.source_drone_id || 'n/a')}</td>
                             <td><span class="badge text-bg-${downloadStatusClass(row.status)}" data-download-field="status">${escapeHtml(row.status || 'queued')}</span></td>
-                            <td class="small" data-download-field="queue">${row.queue_position ? `#${escapeHtml(row.queue_position)}` : row.status === 'downloading' ? 'active' : ''}</td>
-                            <td class="small">${escapeHtml(fileLabel)}${row.asset_type ? `<div class="small text-muted">${escapeHtml(row.asset_type)}</div>` : ''}${row.failure_reason || row.error_message ? `<div class="text-danger">${escapeHtml(row.failure_reason || row.error_message)}</div>` : ''}</td>
+                            <td class="small">${escapeHtml(fileLabel)}${row.asset_type ? `<div class="small text-muted">${escapeHtml(row.asset_type)}</div>` : ''}${row.failure_reason || row.error_message ? `<div class="text-danger" data-download-field="reason">${escapeHtml(row.failure_reason || row.error_message)}</div>` : ''}</td>
                             <td class="small">${formatBytes(row.total_bytes || row.file_size)}</td>
                             <td class="small" data-download-field="downloaded">${formatBytes(row.downloaded_bytes || row.bytes_transferred)}</td>
                             <td style="min-width:150px"><div class="progress" style="height:.55rem"><div class="progress-bar" data-download-field="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="small text-muted" data-download-field="progress-text">${pct.toFixed(1)}%</div></td>
                             <td class="small" data-download-field="speed">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ''}</td>
-                            <td class="small text-muted">${escapeHtml(row.started_at || row.download_started_at || row.created_at || '')}</td>
-                            <td class="small text-danger" data-download-field="reason">${escapeHtml(row.failure_reason || row.error_message || row.cancel_reason || '')}</td>
-                            <td data-download-field="cancel">${renderDownloadCancelButton(row)}</td>
+                            <td data-download-field="actions">${renderDownloadActionButtons(row)}</td>
                         </tr>`;
                     }).join('')}</tbody></table></div>`;
             }
@@ -2017,26 +1988,22 @@
                     const tableRow = document.getElementById(`swarm-download-${cssSafeId(downloadRowKey(row))}`);
                     const pct = Math.max(0, Math.min(100, Number(row.percentage || 0)));
                     const status = tableRow.querySelector('[data-download-field="status"]');
-                    const queue = tableRow.querySelector('[data-download-field="queue"]');
                     const downloaded = tableRow.querySelector('[data-download-field="downloaded"]');
                     const progressBar = tableRow.querySelector('[data-download-field="progress-bar"]');
                     const progressText = tableRow.querySelector('[data-download-field="progress-text"]');
                     const speed = tableRow.querySelector('[data-download-field="speed"]');
-                    const reason = tableRow.querySelector('[data-download-field="reason"]');
-                    const cancel = tableRow.querySelector('[data-download-field="cancel"]');
+                    const actions = tableRow.querySelector('[data-download-field="actions"]');
                     if (status) {
                         status.className = `badge text-bg-${downloadStatusClass(row.status)}`;
                         status.textContent = row.status || 'queued';
                     }
-                    if (queue) queue.textContent = row.queue_position ? `#${row.queue_position}` : row.status === 'downloading' ? 'active' : '';
                     if (downloaded) downloaded.textContent = formatBytes(row.downloaded_bytes || row.bytes_transferred);
                     if (progressBar) progressBar.style.width = `${pct}%`;
                     if (progressText) progressText.textContent = `${pct.toFixed(1)}%`;
                     if (speed) speed.textContent = row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : '';
-                    if (reason) reason.textContent = row.failure_reason || row.error_message || row.cancel_reason || '';
-                    if (cancel) {
-                        const nextCancel = renderDownloadCancelButton(row);
-                        if (cancel.innerHTML !== nextCancel) cancel.innerHTML = nextCancel;
+                    if (actions) {
+                        const nextActions = renderDownloadActionButtons(row);
+                        if (actions.innerHTML !== nextActions) actions.innerHTML = nextActions;
                     }
                 });
                 return true;
@@ -2103,71 +2070,32 @@
                 await showSwarmDownloads(false);
             }
 
-            async function showSwarmSyncActivity(updateUrl = true) {
-                if (updateUrl) {
-                    setSwarmView('sync-activity');
+            async function pauseSwarmDownload(deviceId, jobId) {
+                if (!deviceId || !jobId) return;
+                const response = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/downloads/${encodeURIComponent(jobId)}/pause`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                if (!response.ok) {
+                    showMessage('Unable to queue pause request.', 'error');
                     return;
                 }
-                setActiveSwarmView('sync-activity');
-                const panel = document.getElementById('swarm-global-panel');
-                const list = document.getElementById('devices-list');
-                if (!panel) return;
-                if (list) list.style.display = 'none';
-                panel.style.display = 'block';
-                const q = document.getElementById('swarm-sync-search')?.value || '';
-                const statusValue = document.getElementById('swarm-sync-status')?.value || '';
-                const params = new URLSearchParams();
-                if (q.trim()) params.set('q', q.trim());
-                if (statusValue) params.set('status_filter', statusValue);
-                panel.innerHTML = `<div class="card"><div class="card-body py-2">Loading swarm sync activity...</div></div>`;
-                try {
-                    const response = await apiGet('/api/sync-activity' + (params.toString() ? `?${params.toString()}` : ''));
-                    if (!response.ok) throw new Error('Failed to load sync activity');
-                    const rows = (await response.json()).activity || [];
-                    panel.innerHTML = `<div class="card"><div class="card-body py-2">
-                        <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
-                            <div style="flex:1;min-width:240px">
-                                <label class="form-label" for="swarm-sync-search">Search Sync Activity</label>
-                                <input id="swarm-sync-search" class="form-control" type="search" value="${escapeHtml(q)}" placeholder="Drone, file, fingerprint, status, date, error">
-                            </div>
-                            <div style="min-width:160px">
-                                <label class="form-label" for="swarm-sync-status">Status</label>
-                                <select id="swarm-sync-status" class="form-select">
-                                    <option value="">All</option>
-                                    <option value="pending" ${statusValue === 'pending' ? 'selected' : ''}>Pending</option>
-                                    <option value="completed" ${statusValue === 'completed' ? 'selected' : ''}>Completed</option>
-                                    <option value="failed" ${statusValue === 'failed' ? 'selected' : ''}>Failed</option>
-                                    <option value="skipped" ${statusValue === 'skipped' ? 'selected' : ''}>Skipped</option>
-                                </select>
-                            </div>
-                            <button class="btn btn-primary" onclick="showSwarmSyncActivity(false)">Search</button>
-                        </div>
-                        <div class="table-responsive"><table class="table table-sm align-middle bff-stack"><thead><tr>
-                            <th>Status</th><th>Transfer</th><th>Asset</th><th>Fingerprint</th><th>Duration</th><th>Time</th>
-                        </tr></thead><tbody>
-                            ${rows.map(row => {
-                                const duration = formatDuration(row);
-                                const statusClass = row.status === 'completed' ? 'text-bg-success' : row.status === 'failed' ? 'text-bg-danger' : 'text-bg-secondary';
-                                const assetParts = [row.asset_type === 'bios' ? 'bios' : (row.system || ''), row.relative_path || row.rom_path || row.rom_name || row.bios_name || ''];
-                                if (row.artwork_type) assetParts.push(row.artwork_type);
-                                return `<tr>
-                                    <td><span class="badge ${statusClass}">${escapeHtml(row.status || 'pending')}</span></td>
-                                    <td class="small">${escapeHtml(row.source_drone_id || 'source n/a')} &rarr; ${escapeHtml(row.target_drone_id || 'target n/a')}</td>
-                                    <td class="small">${escapeHtml(assetParts.filter(Boolean).join(' / '))}${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}</td>
-                                    <td class="small mono">${escapeHtml(row.rom_fingerprint || row.bios_md5 || row.fingerprint || '')}</td>
-                                    <td class="small">${duration ? escapeHtml(row.status === 'failed' ? `Failed after ${duration}` : row.status === 'completed' ? `Completed in ${duration}` : duration) : ''}</td>
-                                    <td class="small text-muted">${escapeHtml(row.completed_at || row.started_at || row.received_at || '')}</td>
-                                </tr>`;
-                            }).join('')}
-                        </tbody></table></div>
-                        ${rows.length ? '' : '<div class="small text-muted">No swarm sync activity matched.</div>'}
-                    </div></div>`;
-                    document.getElementById('swarm-sync-search')?.addEventListener('keydown', event => {
-                        if (event.key === 'Enter') showSwarmSyncActivity(false);
-                    });
-                } catch (error) {
-                    panel.innerHTML = '<div class="empty-state">Unable to load swarm sync activity.</div>';
+                showMessage('Pause request sent to the target Drone.', 'success');
+                await showSwarmDownloads(false);
+            }
+
+            async function resumeSwarmDownload(deviceId, jobId) {
+                if (!deviceId || !jobId) return;
+                const response = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/downloads/${encodeURIComponent(jobId)}/resume`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                if (!response.ok) {
+                    showMessage('Unable to queue resume request.', 'error');
+                    return;
                 }
+                showMessage('Resume request sent to the target Drone.', 'success');
+                await showSwarmDownloads(false);
             }
 
             async function showSwarmMasterList(updateUrl = true) {
@@ -3738,34 +3666,6 @@
                 `;
             }
 
-            async function loadSyncActivityPanel() {
-                const container = document.getElementById('drone-sync-activity-panel');
-                if (!container || !selectedDeviceId) return;
-                try {
-                    const response = await apiGet(`/api/devices/${selectedDeviceId}/sync-activity`);
-                    if (!response.ok) throw new Error('Failed to load sync activity');
-                    const rows = ((await response.json()).activity || []).slice(0, 20);
-                    container.innerHTML = `<div class="card"><div class="card-body py-2"><strong>Sync Activity</strong>
-                        ${rows.length ? rows.map(row => {
-                            const duration = formatDuration(row);
-                            const durationText = duration ? (row.status === 'failed' ? `Failed after ${duration}` : row.status === 'completed' ? `Completed in ${duration}` : duration) : '';
-                            const refreshText = row.inventory_refresh_status ? `Inventory ${row.inventory_refresh_status}${row.inventory_refresh_duration_ms !== undefined && row.inventory_refresh_duration_ms !== null ? ` in ${row.inventory_refresh_duration_ms}ms` : ''}` : '';
-                            const assetParts = [row.asset_type === 'bios' ? 'bios' : (row.system || ''), row.bios_name || row.rom_path || row.rom_name || row.relative_path || '', row.artwork_type || ''].filter(Boolean);
-                            return `<div class="mt-2 small">
-                            <span class="badge ${row.status === 'completed' ? 'text-bg-success' : row.status === 'failed' ? 'text-bg-danger' : 'text-bg-secondary'}">${escapeHtml(row.status || 'pending')}</span>
-                            ${escapeHtml(assetParts.join(' / '))}
-                            ${row.source_drone_id ? `from ${escapeHtml(row.source_drone_id)}` : ''}
-                            ${durationText ? `<span class="text-muted ms-1">${escapeHtml(durationText)}</span>` : ''}
-                            ${refreshText ? `<div class="text-muted">${escapeHtml(refreshText)}</div>` : ''}
-                            ${row.failure_reason ? `<div class="text-danger">${escapeHtml(row.failure_reason)}</div>` : ''}
-                        </div>`;
-                        }).join('') : '<div class="small text-muted mt-1">No sync activity yet.</div>'}
-                    </div></div>`;
-                } catch (error) {
-                    container.innerHTML = '<div class="empty-state">Unable to load sync activity.</div>';
-                }
-            }
-
             async function rotateDroneToken() {
                 if (!selectedDeviceId || !window.confirm('Rotate this Drone token? The old token will stop working immediately.')) return;
                 const response = await fetch(`/api/devices/${selectedDeviceId}/token/rotate`, {
@@ -3969,13 +3869,13 @@
                 const tab = allowed.includes(parts[0]) ? parts[0] : 'devices';
                 if (tab === 'devices' && parts[1] === 'swarm') {
                     if (parts[3] === 'swarm') {
-                        const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'];
+                        const swarmViews = ['drones', 'downloads', 'master-list', 'gameplay'];
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[4]) ? parts[4] : 'drones' };
                     }
                     if (parts[3] === 'device') {
                         return { tab, swarmId: decodeURIComponent(parts[2]), deviceId: parts[4] ? decodeURIComponent(parts[4]) : null, deviceView: normalizeDeviceView(parts[5]), swarmView: 'drones' };
                     }
-                    const swarmViews = ['drones', 'downloads', 'sync-activity', 'master-list', 'gameplay'];
+                    const swarmViews = ['drones', 'downloads', 'master-list', 'gameplay'];
                     return { tab, deviceId: null, deviceView: 'systems', swarmView: swarmViews.includes(parts[2]) ? parts[2] : 'drones' };
                 }
                 if (tab === 'devices' && parts[1] === 'device') {
@@ -4005,7 +3905,6 @@
                 if (!selectedDeviceId && route.tab === 'devices') {
                     const view = route.swarmView || 'drones';
                     if (view === 'downloads') showSwarmDownloads(false);
-                    else if (view === 'sync-activity') showSwarmSyncActivity(false);
                     else if (view === 'master-list') showSwarmMasterList(false);
                     else if (view === 'gameplay') showSwarmGameplay(false);
                     else showSwarmHome(false);

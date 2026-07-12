@@ -3065,19 +3065,20 @@ class PostgresMetadataStore:
                         """
                         SELECT snapshot_id, job_id, state_bucket, asset_type, status, source_drone_id, system_name,
                                file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes,
-                               percentage, transfer_speed_bps, queue_position, failure_reason
+                               percentage, transfer_speed_bps, queue_position, failure_reason, sync_id
                         FROM download_items
                         WHERE snapshot_id = ANY(%s)
                         ORDER BY id ASC
                         """,
                         (list(latest),),
                     )
-                    for snapshot_id, job_id, bucket, asset_type, item_status, source_drone_id, system_name, file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes, percentage, transfer_speed_bps, queue_position, failure_reason in cur.fetchall():
+                    for snapshot_id, job_id, bucket, asset_type, item_status, source_drone_id, system_name, file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes, percentage, transfer_speed_bps, queue_position, failure_reason, sync_id in cur.fetchall():
                         state = states.get(latest.get(snapshot_id))
                         if state is None or bucket not in {"active", "queued", "recent"}:
                             continue
                         item = {
                             "job_id": job_id,
+                            "sync_id": sync_id or job_id,
                             "asset_type": asset_type,
                             "status": item_status,
                             "source_drone_id": source_drone_id,
@@ -5281,8 +5282,8 @@ class PostgresMetadataStore:
                     INSERT INTO download_items
                         (snapshot_id, job_id, state_bucket, asset_type, status, source_drone_id, system_name,
                          file_path, rom_path, bios_name, artwork_type, file_size, downloaded_bytes,
-                         percentage, transfer_speed_bps, queue_position, failure_reason)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         percentage, transfer_speed_bps, queue_position, failure_reason, sync_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         snapshot_id,
@@ -5302,6 +5303,7 @@ class PostgresMetadataStore:
                         item.get("transfer_speed_bps"),
                         item.get("queue_position"),
                         item.get("failure_reason") or item.get("error_message"),
+                        item.get("sync_id"),
                     ),
                 )
 
