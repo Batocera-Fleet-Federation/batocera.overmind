@@ -3192,6 +3192,55 @@ def test_device_systems_ui_unifies_mine_all_missing_scope_and_queues_downloads()
     assert """title="Download" aria-label="Download" onclick='syncRom(${rowPayload})'><i class="bi bi-download"></i>""" in js
 
 
+def test_device_admin_panel_exposes_music_volume_and_collections_remote_control():
+    """Overmind can remote-control the same music-volume + EmulationStation
+    collections/systems/groups settings the Drone's own System Info page can --
+    fetched via a get_es_collections_state action round trip and applied via
+    set_es_collections, mirroring the drone.js checklist UI."""
+    root = Path(__file__).resolve().parents[1]
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "async function queueDeviceMusicVolume(level)" in js
+    assert "queueDeviceAction('set_music_volume'" in js
+    assert 'id="es-collections-body"' in js
+    assert "async function loadDeviceEsCollections()" in js
+    assert "async function saveDeviceEsCollections()" in js
+    assert "queueDeviceAction('get_es_collections_state'" in js
+    assert "queueDeviceAction('set_es_collections'" in js
+    assert "async function pollDeviceActionResult(actionId, options = {})" in js
+
+    # Same invert-on-save convention as drone.js's own collections card.
+    payload_start = js.index("function collectDeviceEsCollectionsPayload()")
+    payload_end = js.index("function renderDeviceEsCollectionsBody(state)")
+    payload_source = js[payload_start:payload_end]
+    assert "names('displayed', false)" in payload_source
+    assert "names('grouped', false)" in payload_source
+    assert "names('auto', true)" in payload_source
+    assert "names('custom', true)" in payload_source
+
+    # The earlier idle-volume bidirectional fix (drone repo) must be reflected
+    # here too -- this UI must not still claim the automation only lowers.
+    assert "lower to" not in js.lower()
+
+
+def test_device_admin_panel_exposes_screen_mode_and_screensaver_remote_control():
+    """Screen mode was already remote-controllable from Overmind before this
+    change (the Drone's System Info page now reuses that same backend); this
+    test only covers the new screensaver control, which reuses set_es_collections
+    rather than a bespoke action."""
+    root = Path(__file__).resolve().parents[1]
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "onclick=\"queueDeviceScreenMode('" in js  # pre-existing, still present
+    assert "async function queueDeviceScreensaver()" in js
+    assert 'id="screensaver-minutes"' in js
+    payload_start = js.index("async function queueDeviceScreensaver()")
+    payload_end = js.index("function renderIdleVolumeCard(info)")
+    payload_source = js[payload_start:payload_end]
+    assert "queueDeviceAction('set_es_collections'" in payload_source
+    assert "screensaver_minutes: minutes" in payload_source
+
+
 def test_swarm_master_list_table_omits_fingerprint_to_tighten_row_height():
     """The fingerprint line was a second line inside every ROM cell -- purely
     cosmetic vertical bloat across a table that can have hundreds of rows."""
@@ -4750,6 +4799,139 @@ def test_set_volume_action_accepts_level_payload(client):
     )
     assert claim_response.status_code == 200
     assert claim_response.json()["action"]["payload"]["level"] == 50
+
+
+def test_set_music_volume_action_accepts_and_clamps_level(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    create_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "set_music_volume", "payload": {"level": 150}},
+    )
+    assert create_response.status_code == 200
+    assert create_response.json()["action"]["action"] == "set_music_volume"
+
+    claim_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions/claim",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={},
+    )
+    assert claim_response.json()["action"]["payload"]["level"] == 100  # clamped
+
+
+def test_set_music_volume_action_rejects_non_numeric_level(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "set_music_volume", "payload": {"level": "loud"}},
+    )
+    assert response.status_code == 400
+
+
+def test_get_es_collections_state_action_needs_no_payload(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "get_es_collections_state"},
+    )
+    assert response.status_code == 200
+    assert response.json()["action"]["action"] == "get_es_collections_state"
+
+
+def test_set_es_collections_action_normalizes_list_fields(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    create_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "action": "set_es_collections",
+            "payload": {"auto_collections": ["all", " recent ", ""], "music_volume": "70"},
+        },
+    )
+    assert create_response.status_code == 200
+
+    claim_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions/claim",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={},
+    )
+    payload = claim_response.json()["action"]["payload"]
+    assert payload["auto_collections"] == ["all", "recent"]  # blank entries dropped, whitespace trimmed
+    assert payload["music_volume"] == 70
+
+
+def test_set_es_collections_action_clamps_screensaver_minutes(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    create_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "set_es_collections", "payload": {"screensaver_minutes": 999}},
+    )
+    assert create_response.status_code == 200
+
+    claim_response = client.post(
+        "/api/devices/arcade-cabinet-001/actions/claim",
+        headers={"Authorization": "Bearer demo-local-drone-token"},
+        json={},
+    )
+    assert claim_response.json()["action"]["payload"]["screensaver_minutes"] == 120
+
+
+def test_set_es_collections_action_rejects_empty_payload(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "set_es_collections", "payload": {}},
+    )
+    assert response.status_code == 400
+
+
+def test_set_es_collections_action_rejects_non_list_field(client):
+    seed_test_fleet()
+    token = client.post(
+        "/api/auth/login",
+        json={"email": "demo@example.com", "username": "demo-at-example.com", "password": "DemoPass123"},
+    ).json()["access_token"]
+
+    response = client.post(
+        "/api/devices/arcade-cabinet-001/actions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"action": "set_es_collections", "payload": {"hidden_systems": "not-a-list"}},
+    )
+    assert response.status_code == 400
 
 
 def test_unsupported_device_action_is_rejected(client):

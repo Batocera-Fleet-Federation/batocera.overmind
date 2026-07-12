@@ -2643,11 +2643,16 @@ class OvermindDatabase:
         return None
 
     def _notify_device_action_completion(self, device: dict, device_id: str, action: dict, status: str, message: Optional[str]) -> None:
-        if str(action.get("action") or "") in {"sync_rom", "sync_system", "sync_bios", "sync_artwork", "cancel_download", "pause_download", "resume_download"}:
+        # get_es_collections_state is a pure read (fetched to populate the Manage
+        # Collections UI) -- like sync_rom's frequent polling, not a meaningful
+        # state change worth a notification.
+        if str(action.get("action") or "") in {"sync_rom", "sync_system", "sync_bios", "sync_artwork", "cancel_download", "pause_download", "resume_download", "get_es_collections_state"}:
             return
         action_label = {
             "restart": "Remote Restart",
             "set_screen_mode": "Set Screen Mode",
+            "set_music_volume": "Set Music Volume",
+            "set_es_collections": "EmulationStation Collections",
             "set_idle_volume_automation": "Idle Volume Automation",
             "set_idle_game_exit_automation": "Idle Game Exit Automation",
             "set_wifi_recovery_automation": "Wi-Fi Recovery Automation",

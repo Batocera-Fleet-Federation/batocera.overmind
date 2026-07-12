@@ -3205,6 +3205,38 @@
                         </div>
                         <div class="btn-group flex-wrap" role="group" aria-label="Volume presets">${volumeButtons}</div>
                     </div></div>
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-music-note-beamed me-1"></i>Music Volume</strong>
+                        </div>
+                        <div class="small text-muted mb-2">EmulationStation's background music volume. Applying this restarts EmulationStation on the device.</div>
+                        <div class="btn-group flex-wrap" role="group" aria-label="Music volume presets">${volumePresets.map(p => `
+                            <button class="btn btn-sm btn-outline-primary" type="button" onclick="queueDeviceMusicVolume(${p.level})"><i class="bi ${p.icon} me-1"></i>${p.label}</button>
+                        `).join('')}</div>
+                    </div></div>
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-moon-stars me-1"></i>Screensaver</strong>
+                        </div>
+                        <div class="small text-muted mb-2">How long EmulationStation waits with no input before starting the screensaver. Applying this restarts EmulationStation on the device.</div>
+                        <div class="row g-2 align-items-end">
+                            <div class="col-sm-8">
+                                <label class="form-label small mb-1" for="screensaver-minutes">Start screensaver after (minutes, 0 = disabled)</label>
+                                <input class="form-control form-control-sm" type="number" id="screensaver-minutes" min="0" max="120" step="1" value="5">
+                            </div>
+                            <div class="col-sm-4">
+                                <button class="btn btn-primary btn-sm w-100" type="button" onclick="queueDeviceScreensaver()"><i class="bi bi-save me-1"></i>Save</button>
+                            </div>
+                        </div>
+                    </div></div>
+                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <strong><i class="bi bi-collection-play me-1"></i>Game Collections &amp; Systems</strong>
+                            <button class="btn btn-outline-secondary btn-sm" type="button" onclick="loadDeviceEsCollections()"><i class="bi bi-arrow-clockwise me-1"></i>Load from Drone</button>
+                        </div>
+                        <div class="small text-muted mb-2">Which systems appear, which are grouped together, and which automatic/custom collections are enabled on the Drone. Loading and saving both restart EmulationStation on the device.</div>
+                        <div id="es-collections-body"><div class="text-muted small">Click "Load from Drone" to fetch the current configuration.</div></div>
+                    </div></div>
                     ${renderIdleVolumeCard(info)}
                     ${renderIdleGameExitCard(info)}
                     ${renderWifiRecoveryCard(info)}
@@ -3286,6 +3318,22 @@
                 await queueDeviceAction('set_volume', { payload: { level } });
             }
 
+            async function queueDeviceMusicVolume(level) {
+                await queueDeviceAction('set_music_volume', { payload: { level } });
+            }
+
+            async function queueDeviceScreensaver() {
+                const minutes = parseInt(document.getElementById('screensaver-minutes')?.value, 10);
+                if (!Number.isFinite(minutes) || minutes < 0 || minutes > 120) {
+                    showMessage('Screensaver delay must be between 0 and 120 minutes.', 'danger');
+                    return;
+                }
+                await queueDeviceAction('set_es_collections', {
+                    confirm: false,
+                    payload: { screensaver_minutes: minutes },
+                });
+            }
+
             function renderIdleVolumeCard(info) {
                 const automation = (info && typeof info.idle_volume_automation === 'object' && info.idle_volume_automation) || null;
                 const reported = !!automation;
@@ -3295,7 +3343,7 @@
                 const current = !reported
                     ? 'not yet reported'
                     : (enabled
-                        ? `${automation.pending ? 'pending — ' : 'on — '}lower to ${targetVolume}% after ${idleMinutes} min idle`
+                        ? `${automation.pending ? 'pending — ' : 'on — '}set to ${targetVolume}% after ${idleMinutes} min idle`
                         : 'off');
                 return `
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
@@ -3303,7 +3351,7 @@
                             <strong><i class="bi bi-volume-down me-1"></i>Idle Volume Automation</strong>
                             <span class="small text-muted" data-device-admin-field="idle-volume">Current: ${escapeHtml(current)}</span>
                         </div>
-                        <div class="small text-muted mb-2">Lower the Drone's output volume after a period with no controller or keyboard input. The volume stays lowered until the device is used again.</div>
+                        <div class="small text-muted mb-2">Set the Drone's output volume to a target level (raising or lowering it, whichever the target requires) after a period with no controller or keyboard input. The volume stays at the target until the device is used again.</div>
                         <div class="form-check form-switch mb-2">
                             <input class="form-check-input" type="checkbox" role="switch" id="idle-volume-enabled" ${enabled ? 'checked' : ''}>
                             <label class="form-check-label" for="idle-volume-enabled">Enable idle volume lowering</label>
@@ -3983,6 +4031,127 @@
                 }
             }
 
+            async function pollDeviceActionResult(actionId, options = {}) {
+                const intervalMs = options.intervalMs || 1200;
+                const deadline = Date.now() + (options.timeoutMs || 20000);
+                while (Date.now() < deadline) {
+                    const response = await apiGet(`/api/devices/${selectedDeviceId}/actions`, { showLoader: false });
+                    if (response.ok) {
+                        const data = await response.json();
+                        const match = (data.actions || []).find(a => a.id === actionId);
+                        if (match && match.status === 'completed') return match.result;
+                        if (match && match.status === 'failed') throw new Error(match.message || 'Action failed on the Drone.');
+                    }
+                    await new Promise(resolve => setTimeout(resolve, intervalMs));
+                }
+                throw new Error('Timed out waiting for the Drone to respond.');
+            }
+
+            function renderEsCheckboxGrid(items, field) {
+                if (!items.length) return '<div class="small text-muted">None found.</div>';
+                return `<div class="row row-cols-2 row-cols-md-3 g-1">
+                    ${items.map(item => `
+                        <div class="col">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" data-es-field="${field}" data-es-name="${escapeHtml(item.name)}" id="ov-es-${field}-${cssSafeId(item.name)}" ${item.checked ? 'checked' : ''}>
+                                <label class="form-check-label small" for="ov-es-${field}-${cssSafeId(item.name)}">${escapeHtml(item.label)}</label>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>`;
+            }
+
+            function renderDeviceEsCollectionsCard(state) {
+                const systems = state.systems || [];
+                const groups = state.groups || [];
+                const autoCollections = state.auto_collections || [];
+                const customCollections = state.custom_collections || [];
+                const groupsHtml = groups.length ? groups.map(group => `
+                    <div class="mb-2">
+                        <div class="small fw-semibold text-muted text-uppercase">${escapeHtml(group.group)}</div>
+                        ${renderEsCheckboxGrid((group.children || []).map(c => ({name: c.name, label: c.full_name || c.name, checked: c.grouped})), 'grouped')}
+                    </div>
+                `).join('') : '<div class="small text-muted">No groupable systems found.</div>';
+                return `
+                    <div class="mb-2"><strong>Music Volume:</strong> ${Number.isFinite(Number(state.music_volume)) ? `${state.music_volume}%` : 'n/a'}</div>
+                    <div class="mb-2"><strong>Screensaver:</strong> ${Number.isFinite(Number(state.screensaver_minutes)) ? (Number(state.screensaver_minutes) === 0 ? 'off' : `${state.screensaver_minutes} min`) : 'n/a'}</div>
+                    <div class="mb-3">
+                        <div class="fw-semibold mb-1">Systems Displayed</div>
+                        ${renderEsCheckboxGrid(systems.map(s => ({name: s.name, label: s.full_name || s.name, checked: s.displayed})), 'displayed')}
+                    </div>
+                    <div class="mb-3">
+                        <div class="fw-semibold mb-1">Grouped Systems</div>
+                        <div class="small text-muted mb-2">Checked systems stay folded into their group's shared entry; uncheck to show a system standalone.</div>
+                        ${groupsHtml}
+                    </div>
+                    <div class="mb-3">
+                        <div class="fw-semibold mb-1">Automatic Game Collections</div>
+                        ${renderEsCheckboxGrid(autoCollections.map(a => ({name: a.name, label: a.label || a.name, checked: a.enabled})), 'auto')}
+                    </div>
+                    <div class="mb-0">
+                        <div class="fw-semibold mb-1">Custom Game Collections</div>
+                        ${renderEsCheckboxGrid(customCollections.map(c => ({name: c.name, label: c.name, checked: c.enabled})), 'custom')}
+                    </div>
+                    <button class="btn btn-primary btn-sm mt-3" type="button" onclick="saveDeviceEsCollections()"><i class="bi bi-save me-1"></i>Save &amp; Restart EmulationStation</button>
+                `;
+            }
+
+            function collectDeviceEsCollectionsPayload() {
+                const container = document.getElementById('es-collections-body');
+                if (!container) return {};
+                const names = (field, wantChecked) => Array.from(container.querySelectorAll(`input[data-es-field="${field}"]`))
+                    .filter(el => el.checked === wantChecked)
+                    .map(el => el.dataset.esName);
+                return {
+                    hidden_systems: names('displayed', false),
+                    ungrouped_systems: names('grouped', false),
+                    auto_collections: names('auto', true),
+                    custom_collections: names('custom', true),
+                };
+            }
+
+            function renderDeviceEsCollectionsBody(state) {
+                const container = document.getElementById('es-collections-body');
+                if (!container) return;
+                container.innerHTML = renderDeviceEsCollectionsCard(state);
+            }
+
+            async function loadDeviceEsCollections() {
+                const container = document.getElementById('es-collections-body');
+                if (!container || !selectedDeviceId) return;
+                container.innerHTML = '<div class="text-muted small">Requesting current state from the Drone...</div>';
+                try {
+                    const queued = await queueDeviceAction('get_es_collections_state', { confirm: false, notify: false, refreshActions: false });
+                    const action = queued && queued.action;
+                    if (!action || !action.id) throw new Error('Action was not queued');
+                    const result = await pollDeviceActionResult(action.id);
+                    renderDeviceEsCollectionsBody(result || {});
+                } catch (error) {
+                    container.innerHTML = `<div class="empty-state">Unable to load collections: ${escapeHtml(error.message || 'unknown error')}. The Drone may be offline or slow to respond.</div>`;
+                }
+            }
+
+            async function saveDeviceEsCollections() {
+                if (!window.confirm('Save collections/systems changes and restart EmulationStation on this Drone now?')) return;
+                const container = document.getElementById('es-collections-body');
+                try {
+                    const queued = await queueDeviceAction('set_es_collections', {
+                        confirm: false,
+                        notify: false,
+                        payload: collectDeviceEsCollectionsPayload(),
+                    });
+                    const action = queued && queued.action;
+                    if (!action || !action.id) throw new Error('Action was not queued');
+                    if (container) container.innerHTML = '<div class="text-muted small">Applying changes on the Drone...</div>';
+                    const result = await pollDeviceActionResult(action.id);
+                    renderDeviceEsCollectionsBody(result || {});
+                    showMessage('EmulationStation collections updated on the Drone.', 'success');
+                } catch (error) {
+                    showMessage(`Failed to update collections: ${error.message || 'unknown error'}`, 'danger');
+                    if (container) await loadDeviceEsCollections();
+                }
+            }
+
             async function queueDeviceAction(actionName, options = {}) {
                 if (!selectedDeviceId) return;
                 const shouldConfirm = options.confirm !== false;
@@ -3995,6 +4164,7 @@
                     refresh_emulator_list: 'refresh emulator list',
                     set_screen_mode: 'set screen mode',
                     set_volume: 'set volume',
+                    set_music_volume: 'set music volume',
                     set_idle_volume_automation: 'update idle volume automation',
                     set_idle_game_exit_automation: 'update idle game exit automation',
                     set_wifi_recovery_automation: 'update Wi-Fi recovery automation',
@@ -4053,6 +4223,9 @@
                     rebuild_asset_metadata: 'Rebuild Asset Metadata',
                     set_screen_mode: 'Set Screen Mode',
                     set_volume: 'Set Volume',
+                    set_music_volume: 'Set Music Volume',
+                    get_es_collections_state: 'Load Collections State',
+                    set_es_collections: 'Update Collections',
                     set_idle_volume_automation: 'Idle Volume Automation',
                     set_idle_game_exit_automation: 'Idle Game Exit Automation',
                     set_wifi_recovery_automation: 'Wi-Fi Recovery Automation',
@@ -4072,7 +4245,13 @@
                 if (result.type === 'emulator_list_refresh') return result.emulationstation_restarted ? 'EmulationStation restart issued' : 'EmulationStation restart was not issued';
                 if (result.type === 'screen_mode') return `Screen mode set to ${result.mode || 'unknown'}${result.emulationstation_restarted ? '; EmulationStation restarted' : ''}`;
                 if (result.type === 'audio_volume') return result.muted ? 'Volume muted' : `Volume set to ${result.level}%`;
-                if (result.type === 'idle_volume_automation') return result.enabled ? `Idle volume on: lower to ${result.target_volume}% after ${result.idle_minutes} min idle` : 'Idle volume automation disabled';
+                if (result.type === 'es_collections_state') {
+                    const autoOn = (result.auto_collections || []).filter(a => a.enabled).length;
+                    const customOn = (result.custom_collections || []).filter(c => c.enabled).length;
+                    const screensaver = Number.isFinite(Number(result.screensaver_minutes)) ? `${result.screensaver_minutes} min screensaver` : 'screensaver n/a';
+                    return `Music volume ${Number.isFinite(Number(result.music_volume)) ? result.music_volume + '%' : 'n/a'}, ${screensaver}; ${(result.systems || []).length} systems, ${(result.groups || []).length} groups, ${autoOn} auto + ${customOn} custom collections enabled`;
+                }
+                if (result.type === 'idle_volume_automation') return result.enabled ? `Idle volume on: set to ${result.target_volume}% after ${result.idle_minutes} min idle` : 'Idle volume automation disabled';
                 if (result.type === 'idle_game_exit_automation') return result.enabled ? `Idle game exit on: exit after ${result.idle_minutes} min idle` : 'Idle game exit automation disabled';
                 if (result.type === 'wifi_recovery_automation') return result.enabled ? 'Wi-Fi recovery automation enabled' : 'Wi-Fi recovery automation disabled';
                 if (result.type === 'rom_metadata') return `${(result.systems || []).length} systems, ${(result.roms || []).length} ROM entries, ${(result.gamelists || []).length} gamelist.xml files`;

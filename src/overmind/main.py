@@ -109,6 +109,9 @@ SUPPORTED_DEVICE_ACTIONS = {
     "restart",
     "set_screen_mode",
     "set_volume",
+    "set_music_volume",
+    "get_es_collections_state",
+    "set_es_collections",
     "set_idle_volume_automation",
     "set_idle_game_exit_automation",
     "set_wifi_recovery_automation",
@@ -2282,6 +2285,36 @@ async def create_device_action(
                 detail="Screen mode must be one of: full, kiosk, kid",
             )
         action_payload = {**action_payload, "mode": mode}
+    if action_type == "set_music_volume":
+        try:
+            level = max(0, min(100, int(action_payload.get("level"))))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="level must be a number from 0 to 100")
+        action_payload = {"level": level}
+    if action_type == "set_es_collections":
+        normalized_collections: dict = {}
+        if action_payload.get("music_volume") is not None:
+            try:
+                normalized_collections["music_volume"] = max(0, min(100, int(action_payload["music_volume"])))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="music_volume must be a number")
+        if action_payload.get("screensaver_minutes") is not None:
+            try:
+                normalized_collections["screensaver_minutes"] = max(0, min(120, int(action_payload["screensaver_minutes"])))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="screensaver_minutes must be a number")
+        for list_key in ("hidden_systems", "ungrouped_systems", "auto_collections", "custom_collections"):
+            if list_key in action_payload:
+                raw_value = action_payload.get(list_key)
+                if not isinstance(raw_value, list):
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{list_key} must be a list of names")
+                normalized_collections[list_key] = [str(item).strip() for item in raw_value if str(item).strip()]
+        if not normalized_collections:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide at least one of: music_volume, screensaver_minutes, hidden_systems, ungrouped_systems, auto_collections, custom_collections",
+            )
+        action_payload = normalized_collections
     if action_type == "set_idle_volume_automation":
         normalized: dict = {}
         if "enabled" in action_payload:
