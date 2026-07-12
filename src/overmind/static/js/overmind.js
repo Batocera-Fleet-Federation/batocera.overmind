@@ -2211,7 +2211,7 @@
                                 const sizeText = row.file_size ? `${(Number(row.file_size) / 1024 / 1024).toFixed(2)} MB` : '';
                                 return `<tr>
                                     <td>${escapeHtml(row.system_name || '')}</td>
-                                    <td>${escapeHtml(row.rom_name || row.file_path || '')}${row.rom_fingerprint ? `<div class="small fst-italic text-muted mono">fingerprint: ${escapeHtml(row.rom_fingerprint)}</div>` : ''}${filenames}</td>
+                                    <td>${escapeHtml(row.rom_name || row.file_path || '')}${filenames}</td>
                                     <td class="small text-muted">${escapeHtml(sizeText)}</td>
                                     <td class="small">${escapeHtml(devices)}</td>
                                 </tr>`;

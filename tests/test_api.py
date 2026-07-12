@@ -3192,6 +3192,19 @@ def test_device_systems_ui_unifies_mine_all_missing_scope_and_queues_downloads()
     assert """title="Download" aria-label="Download" onclick='syncRom(${rowPayload})'><i class="bi bi-download"></i>""" in js
 
 
+def test_swarm_master_list_table_omits_fingerprint_to_tighten_row_height():
+    """The fingerprint line was a second line inside every ROM cell -- purely
+    cosmetic vertical bloat across a table that can have hundreds of rows."""
+    root = Path(__file__).resolve().parents[1]
+    js = root.joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    table_start = js.index("function showSwarmMasterList(updateUrl = true)")
+    table_end = js.index("function showSwarmGameplay(updateUrl = true)")
+    table_source = js[table_start:table_end]
+    fingerprint_line = 'row.rom_fingerprint ? `<div class="small fst-italic text-muted mono">fingerprint:'
+    assert fingerprint_line not in table_source
+    assert "<th>System</th><th>ROM</th><th>Size</th><th>Drones</th>" in table_source
+
+
 def test_downloads_and_sync_activity_views_are_consolidated():
     """Sync Activity was folded into Downloads: a queued sync shows up there as
     'pending' instead of living in a separate history view. The old view (button,
