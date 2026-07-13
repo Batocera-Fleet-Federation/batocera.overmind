@@ -210,7 +210,7 @@ def test_heartbeat_persists_performance_metrics_and_pixen(monkeypatch):
 
     assert ok is True
     system_params = next(params for sql, params in cursor.executed if "INSERT INTO drone_system_info" in sql)
-    assert system_params[-2] is True  # pixen_installed, before container
+    assert system_params[-3] is True  # pixen_installed, before container and es_collections_state
     metric_params = {
         params[2]: params
         for sql, params in cursor.executed
@@ -220,3 +220,62 @@ def test_heartbeat_persists_performance_metrics_and_pixen(monkeypatch):
     assert metric_params["throttled"][4] == "False"
     assert metric_params["load"][3] == 2.5
     assert metric_params["load"][4] is None
+
+
+def test_heartbeat_persists_es_collections_state_as_json(monkeypatch):
+    import json
+
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    monkeypatch.setattr(store, "_core_connection", lambda ensure_schema=False: _FakeConn(cursor))
+
+    es_collections = {
+        "music_volume": 80,
+        "screensaver_minutes": 5,
+        "systems": [{"name": "snes", "full_name": "Super Nintendo", "displayed": True}],
+        "groups": [],
+        "auto_collections": [{"name": "favorites", "label": "Favorites", "enabled": True}],
+        "custom_collections": [],
+    }
+    ok = store.update_device_heartbeat_data(
+        "drone-1",
+        system_info={"hostname": "cab", "es_collections": es_collections},
+    )
+
+    assert ok is True
+    sql, system_params = next(
+        (sql, params) for sql, params in cursor.executed if "INSERT INTO drone_system_info" in sql
+    )
+    assert "es_collections_state" in sql
+    assert json.loads(system_params[-1]) == es_collections
+
+
+def test_heartbeat_without_es_collections_writes_null(monkeypatch):
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    monkeypatch.setattr(store, "_core_connection", lambda ensure_schema=False: _FakeConn(cursor))
+
+    store.update_device_heartbeat_data("drone-1", system_info={"hostname": "cab"})
+
+    system_params = next(params for sql, params in cursor.executed if "INSERT INTO drone_system_info" in sql)
+    assert system_params[-1] is None
+
+
+def test_mirror_device_details_persists_es_collections_state(monkeypatch):
+    import json
+
+    store = PostgresMetadataStore()
+    cursor = _FakeCursor([])
+    es_collections = {"music_volume": 65, "screensaver_minutes": 0, "systems": [], "groups": [],
+                       "auto_collections": [], "custom_collections": []}
+
+    store._mirror_device_details(cursor, {
+        "id": "drone-1",
+        "system_info": {"es_collections": es_collections},
+    })
+
+    sql, system_params = next(
+        (sql, params) for sql, params in cursor.executed if "INSERT INTO drone_system_info" in sql
+    )
+    assert "es_collections_state" in sql
+    assert json.loads(system_params[-1]) == es_collections

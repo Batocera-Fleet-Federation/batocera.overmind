@@ -347,6 +347,11 @@ class PostgresMetadataStore:
                     iva = _idle_volume_automation_columns(info)
                     ige = _idle_game_exit_automation_columns(info)
                     wifi_recovery_enabled = _wifi_recovery_automation_column(info)
+                    es_collections_json = (
+                        json.dumps(info["es_collections"])
+                        if isinstance(info.get("es_collections"), dict)
+                        else None
+                    )
                     cur.execute(
                         """
                         INSERT INTO drone_system_info
@@ -356,8 +361,8 @@ class PostgresMetadataStore:
                              idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
                              idle_game_exit_enabled, idle_game_exit_idle_minutes,
                              wifi_recovery_enabled,
-                             pixen_installed, container, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                             pixen_installed, container, es_collections_state, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
                         ON CONFLICT (drone_id) DO UPDATE SET
                             hostname          = COALESCE(EXCLUDED.hostname,          drone_system_info.hostname),
                             model             = COALESCE(EXCLUDED.model,             drone_system_info.model),
@@ -380,6 +385,7 @@ class PostgresMetadataStore:
                             wifi_recovery_enabled = COALESCE(EXCLUDED.wifi_recovery_enabled, drone_system_info.wifi_recovery_enabled),
                             pixen_installed   = COALESCE(EXCLUDED.pixen_installed,   drone_system_info.pixen_installed),
                             container         = COALESCE(EXCLUDED.container,         drone_system_info.container),
+                            es_collections_state = COALESCE(EXCLUDED.es_collections_state, drone_system_info.es_collections_state),
                             updated_at        = now()
                         """,
                         (
@@ -405,6 +411,7 @@ class PostgresMetadataStore:
                             wifi_recovery_enabled,
                             info.get("pixen_installed"),
                             info.get("container"),
+                            es_collections_json,
                         ),
                     )
                     if isinstance(info.get("performance"), dict):
@@ -1362,7 +1369,7 @@ class PostgresMetadataStore:
                    s.idle_volume_enabled, s.idle_volume_idle_minutes, s.idle_volume_target,
                    s.idle_game_exit_enabled, s.idle_game_exit_idle_minutes,
                    s.wifi_recovery_enabled,
-                   s.pixen_installed,
+                   s.pixen_installed, s.es_collections_state,
                    COALESCE((
                        SELECT jsonb_object_agg(metric_group, metrics)
                        FROM (
@@ -1394,7 +1401,7 @@ class PostgresMetadataStore:
                 idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
                 idle_game_exit_enabled, idle_game_exit_idle_minutes,
                 wifi_recovery_enabled,
-                pixen_installed, performance,
+                pixen_installed, es_collections_state, performance,
             ) = row
             device = {
                 "id": internal_id,
@@ -1442,6 +1449,7 @@ class PostgresMetadataStore:
                     ),
                     "wifi_recovery_automation": _wifi_recovery_automation_dict(wifi_recovery_enabled),
                     "pixen_installed": pixen_installed,
+                    "es_collections": es_collections_state,
                     "performance": performance or {},
                     "container": container,
                 },
@@ -1925,7 +1933,7 @@ class PostgresMetadataStore:
             idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
             idle_game_exit_enabled, idle_game_exit_idle_minutes,
             wifi_recovery_enabled,
-            pixen_installed, performance,
+            pixen_installed, es_collections_state, performance,
             cert_status, fingerprint, sha256_fingerprint, public_certificate, subject, issuer,
             valid_from, valid_until, serial_number, overmind_signed_at,
             auto_sync_enabled, auto_sync_systems, ipv4, ipv6, hostnames, macs, last_speed_sample,
@@ -2010,6 +2018,7 @@ class PostgresMetadataStore:
                 ),
                 "wifi_recovery_automation": _wifi_recovery_automation_dict(wifi_recovery_enabled),
                 "pixen_installed": pixen_installed,
+                "es_collections": es_collections_state,
                 "performance": performance or {},
                 "container": container,
             },
@@ -2067,7 +2076,7 @@ class PostgresMetadataStore:
                    si.idle_volume_enabled, si.idle_volume_idle_minutes, si.idle_volume_target,
                    si.idle_game_exit_enabled, si.idle_game_exit_idle_minutes,
                    si.wifi_recovery_enabled,
-                   si.pixen_installed,
+                   si.pixen_installed, si.es_collections_state,
                    COALESCE((
                        SELECT jsonb_object_agg(metric_group, metrics)
                        FROM (
@@ -4713,6 +4722,9 @@ class PostgresMetadataStore:
         iva = _idle_volume_automation_columns(info)
         ige = _idle_game_exit_automation_columns(info)
         wifi_recovery_enabled = _wifi_recovery_automation_column(info)
+        es_collections_json = (
+            json.dumps(info["es_collections"]) if isinstance(info.get("es_collections"), dict) else None
+        )
         cur.execute(
             """
             INSERT INTO drone_system_info
@@ -4721,8 +4733,8 @@ class PostgresMetadataStore:
                  audio_volume, idle_volume_enabled, idle_volume_idle_minutes, idle_volume_target,
                  idle_game_exit_enabled, idle_game_exit_idle_minutes,
                  wifi_recovery_enabled,
-                 pixen_installed, container, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                 pixen_installed, container, es_collections_state, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
             ON CONFLICT (drone_id) DO UPDATE SET
                 hostname = EXCLUDED.hostname,
                 model = EXCLUDED.model,
@@ -4745,6 +4757,7 @@ class PostgresMetadataStore:
                 wifi_recovery_enabled = EXCLUDED.wifi_recovery_enabled,
                 pixen_installed = EXCLUDED.pixen_installed,
                 container = EXCLUDED.container,
+                es_collections_state = EXCLUDED.es_collections_state,
                 updated_at = now()
             """,
             (
@@ -4770,6 +4783,7 @@ class PostgresMetadataStore:
                 wifi_recovery_enabled,
                 info.get("pixen_installed"),
                 info.get("container"),
+                es_collections_json,
             ),
         )
         if isinstance(info.get("performance"), dict):

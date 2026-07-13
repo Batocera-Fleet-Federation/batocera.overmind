@@ -3190,52 +3190,53 @@
                         onclick="queueDeviceScreenMode('${item.mode}')"><i class="bi ${item.icon} me-1"></i>${item.label}</button>
                 `).join('');
                 container.innerHTML = `
-                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
-                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-                            <strong><i class="bi bi-display me-1"></i>Screen Mode</strong>
-                            <span class="small text-muted" data-device-admin-field="screen-mode">Current: ${screenMode || 'not yet reported'}</span>
-                        </div>
-                        <div class="btn-group bff-segmented" role="group" aria-label="Screen mode">${screenModeButtons}</div>
-                        <div class="small text-muted mt-2">Changing screen mode restarts EmulationStation on the device.</div>
-                    </div></div>
-                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
-                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-                            <strong><i class="bi bi-volume-up me-1"></i>Volume</strong>
-                            <span class="small text-muted" data-device-admin-field="volume">Current: ${volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported'}</span>
-                        </div>
-                        <div class="btn-group flex-wrap" role="group" aria-label="Volume presets">${volumeButtons}</div>
-                    </div></div>
-                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
-                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-                            <strong><i class="bi bi-music-note-beamed me-1"></i>Music Volume</strong>
-                        </div>
-                        <div class="small text-muted mb-2">EmulationStation's background music volume. Applying this restarts EmulationStation on the device.</div>
-                        <div class="btn-group flex-wrap" role="group" aria-label="Music volume presets">${volumePresets.map(p => `
-                            <button class="btn btn-sm btn-outline-primary" type="button" onclick="queueDeviceMusicVolume(${p.level})"><i class="bi ${p.icon} me-1"></i>${p.label}</button>
-                        `).join('')}</div>
-                    </div></div>
-                    <div class="card mb-3 mutate-only"><div class="card-body py-3">
-                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-                            <strong><i class="bi bi-moon-stars me-1"></i>Screensaver</strong>
-                        </div>
-                        <div class="small text-muted mb-2">How long EmulationStation waits with no input before starting the screensaver. Applying this restarts EmulationStation on the device.</div>
-                        <div class="row g-2 align-items-end">
-                            <div class="col-sm-8">
-                                <label class="form-label small mb-1" for="screensaver-minutes">Start screensaver after (minutes, 0 = disabled)</label>
-                                <input class="form-control form-control-sm" type="number" id="screensaver-minutes" min="0" max="120" step="1" value="5">
+                    <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-3">
+                        <div class="col"><div class="card control-tile h-100 mutate-only"><div class="card-body py-3">
+                            <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                                <strong><i class="bi bi-display me-1"></i>Screen Mode</strong>
+                                <span class="small text-muted" data-device-admin-field="screen-mode">${screenMode || 'not yet reported'}</span>
                             </div>
-                            <div class="col-sm-4">
-                                <button class="btn btn-primary btn-sm w-100" type="button" onclick="queueDeviceScreensaver()"><i class="bi bi-save me-1"></i>Save</button>
+                            <div class="btn-group bff-segmented w-100" role="group" aria-label="Screen mode">${screenModeButtons}</div>
+                            <div class="small text-muted mt-2">Restarts EmulationStation.</div>
+                        </div></div></div>
+                        <div class="col"><div class="card control-tile h-100 mutate-only"><div class="card-body py-3">
+                            <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                                <strong><i class="bi bi-volume-up me-1"></i>Volume</strong>
+                                <span class="small text-muted" data-device-admin-field="volume">${volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported'}</span>
                             </div>
-                        </div>
-                    </div></div>
+                            <div class="btn-group flex-wrap" role="group" aria-label="Volume presets">${volumeButtons}</div>
+                        </div></div></div>
+                        <div class="col"><div class="card control-tile h-100 mutate-only"><div class="card-body py-3">
+                            <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                                <strong><i class="bi bi-music-note-beamed me-1"></i>Music Volume</strong>
+                            </div>
+                            <div class="btn-group flex-wrap" role="group" aria-label="Music volume presets">${volumePresets.map(p => `
+                                <button class="btn btn-sm btn-outline-primary" type="button" onclick="queueDeviceMusicVolume(${p.level})"><i class="bi ${p.icon} me-1"></i>${p.label}</button>
+                            `).join('')}</div>
+                            <div class="small text-muted mt-2">Restarts EmulationStation.</div>
+                        </div></div></div>
+                        <div class="col"><div class="card control-tile h-100 mutate-only"><div class="card-body py-3">
+                            <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                                <strong><i class="bi bi-moon-stars me-1"></i>Screensaver</strong>
+                            </div>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-sm-8">
+                                    <label class="form-label small mb-1" for="screensaver-minutes">Minutes idle (0 = off)</label>
+                                    <input class="form-control form-control-sm" type="number" id="screensaver-minutes" min="0" max="120" step="1" value="5">
+                                </div>
+                                <div class="col-sm-4">
+                                    <button class="btn btn-primary btn-sm w-100" type="button" onclick="queueDeviceScreensaver()"><i class="bi bi-save me-1"></i>Save</button>
+                                </div>
+                            </div>
+                        </div></div></div>
+                    </div>
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
                         <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
                             <strong><i class="bi bi-collection-play me-1"></i>Game Collections &amp; Systems</strong>
-                            <button class="btn btn-outline-secondary btn-sm" type="button" onclick="loadDeviceEsCollections()"><i class="bi bi-arrow-clockwise me-1"></i>Load from Drone</button>
+                            <button class="btn btn-outline-secondary btn-sm" type="button" onclick="loadDeviceEsCollections()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
                         </div>
-                        <div class="small text-muted mb-2">Which systems appear, which are grouped together, and which automatic/custom collections are enabled on the Drone. Loading and saving both restart EmulationStation on the device.</div>
-                        <div id="es-collections-body"><div class="text-muted small">Click "Load from Drone" to fetch the current configuration.</div></div>
+                        <div class="small text-muted mb-2">Which systems appear, which are grouped together, and which automatic/custom collections are enabled on the Drone. Reported automatically by the Drone; Refresh requests a live copy. Saving restarts EmulationStation on the device.</div>
+                        <div id="es-collections-body">${info.es_collections ? renderDeviceEsCollectionsCard(info.es_collections) : '<div class="text-muted small">Not yet reported by the Drone. Click Refresh to request the current configuration.</div>'}</div>
                     </div></div>
                     ${renderIdleVolumeCard(info)}
                     ${renderIdleGameExitCard(info)}
@@ -3300,8 +3301,8 @@
                     : null;
                 const screenStatus = container.querySelector('[data-device-admin-field="screen-mode"]');
                 const volumeStatus = container.querySelector('[data-device-admin-field="volume"]');
-                if (screenStatus) screenStatus.textContent = `Current: ${screenMode || 'not yet reported'}`;
-                if (volumeStatus) volumeStatus.textContent = `Current: ${volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported'}`;
+                if (screenStatus) screenStatus.textContent = screenMode || 'not yet reported';
+                if (volumeStatus) volumeStatus.textContent = volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported';
                 container.querySelectorAll('[data-screen-mode]').forEach(button => {
                     const active = button.dataset.screenMode === screenMode;
                     button.classList.toggle('btn-primary', active);
@@ -3315,11 +3316,11 @@
             }
 
             async function queueDeviceVolume(level) {
-                await queueDeviceAction('set_volume', { payload: { level } });
+                await queueDeviceAction('set_volume', { confirm: false, payload: { level } });
             }
 
             async function queueDeviceMusicVolume(level) {
-                await queueDeviceAction('set_music_volume', { payload: { level } });
+                await queueDeviceAction('set_music_volume', { confirm: false, payload: { level } });
             }
 
             async function queueDeviceScreensaver() {
@@ -4092,7 +4093,7 @@
                         <div class="fw-semibold mb-1">Custom Game Collections</div>
                         ${renderEsCheckboxGrid(customCollections.map(c => ({name: c.name, label: c.name, checked: c.enabled})), 'custom')}
                     </div>
-                    <button class="btn btn-primary btn-sm mt-3" type="button" onclick="saveDeviceEsCollections()"><i class="bi bi-save me-1"></i>Save &amp; Restart EmulationStation</button>
+                    <button class="btn btn-primary btn-sm mt-3" type="button" onclick="saveDeviceEsCollections()"><i class="bi bi-save me-1"></i>Save</button>
                 `;
             }
 
@@ -4132,7 +4133,6 @@
             }
 
             async function saveDeviceEsCollections() {
-                if (!window.confirm('Save collections/systems changes and restart EmulationStation on this Drone now?')) return;
                 const container = document.getElementById('es-collections-body');
                 try {
                     const queued = await queueDeviceAction('set_es_collections', {

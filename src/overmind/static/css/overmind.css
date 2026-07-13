@@ -890,6 +890,10 @@
                 min-width: 0;
             }
 
+            .control-tile .card-body {
+                padding: 0.85rem 1rem;
+            }
+
             .rom-artwork-detail-list {
                 display: flex;
                 flex-direction: column;

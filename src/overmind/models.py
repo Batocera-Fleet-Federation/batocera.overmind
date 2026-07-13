@@ -134,6 +134,7 @@ class DroneSystemInfo(ExtensibleContractModel):
     audio_volume: Optional[int] = None
     pixen_installed: Optional[bool] = None
     performance: dict[str, Any] = Field(default_factory=dict)
+    es_collections: Optional[dict[str, Any]] = None
 
 
 class DeviceRegister(BaseModel):

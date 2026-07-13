@@ -4358,6 +4358,34 @@ def test_heartbeat_accepts_screen_mode_and_audio_volume_in_system_info(client):
     assert refreshed["system_info"]["screen_mode"] == "kid"
 
 
+def test_heartbeat_persists_es_collections_state_without_a_live_action(client):
+    # Proactive reporting: Overmind stores the Drone's ES-collections snapshot from
+    # the heartbeat alone, with no get_es_collections_state action round-trip needed.
+    client.post("/api/auth/register", json={"email": "hb-es@example.com", "username": "hb-es-at-example.com", "password": "testpass123"})
+    user = db.get_user_by_email("hb-es@example.com")
+    db.create_device(user["id"], "drone-es", "Drone ES", {"ip_address": "10.0.0.2"}, raw_token="drone-token-es")
+
+    es_collections = {
+        "music_volume": 80,
+        "screensaver_minutes": 5,
+        "systems": [{"name": "snes", "full_name": "Super Nintendo", "displayed": True}],
+        "groups": [],
+        "auto_collections": [{"name": "favorites", "label": "Favorites", "enabled": True}],
+        "custom_collections": [],
+    }
+    response = client.post(
+        "/api/devices/drone-es/heartbeat",
+        headers={"Authorization": "Bearer drone-token-es"},
+        json={
+            "device_id": "drone-es",
+            "system_info": {"hostname": "drone-es", "es_collections": es_collections},
+        },
+    )
+    assert response.status_code == 200, response.text
+    refreshed = db.get_device_by_device_id("drone-es")
+    assert refreshed["system_info"]["es_collections"] == es_collections
+
+
 def test_heartbeat_echoes_stored_asset_thumbprints(client):
     client.post("/api/auth/register", json={"email": "thumbprint-echo@example.com", "username": "thumbprint-echo-at-example.com", "password": "testpass123"})
     user = db.get_user_by_email("thumbprint-echo@example.com")
@@ -6983,7 +7011,7 @@ def test_postgres_store_rehydrates_queued_actions_from_relational_tables():
                         None, None, None,
                         None, None,
                         None,
-                        True, {"cpu": {"host_percent": 12.5}},
+                        True, None, {"cpu": {"host_percent": 12.5}},
                 )]
             if "FROM device_admin_claims" in self.sql:
                 return []
@@ -7050,7 +7078,7 @@ def test_postgres_store_rehydrates_telemetry_from_relational_tables():
                         None, None, None,
                         None, None,
                         None,
-                        False, {"memory": {"used_percent": 44.0}},
+                        False, None, {"memory": {"used_percent": 44.0}},
                 )]
             if "FROM gameplay_sessions" in self.sql:
                 return [("game-1", "d1", "snes", "Game", "Game.zip", "abc", received_at, 60, received_at)]
@@ -7120,7 +7148,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                             None, None, None,
                             None, None,
                             None,
-                            False, {},
+                            False, None, {},
                     ), (
                         "d2", "drone-b", "Drone B", "u1", "s1", "approved", True,
                         None, "source-hash", reported_at, reported_at,
@@ -7132,7 +7160,7 @@ def test_postgres_store_rehydrates_peer_transfer_reporting_from_relational_table
                         None, None, None,
                         None, None,
                         None,
-                        True, {"cpu": {"host_percent": 8.0}},
+                        True, None, {"cpu": {"host_percent": 8.0}},
                 )]
             if "FROM drone_certificates" in self.sql:
                 return [("d2", "loaded", "fp", "sha", "-----BEGIN CERTIFICATE-----\\npeer\\n-----END CERTIFICATE-----", "subject", "issuer", None, None, "1", None, reported_at)]
@@ -7190,6 +7218,71 @@ def test_drone_api_uses_explicit_contract_models():
     assert "async def complete_device_action(device_id: str, action_id: str, payload: DroneActionCompleteRequest" in source
     assert "class StrictContractModel(BaseModel):" in models
     assert 'ConfigDict(extra="forbid")' in models
+
+
+def test_drone_system_info_model_accepts_es_collections():
+    models = Path(__file__).resolve().parents[1].joinpath("src/overmind/models.py").read_text(encoding="utf-8")
+    system_info_start = models.index("class DroneSystemInfo(ExtensibleContractModel):")
+    system_info_end = models.index("class DeviceRegister(BaseModel):")
+    assert "es_collections: Optional[dict[str, Any]] = None" in models[system_info_start:system_info_end]
+
+
+def test_device_admin_panel_renders_stored_es_collections_without_a_live_fetch():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    panel_start = js.index("function renderDeviceAdminPanel()")
+    panel_end = js.index("function updateDeviceAdminStatusInPlace()")
+    body = js[panel_start:panel_end]
+    assert "info.es_collections ? renderDeviceEsCollectionsCard(info.es_collections)" in body
+    assert "Not yet reported by the Drone" in body
+    assert ">Refresh</button>" in body
+    assert "Load from Drone" not in body
+
+
+def test_device_admin_panel_control_tiles_are_grouped_in_a_compact_grid():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    css = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/css/overmind.css").read_text(encoding="utf-8")
+    panel_start = js.index("function renderDeviceAdminPanel()")
+    panel_end = js.index("function updateDeviceAdminStatusInPlace()")
+    body = js[panel_start:panel_end]
+
+    assert "row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-3" in body
+    assert body.count("control-tile") == 4
+    for marker in ("Screen Mode", "Volume</strong>", "Music Volume", "Screensaver"):
+        assert marker in body
+    assert ".control-tile .card-body" in css
+
+
+def test_device_admin_status_in_place_matches_initial_render_field_text():
+    # renderDeviceAdminPanel's initial render and updateDeviceAdminStatusInPlace's
+    # live-refresh path must write the same text into the same data-device-admin-field
+    # spans, or a background refresh silently changes the displayed format.
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+    assert "Current: ${screenMode" not in js
+    assert "Current: ${volumeKnown" not in js
+    update_start = js.index("function updateDeviceAdminStatusInPlace()")
+    update_end = js.index("async function queueDeviceVolume(")
+    body = js[update_start:update_end]
+    assert "screenStatus.textContent = screenMode || 'not yet reported';" in body
+    assert "volumeStatus.textContent = volumeKnown ? (currentVolume <= 0 ? 'muted' : currentVolume + '%') : 'not yet reported';" in body
+
+
+def test_volume_and_collections_save_are_frictionless_but_screen_mode_still_confirms():
+    js = Path(__file__).resolve().parents[1].joinpath("src/overmind/static/js/overmind.js").read_text(encoding="utf-8")
+
+    assert "Save &amp; Restart EmulationStation" not in js
+    assert "Save collections/systems changes and restart EmulationStation on this Drone now?" not in js
+
+    assert "async function queueDeviceVolume(level) {\n                await queueDeviceAction('set_volume', { confirm: false, payload: { level } });" in js
+    assert "async function queueDeviceMusicVolume(level) {\n                await queueDeviceAction('set_music_volume', { confirm: false, payload: { level } });" in js
+
+    save_start = js.index("async function saveDeviceEsCollections()")
+    save_end = js.index("async function queueDeviceAction(")
+    assert "window.confirm" not in js[save_start:save_end]
+
+    # Screen mode is unchanged: still a bigger behavioral change (can lock out
+    # admin access until switched back), so it keeps its confirm on both sides.
+    assert "queueDeviceScreenMode('${item.mode}')" in js
+    assert "function queueDeviceScreenMode(mode)" in js
 
 
 if __name__ == "__main__":
