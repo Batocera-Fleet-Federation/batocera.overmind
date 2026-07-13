@@ -3213,6 +3213,7 @@
                             <div class="btn-group flex-wrap" role="group" aria-label="Music volume presets">${volumePresets.map(p => `
                                 <button class="btn btn-sm btn-outline-primary" type="button" onclick="queueDeviceMusicVolume(${p.level})"><i class="bi ${p.icon} me-1"></i>${p.label}</button>
                             `).join('')}</div>
+                            <div class="small text-muted mt-2">Restarts EmulationStation.</div>
                         </div></div></div>
                         <div class="col"><div class="card control-tile h-100 mutate-only"><div class="card-body py-3">
                             <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
