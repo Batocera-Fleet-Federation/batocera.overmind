@@ -5651,7 +5651,7 @@ def test_wifi_recovery_automation_action_is_supported_and_validated(client):
     assert empty.status_code == 400
 
 
-def test_pixen_update_action_is_supported(client):
+def test_pixn_update_action_is_supported(client):
     seed_test_fleet()
     token = client.post(
         "/api/auth/login",
@@ -5661,11 +5661,11 @@ def test_pixen_update_action_is_supported(client):
     response = client.post(
         "/api/devices/arcade-cabinet-001/actions",
         headers={"Authorization": f"Bearer {token}"},
-        json={"action": "run_pixen_update"},
+        json={"action": "run_pixn_update"},
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["action"]["action"] == "run_pixen_update"
+    assert response.json()["action"]["action"] == "run_pixn_update"
 
 
 def test_heartbeat_stores_idle_volume_automation(client):
@@ -5880,8 +5880,8 @@ def test_selected_drone_contextual_actions_ui_omits_shutdown_and_collect_data_bu
     assert "queueDeviceAction('restart'" in js
     assert "rebuild_asset_metadata" in js
     assert "refresh_emulator_list" in js
-    assert "run_pixen_update" in js
-    assert "Run PixeN Update" in js
+    assert "run_pixn_update" in js
+    assert "Run PixN Update" in js
     assert "Rebuild Asset Metadata" in js
     systems_panel = html[html.index('id="device-systems-panel"'):html.index('id="device-admin-panel"')]
     assert "Rebuild Asset Metadata" not in systems_panel

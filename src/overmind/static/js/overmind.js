@@ -3260,12 +3260,12 @@
                     </div></div>
                     ${info.pixen_installed === true ? `
                     <div class="card mb-3 mutate-only"><div class="card-body py-3">
-                        <strong><i class="bi bi-play-circle me-1"></i>PixeN</strong>
+                        <strong><i class="bi bi-play-circle me-1"></i>PixN</strong>
                         <div class="d-flex flex-wrap gap-2 mt-2">
                             <button class="btn btn-outline-success btn-sm" type="button"
-                                onclick="queueDeviceAction('run_pixen_update')"><i class="bi bi-play-circle me-1"></i>Run PixeN Update</button>
+                                onclick="queueDeviceAction('run_pixn_update')"><i class="bi bi-play-circle me-1"></i>Run PixN Update</button>
                         </div>
-                        <div class="small text-muted mt-2">Runs the installed PixeN upgrade script on the selected Drone.</div>
+                        <div class="small text-muted mt-2">Runs the installed PixN upgrade script on the selected Drone.</div>
                     </div></div>
                     ` : ""}
                     <div class="card"><div class="card-body py-3">
@@ -4160,7 +4160,8 @@
                 const labels = {
                     restart: 'remote restart',
                     rebuild_asset_metadata: 'rebuild asset metadata',
-                    run_pixen_update: 'run PixeN update',
+                    run_pixn_update: 'run PixN update',
+                    run_pixen_update: 'run PixN update',
                     refresh_emulator_list: 'refresh emulator list',
                     set_screen_mode: 'set screen mode',
                     set_volume: 'set volume',
@@ -4219,7 +4220,8 @@
                 const labels = {
                     restart: 'Remote Restart',
                     refresh_emulator_list: 'Refresh Emulator List',
-                    run_pixen_update: 'Run PixeN Update',
+                    run_pixn_update: 'Run PixN Update',
+                    run_pixen_update: 'Run PixN Update',
                     rebuild_asset_metadata: 'Rebuild Asset Metadata',
                     set_screen_mode: 'Set Screen Mode',
                     set_volume: 'Set Volume',
@@ -4241,7 +4243,7 @@
             function summarizeActionResult(result) {
                 if (!result) return '';
                 if (result.type === 'asset_metadata_rebuild') return `${result.rom_count || 0} ROM entries, ${result.bios_count || 0} BIOS files, ${result.artwork_count || 0} artwork rows uploaded`;
-                if (result.type === 'pixen_update') return result.status === 'started' ? `PixeN update started${result.pid ? ` (pid ${result.pid})` : ''}` : `PixeN update ${result.status || 'returned'}`;
+                if (result.type === 'pixen_update') return result.status === 'started' ? `PixN update started${result.pid ? ` (pid ${result.pid})` : ''}` : `PixN update ${result.status || 'returned'}`;
                 if (result.type === 'emulator_list_refresh') return result.emulationstation_restarted ? 'EmulationStation restart issued' : 'EmulationStation restart was not issued';
                 if (result.type === 'screen_mode') return `Screen mode set to ${result.mode || 'unknown'}${result.emulationstation_restarted ? '; EmulationStation restarted' : ''}`;
                 if (result.type === 'audio_volume') return result.muted ? 'Volume muted' : `Volume set to ${result.level}%`;
